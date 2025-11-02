@@ -13,6 +13,13 @@ import { doc, getDoc, setDoc } from "firebase/firestore";
 
 type Role = "student" | "tutor" | "admin";
 
+/**
+ * Force this page to render dynamically instead of being prerendered at build time.
+ * This prevents Next.js 16 from trying to statically render /auth and complaining
+ * about useSearchParams() needing a Suspense boundary.
+ */
+export const dynamic = "force-dynamic";
+
 export default function AuthPage() {
   const router = useRouter();
   const qp = useSearchParams();
@@ -41,6 +48,11 @@ export default function AuthPage() {
     if (!snap.exists()) {
       console.warn("User doc missing in Firestore for uid", uid);
     }
+    // You COULD route based on role here if you want in future.
+    // Example:
+    //   const role = snap.data()?.role;
+    //   if (role === "tutor") router.replace("/room?name=Tutor&adminOverride=false");
+    // For now, go home:
     router.replace("/");
   }
 
