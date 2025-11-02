@@ -1,3 +1,4 @@
+// src/app/room/page.tsx
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
@@ -46,7 +47,7 @@ function isTutorId(id: string | undefined | null) {
 }
 function isObserverId(id: string | undefined | null) {
   if (!id) return false;
-  return id.toLowerCase().startsWith("observer");
+  return id.toLowerCase().startsWith("admin");
 }
 
 export default function RoomPage() {
@@ -57,34 +58,15 @@ export default function RoomPage() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [lockedRole, setLockedRole] = useState<Role | null>(null);
 
-  // query params
+  // which LiveKit room are we joining?
+  // for tutors: we read their own roomId from Firestore
+  // for students: we read ?roomId= from URL (the tutor’s room)
+  // for admin: they can also pass ?roomId=...
+  const initialRoomFromQP = qp("roomId", "") || "";
+  const [sessionRoomId, setSessionRoomId] = useState<string>(initialRoomFromQP);
+
+  // Query params
   const desiredName = qp("name", "Student");
-  const forcedRoomId = qp("roomId", ""); // e.g. "room_test_1"
-  const adminOverride = qp("adminOverride", "") === "true";
-
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        router.replace("/auth?from=/room");
-        return;
-      }
-      setAuthed(true);
-      setUserEmail(user.email ?? null);
-
-      const snap = await getDoc(doc(db, "users", user.uid));
-      const data = snap.exists() ? snap.data() : null;
-      const r = (data?.role as Role) || "student";
-
-      // if admin + adminOverride=true, lock them as "admin"
-      if (r === "admin" && adminOverride) {
-        setLockedRole("admin");
-      } else {
-        setLockedRole(r);
-      }
-    });
-
-    return unsub;
-  }, [router, adminOverride]);
 
   // ---------- BASIC UI STATE ----------
   const [mounted, setMounted] = useState(false);
@@ -184,13 +166,51 @@ export default function RoomPage() {
     viewBoardForRef.current = viewBoardFor;
   }, [viewBoardFor]);
 
+  // ---------- On mount: Firebase auth -> figure out role + roomId ----------
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        // not logged in, bounce to /auth and remember they wanted /room
+        router.replace("/auth?from=/room");
+        return;
+      }
+
+      setAuthed(true);
+      setUserEmail(user.email ?? null);
+
+      // get the user doc so we know their role and (if tutor) their roomId
+      const snap = await getDoc(doc(db, "users", user.uid));
+      const data = snap.exists() ? snap.data() : null;
+
+      const r = (data?.role as Role) || "student";
+      setLockedRole(r);
+
+      // tutor's personal roomId lives in their user doc
+      const tutorRoomIdFromDoc =
+        typeof data?.roomId === "string" ? data.roomId : "";
+
+      // priority:
+      // 1. if this user is a tutor -> use their own tutorRoomIdFromDoc
+      // 2. else if URL had ?roomId=... -> use that (student/admin joining)
+      // 3. else leave whatever we had (probably "")
+      setSessionRoomId((prev) => {
+        if (r === "tutor" && tutorRoomIdFromDoc) return tutorRoomIdFromDoc;
+        if (prev) return prev;
+        return initialRoomFromQP;
+      });
+    });
+
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router]);
+
   // ---------- BOARD PERMISSION LOGIC ----------
   function canCurrentUserEditBoard(): boolean {
     const me = myIdRef.current;
     const target = viewBoardForRef.current;
     if (!me || !target || !lockedRole) return false;
 
-    // admin (observer) => read-only
+    // admin observers: read-only
     if (lockedRole === "admin") {
       return false;
     }
@@ -525,7 +545,6 @@ export default function RoomPage() {
     if (existing) {
       existing.muted = false;
       existing.autoplay = true;
-      // existing.playsInline = true; // not valid on HTMLAudioElement
       existing.play().catch(() => {});
       return;
     }
@@ -534,7 +553,6 @@ export default function RoomPage() {
     el.style.display = "none";
     el.autoplay = true;
     el.muted = false;
-    // el.playsInline = true; // not valid on HTMLAudioElement
     document.body.appendChild(el);
     el.play().catch(() => {});
     map.set(sid, el);
@@ -593,7 +611,6 @@ export default function RoomPage() {
       if (existing) {
         existing.muted = false;
         existing.autoplay = true;
-        // existing.playsInline = true; // not valid on HTMLAudioElement
         existing.play().catch(() => {});
         delete pendingTutorSubsRef.current[studentId];
         return;
@@ -603,7 +620,6 @@ export default function RoomPage() {
       el.style.display = "none";
       el.autoplay = true;
       el.muted = false;
-      // el.playsInline = true; // not valid on HTMLAudioElement
       document.body.appendChild(el);
       el.play().catch(() => {});
       map.set(sid, el);
@@ -816,22 +832,25 @@ export default function RoomPage() {
 
   // ---------- CONNECT TO LIVEKIT ----------
   useEffect(() => {
-    if (!authed || !lockedRole) return;
+    // don't try until:
+    // - we're logged in (authed)
+    // - we know our role
+    // - we know which roomId to join
+    if (!authed || !lockedRole || !sessionRoomId) return;
+
     let room: Room | null = null;
 
     (async () => {
       try {
         const idToken = await auth.currentUser?.getIdToken();
 
-        // when adminOverride=true, admin will request a specific room
+        // role we *tell* server: admin joins as "admin"
+        // server will still enforce who can join what
         const bodyPayload: any = {
-          // ask server for "tutor-like" grant so LK lets us subscribe
-          role: lockedRole === "admin" ? "tutor" : lockedRole,
+          role: lockedRole,
           name: desiredName,
+          roomId: sessionRoomId,
         };
-        if (adminOverride && lockedRole === "admin" && forcedRoomId) {
-          bodyPayload.forcedRoomId = forcedRoomId;
-        }
 
         const res = await fetch("/api/rooms/token", {
           method: "POST",
@@ -864,7 +883,7 @@ export default function RoomPage() {
 
         await room.connect(signalingUrl, token);
 
-        // enforce 1 tutor (but let admin join even if tutor is there)
+        // tutor can't collide with another tutor in the same room
         if (lockedRole === "tutor") {
           const otherTutor = Array.from(
             room.remoteParticipants.values()
@@ -878,8 +897,8 @@ export default function RoomPage() {
           }
         }
 
+        // admin observer defaults to cam/mic OFF
         if (lockedRole === "admin") {
-          // silent admin observer
           try {
             await room.localParticipant.setMicrophoneEnabled(false);
           } catch {}
@@ -887,7 +906,7 @@ export default function RoomPage() {
             await room.localParticipant.setCameraEnabled(false);
           } catch {}
         } else {
-          // tutor / student: default mic+cam on
+          // tutor / student: default mic+cam ON
           try {
             await room.localParticipant.setMicrophoneEnabled(true);
           } catch (err) {
@@ -904,7 +923,7 @@ export default function RoomPage() {
 
         if (lockedRole === "admin") {
           setStatus(
-            `Observer mode in ${forcedRoomId || "session"} (mic/cam off)`
+            `Observer mode in ${sessionRoomId} (mic/cam off)`
           );
         } else if (lockedRole === "tutor") {
           setStatus(
@@ -948,8 +967,7 @@ export default function RoomPage() {
     return () => {
       room?.disconnect();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authed, lockedRole, forcedRoomId, adminOverride, desiredName]);
+  }, [authed, lockedRole, sessionRoomId, desiredName, resizeCanvas]);
 
   // ---------- ROSTER / TILES ----------
   function refreshTilesAndRoster(room: Room) {
@@ -957,9 +975,7 @@ export default function RoomPage() {
 
     const lp = room.localParticipant;
 
-    // (ADMIN HIDE LOCAL TILE)
-    // For students/tutors, we include their own local tile.
-    // For admin/observer, we DO NOT add our own tile at all.
+    // ADMIN: we hide local tile
     if (lockedRole !== "admin") {
       const localVideoPubs: LocalTrackPublication[] = [];
       for (const pub of lp.trackPublications.values()) {
@@ -1025,7 +1041,7 @@ export default function RoomPage() {
 
     setTiles(nextTiles);
 
-    // list of students for tutor/admin
+    // onlyStudents helps tutor/admin layout
     const onlyStudents = roster
       .filter((r) => isStudentId(r.id))
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -1081,14 +1097,13 @@ export default function RoomPage() {
       ordered.push(...misc);
       setOrderedTiles(ordered);
     } else if (lockedRole === "admin") {
-      // admin gets tutor view:
-      // tutor first, then all students, then misc
+      // admin gets tutor-style view:
       const orderedTutorView: typeof tiles = [];
       if (tutorTile) orderedTutorView.push(tutorTile);
       orderedTutorView.push(...studentTiles);
       orderedTutorView.push(...misc);
 
-      // safety filter in case *somehow* our observer tile snuck in
+      // safety filter in case somehow our observer tile sneaks in
       const filtered = orderedTutorView.filter((t) => {
         if (t.pid === meId && isObserverId(t.pid)) return false;
         return true;
@@ -1097,7 +1112,7 @@ export default function RoomPage() {
       setOrderedTiles(filtered);
     } else {
       // student view:
-      // tutor first, then me (student), no other students
+      // tutor first, then me, no other students
       const ordered: typeof tiles = [];
       if (tutorTile) ordered.push(tutorTile);
       if (myTile && myTile !== tutorTile) ordered.push(myTile);
@@ -1283,7 +1298,6 @@ export default function RoomPage() {
         amStudent && t.pid === meId && isStudentId(t.pid);
 
       // tutor Hear/Speak buttons for each student
-      // admin does NOT see or affect audio perms
       if (isRemoteStudentTile && !amAdmin) {
         const ctlRow = document.createElement("div");
         ctlRow.style.display = "flex";
@@ -1339,8 +1353,7 @@ export default function RoomPage() {
         wrap.appendChild(ctlRow);
       }
 
-      // student pills (Hear / Speak) for themselves only
-      // admin shouldn't see this either
+      // student permission pills for themselves
       if (isMeStudentTile && !amAdmin) {
         const indicatorRow = document.createElement("div");
         indicatorRow.style.display = "flex";
@@ -1440,7 +1453,7 @@ export default function RoomPage() {
     router.replace("/auth");
   }
 
-  // ---------- ROOT RENDER ----------
+  // ---------- RENDER ----------
   const roleLabel = mounted
     ? lockedRole === "tutor"
       ? "Tutor"
