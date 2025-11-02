@@ -1,7 +1,7 @@
 // src/app/auth/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import {
@@ -13,9 +13,20 @@ import { doc, getDoc, setDoc } from "firebase/firestore";
 
 type Role = "student" | "tutor" | "admin";
 
-export default function AuthPage() {
+// Force this page to be rendered dynamically (not prerendered at build).
+export const dynamic = "force-dynamic";
+
+/**
+ * Actual auth UI.
+ * We keep this in its own component because it uses useSearchParams().
+ * We'll wrap THIS component in <Suspense /> in the default export below,
+ * which satisfies Next's requirement.
+ */
+function AuthInner() {
   const router = useRouter();
   const qp = useSearchParams();
+
+  // we don't actually use `from` yet for redirect, but we might later
   const from = qp.get("from") || "/";
 
   const [email, setEmail] = useState("");
@@ -27,7 +38,7 @@ export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState("");
 
-  // Already logged in? Bounce them to home (not /room or /admin here).
+  // If already logged in, bounce to "/"
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) return;
@@ -37,12 +48,12 @@ export default function AuthPage() {
   }, [router]);
 
   async function finishAuthAndRouteHome(uid: string) {
-    // This just does a sanity read for now.
+    // sanity read
     const snap = await getDoc(doc(db, "users", uid));
     if (!snap.exists()) {
       console.warn("User doc missing in Firestore for uid", uid);
     }
-    // For now still route to "/", we'll add /dashboard later.
+    // could change this to /dashboard later
     router.replace("/");
   }
 
@@ -52,11 +63,11 @@ export default function AuthPage() {
 
     try {
       if (isLogin) {
-        // ---------- LOGIN ----------
+        // LOGIN
         const res = await signInWithEmailAndPassword(auth, email, password);
         await finishAuthAndRouteHome(res.user.uid);
       } else {
-        // ---------- SIGNUP ----------
+        // SIGNUP
         const res = await createUserWithEmailAndPassword(
           auth,
           email,
@@ -66,17 +77,13 @@ export default function AuthPage() {
         const uid = res.user.uid;
         const now = Date.now();
 
-        // A displayName we can reuse later in UI / queue, etc.
-        // You might let users customize later, but for now email prefix is OK.
+        // nice displayName for tutor cards / queue later
         const displayName =
           email.split("@")[0] ||
           (signupRole === "tutor" ? "Tutor" : "Student");
 
-        // If tutor, we are going to assign:
-        // - roomId: stable room name tied to this tutor
-        // - status: "offline" initially
-        // - subjects: empty for now (we'll let tutor edit later)
         if (signupRole === "tutor") {
+          // tutor profile document
           const roomId = `tutor_${uid}`;
 
           await setDoc(doc(db, "users", uid), {
@@ -84,12 +91,12 @@ export default function AuthPage() {
             role: signupRole, // "tutor"
             createdAt: now,
             displayName,
-            roomId, // <- important for routing later
+            roomId, // unique stable ID for their room
             status: "offline", // "offline" | "available" | "busy"
-            subjects: [], // array of strings
+            subjects: [], // later: ["Math 10C", "Math 20-1"] etc.
           });
         } else if (signupRole === "admin") {
-          // Admins don't get a room, but store displayName anyway
+          // admin / observer
           await setDoc(doc(db, "users", uid), {
             email,
             role: signupRole, // "admin"
@@ -97,7 +104,7 @@ export default function AuthPage() {
             displayName,
           });
         } else {
-          // Student
+          // student
           await setDoc(doc(db, "users", uid), {
             email,
             role: signupRole, // "student"
@@ -113,7 +120,7 @@ export default function AuthPage() {
     }
   }
 
-  // shared button styles (kept consistent with homepage visual language)
+  // shared button styles
   const ghostButtonStyle: React.CSSProperties = {
     padding: "8px 12px",
     borderRadius: 8,
@@ -385,8 +392,8 @@ export default function AuthPage() {
                   }}
                 >
                   • Students join tutoring sessions. <br />
-                  • Tutors run live math help rooms (1 student at a time, plus a
-                  queue). <br />
+                  • Tutors run live math help rooms (1 student at a time,
+                  plus a queue). <br />
                   • Admin accounts observe sessions.
                 </div>
               </div>
@@ -557,5 +564,18 @@ export default function AuthPage() {
         </div>
       </footer>
     </main>
+  );
+}
+
+/**
+ * Default export: wrap AuthInner in Suspense.
+ * This satisfies Next.js's "useSearchParams must be inside a Suspense boundary"
+ * rule for client components during build.
+ */
+export default function AuthPage() {
+  return (
+    <Suspense fallback={<div style={{ color: "#fff" }}>Loading…</div>}>
+      <AuthInner />
+    </Suspense>
   );
 }
