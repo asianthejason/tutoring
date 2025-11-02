@@ -4,14 +4,18 @@ import { getAuth } from "firebase-admin/auth";
 import { ensureFirebaseAdmin, adminDb } from "@/lib/firebaseAdmin";
 import { AccessToken } from "livekit-server-sdk";
 
-export const runtime = "nodejs"; // required so Vercel doesn't try to run this on edge
+// Force this to be a fully dynamic Node function, no caching, no edge.
+// This is CRITICAL for Vercel so it doesn't freeze an old version.
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function POST(req: NextRequest) {
   try {
-    // 1. make sure firebase-admin is initialized
+    // 1. Init firebase-admin (safe to call more than once)
     ensureFirebaseAdmin();
 
-    // 2. verify Firebase ID token from Authorization header
+    // 2. Verify caller's Firebase ID token from Authorization header
     const authHeader = req.headers.get("authorization") || "";
     const m = authHeader.match(/^Bearer (.+)$/i);
     if (!m) {
@@ -24,10 +28,10 @@ export async function POST(req: NextRequest) {
     const decoded = await getAuth().verifyIdToken(idToken);
     const uid = decoded.uid;
 
-    // 3. read body from client
+    // 3. Get JSON body from client
     const body = await req.json();
-    const requestedRole = body.role;        // "tutor" / "student" / "admin" (claimed)
-    const requestedRoomId = body.roomId;    // room the client wants to join
+    const requestedRole = body.role;      // what client *claims*: "tutor" | "student" | "admin"
+    const requestedRoomId = body.roomId;  // which LiveKit room they want to join
     const displayName = body.name || "User";
 
     if (!requestedRoomId) {
@@ -37,24 +41,24 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 4. look up the real user doc in Firestore Admin
-    const snap = await adminDb().collection("users").doc(uid).get();
-    if (!snap.exists) {
+    // 4. Load the authoritative user record from Firestore (admin SDK)
+    const userSnap = await adminDb().collection("users").doc(uid).get();
+    if (!userSnap.exists) {
       return NextResponse.json(
         { error: "user record not found" },
         { status: 403 }
       );
     }
 
-    const userData = snap.data() || {};
-    const actualRole = userData.role;           // trusted role
-    const tutorRoomId = userData.roomId || "";  // tutor's own room if they are a tutor
+    const userData = userSnap.data() || {};
+    const actualRole = userData.role;          // trusted role
+    const tutorRoomId = userData.roomId || ""; // tutor's assigned room
 
-    // 5. permission logic
+    // 5. Enforce who can join what
     let finalRoomName = "";
 
     if (actualRole === "tutor") {
-      // tutors can *only* join their assigned room
+      // tutors: MUST join their own room
       if (!tutorRoomId) {
         return NextResponse.json(
           { error: "tutor missing roomId in Firestore" },
@@ -69,15 +73,14 @@ export async function POST(req: NextRequest) {
       }
       finalRoomName = tutorRoomId;
     } else if (actualRole === "admin") {
-      // admins can spectate any room
+      // admins: can spectate any room
       finalRoomName = requestedRoomId;
     } else {
-      // students (or anything else) can request any tutor's room for now
+      // students (or anything else): can attempt to join tutor's roomId
       finalRoomName = requestedRoomId;
     }
 
-    // 6. generate the LiveKit identity prefix:
-    // this is what shows up in the room
+    // 6. Build LiveKit identity that other peers see
     const livekitIdentity =
       actualRole === "tutor"
         ? `tutor_${uid}`
@@ -85,7 +88,7 @@ export async function POST(req: NextRequest) {
         ? `admin_${uid}`
         : `student_${uid}`;
 
-    // 7. build the LiveKit JWT
+    // 7. Sign a REAL JWT for LiveKit
     const apiKey = process.env.LIVEKIT_API_KEY!;
     const apiSecret = process.env.LIVEKIT_API_SECRET!;
     const lkUrl = process.env.LIVEKIT_URL!; // e.g. wss://tutoring-web-jobakhvf.livekit.cloud
@@ -97,6 +100,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // AccessToken from livekit-server-sdk
     const at = new AccessToken(apiKey, apiSecret, {
       identity: livekitIdentity,
       name: displayName,
@@ -105,18 +109,18 @@ export async function POST(req: NextRequest) {
     at.addGrant({
       room: finalRoomName,
       roomJoin: true,
-      canPublish: actualRole !== "admin", // admins observe only
+      canPublish: actualRole !== "admin", // admin is view-only
       canSubscribe: true,
     });
 
-    // THIS MUST BE A STRING
+    // IMPORTANT: this must be a string, not an object
     const jwt = await at.toJwt();
 
-    // 8. success response
+    // 8. Return token + info back to the browser
     return NextResponse.json({
-      token: jwt,              // <- string JWT, not an object
-      url: lkUrl,              // <- wss://...
-      roomName: finalRoomName, // <- "tutor_<uid>" etc.
+      token: jwt,              // <-- pure string now
+      url: lkUrl,              // e.g. wss://tutoring-web-jobakhvf.livekit.cloud
+      roomName: finalRoomName, // e.g. tutor_<uid>
       identity: livekitIdentity,
       role: actualRole,
       name: displayName,
