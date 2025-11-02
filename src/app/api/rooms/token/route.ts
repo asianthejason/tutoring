@@ -1,193 +1,167 @@
 // src/app/api/rooms/token/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { AccessToken } from "livekit-server-sdk";
-import admin from "firebase-admin";
+import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
 
-/** ---------- Config ---------- */
+// Force Node runtime (admin SDK can't run on edge)
+export const runtime = "nodejs";
+
+// Single shared room for now
 const ROOM_NAME = "default-classroom";
-
-/** ---------- Firebase Admin init (optional in dev) ---------- */
-let adminReady = false;
-
-function initFirebaseAdmin() {
-  if (admin.apps.length) {
-    adminReady = true;
-    return;
-  }
-
-  try {
-    const svcJson = process.env.FIREBASE_SERVICE_ACCOUNT;
-    if (svcJson) {
-      const creds = JSON.parse(svcJson);
-      admin.initializeApp({
-        credential: admin.credential.cert(creds as admin.ServiceAccount),
-      });
-      adminReady = true;
-      return;
-    }
-
-    const projectId = process.env.FIREBASE_PROJECT_ID;
-    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-    let privateKey = process.env.FIREBASE_PRIVATE_KEY;
-    if (privateKey && privateKey.includes("\\n")) {
-      privateKey = privateKey.replace(/\\n/g, "\n");
-    }
-
-    if (projectId && clientEmail && privateKey) {
-      admin.initializeApp({
-        credential: admin.credential.cert({
-          projectId,
-          clientEmail,
-          privateKey,
-        }),
-      });
-      adminReady = true;
-      return;
-    }
-
-    // no creds in dev is allowed
-    adminReady = false;
-  } catch {
-    adminReady = false;
-  }
-}
-initFirebaseAdmin();
 
 function json(status: number, payload: any) {
   return NextResponse.json(payload, { status });
 }
 
-// helper to make a tiny random suffix for anon dev identities
+// tiny random suffix for anonymous fallback (shouldn't really happen in prod)
 function randSuffix(len = 6) {
-  // simple base36 random
   return Math.random().toString(36).slice(2, 2 + len);
 }
 
 export async function POST(req: NextRequest) {
   try {
-    // read body from client
+    // ----------- 1. Read request body -----------
     const body = await req.json().catch(() => ({}));
-    const claimedRole = (body?.role as "tutor" | "student") || "student";
-    const claimedName = (body?.name as string) || "User";
 
-    // ---------- verify Firebase ID token (if configured) ----------
-    let userUid = "anon";
-    let userEmail = "user@example.com";
-    let userRole: "tutor" | "student" = claimedRole; // fallback to claimed role unless we can prove otherwise
+    // client sends what it *wants* to be called in the UI
+    const claimedDisplayName = (body?.name as string) || "User";
 
+    // client sends a role in the body, but we will override with Firestore role
+    // after verifying auth. (For admins we later override permissions.)
+    const claimedRole =
+      (body?.role as "tutor" | "student" | "admin") || "student";
+
+    // If admin is joining as silent observer they may also send forcedRoomId,
+    // but right now we still just use ROOM_NAME. You can wire this later.
+    // const forcedRoomId = body?.forcedRoomId as string | undefined;
+
+    // ----------- 2. Auth header / Firebase verification -----------
     const authHeader = req.headers.get("authorization") || "";
     const idToken = authHeader.startsWith("Bearer ")
       ? authHeader.slice(7)
       : undefined;
 
-    if (adminReady && idToken) {
+    if (!idToken) {
+      // In production we REQUIRE a Firebase user so nobody random can mint tokens.
+      if (process.env.NODE_ENV === "production") {
+        return json(401, { error: "Auth not configured" });
+      }
+      // In dev we let anon fall through.
+    }
+
+    let uid = "anon";
+    let userEmail = "user@example.com";
+    let finalRole: "tutor" | "student" | "admin" = claimedRole;
+
+    if (idToken) {
       try {
-        const decoded = await admin.auth().verifyIdToken(idToken);
-        userUid = decoded.uid || userUid;
+        // verify ID token with Admin SDK
+        const decoded = await adminAuth.verifyIdToken(idToken);
+        uid = decoded.uid || uid;
         userEmail = decoded.email || userEmail;
 
-        // pull role from Firestore if available, override claimedRole
-        try {
-          const snap = await admin
-            .firestore()
-            .collection("users")
-            .doc(userUid)
-            .get();
-          if (snap.exists) {
-            const data = snap.data() || {};
-            const storedRole = data.role;
-            if (storedRole === "tutor" || storedRole === "student") {
-              userRole = storedRole;
-            }
+        // grab user doc for role
+        const snap = await adminDb.collection("users").doc(uid).get();
+        if (snap.exists) {
+          const data = snap.data() || {};
+          const storedRole = data.role;
+          if (
+            storedRole === "tutor" ||
+            storedRole === "student" ||
+            storedRole === "admin"
+          ) {
+            finalRole = storedRole;
           }
-        } catch (err) {
-          // if Firestore fails, fall back to claimedRole in dev,
-          // but in production we still at least have uid-based identity.
-          console.warn("[token] firestore role lookup failed:", (err as Error).message);
         }
-      } catch (e) {
+      } catch (err: any) {
+        // In production, fail hard if token is invalid
         if (process.env.NODE_ENV === "production") {
           return json(401, { error: "Invalid auth token" });
         }
         console.warn(
-          "[token] Firebase token verify failed, continuing (dev):",
-          (e as Error).message
+          "[/api/rooms/token] verifyIdToken failed (dev fallback):",
+          err?.message
         );
-        // dev mode: userUid may still be "anon"
       }
-    } else if (process.env.NODE_ENV === "production") {
-      // In prod, no adminReady or no idToken = reject.
+    }
+
+    // If we're still "anon" in production, that's not allowed.
+    if (process.env.NODE_ENV === "production" && uid === "anon") {
       return json(401, { error: "Auth not configured" });
     }
 
-    // ---------- LiveKit env ----------
-    // NOTE: you had these named LIVEKIT_URL / etc.
-    // In your .env.local you used LIVEKIT_WS_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
-    // Let's support both so we don't break your setup.
-    const lkUrl =
+    // ----------- 3. LiveKit env vars -----------
+    const livekitUrl =
       process.env.LIVEKIT_URL ||
-      process.env.LIVEKIT_WS_URL ||
+      process.env.LIVEKIT_WS_URL || // fallback if you ever used a different name locally
       "";
-    const lkKey = process.env.LIVEKIT_API_KEY;
-    const lkSecret = process.env.LIVEKIT_API_SECRET;
+    const livekitKey = process.env.LIVEKIT_API_KEY;
+    const livekitSecret = process.env.LIVEKIT_API_SECRET;
 
-    if (!lkUrl || !lkKey || !lkSecret) {
+    if (!livekitUrl || !livekitKey || !livekitSecret) {
       return json(500, { error: "LiveKit env not configured" });
     }
 
-    // ---------- identity construction ----------
-    // We MUST guarantee uniqueness or LiveKit will kick the first student.
+    // ----------- 4. Build identity & display name -----------
+    // identity must start with tutor_, student_, or observer_ so your
+    // front-end helpers isTutorId/isStudentId/isObserverId work.
     //
-    // Case A: we have a verified uid (not "anon")
-    //   identity = `${userRole}-${userUid}`
-    //
-    // Case B: dev / anon
-    //   identity = `${userRole}-anon-${randSuffix()}`
-    //
-    // This ensures two different browser sessions don't collide.
+    // We ALSO need uniqueness: if 2 students use same browser we don't want collisions.
+    // We'll suffix anon, but stable UID in prod.
+    let baseIdentityPrefix = "student";
+    if (finalRole === "tutor") baseIdentityPrefix = "tutor";
+    if (finalRole === "admin") baseIdentityPrefix = "observer";
+
     let identity: string;
-    if (userUid !== "anon") {
-      identity = `${userRole}-${userUid}`;
+    if (uid !== "anon") {
+      identity = `${baseIdentityPrefix}_${uid}`;
     } else {
-      identity = `${userRole}-anon-${randSuffix()}`;
+      identity = `${baseIdentityPrefix}_anon_${randSuffix()}`;
     }
 
-    // display name (what shows under the tile)
-    // prefer: firestore/email or fallback
+    // name shown under the camera tile
     const displayName =
-      claimedName ||
-      userEmail.split("@")[0] ||
-      userRole ||
+      claimedDisplayName ||
+      (userEmail ? userEmail.split("@")[0] : "") ||
+      finalRole ||
       "User";
 
-    // ---------- build LiveKit access token ----------
-    const at = new AccessToken(lkKey, lkSecret, {
+    // ----------- 5. Build LiveKit access token -----------
+    const at = new AccessToken(livekitKey, livekitSecret, {
       identity,
       name: displayName,
+      // ttl can be added if you want, e.g. { ttl: 3600 }
     });
 
-    // allow them to join/publish/subscribe in ROOM_NAME
+    // Permissions:
+    // - tutor & student can publish mic/cam
+    // - admin ("observer") cannot publish mic/cam, but can still subscribe
+    // - everyone canPublishData so whiteboard sync works
+    const canPublishAV = finalRole !== "admin";
+
     at.addGrant({
       roomJoin: true,
       room: ROOM_NAME,
-      canPublish: true,
+      canPublish: canPublishAV,
       canSubscribe: true,
-      canPublishData: true, // allow DataChannel messages (floor / ack)
+      canPublishData: true,
     });
 
-    const token = await at.toJwt();
+    const lkToken = at.toJwt();
 
-    // ---------- respond ----------
+    // ----------- 6. Respond to client -----------
     return json(200, {
-      token,
-      url: lkUrl,
+      token: lkToken,
+      url: livekitUrl,
       roomName: ROOM_NAME,
       identity,
-      role: userRole,
+      role: finalRole,
       name: displayName,
     });
-  } catch (e: any) {
-    console.error("[token] error:", e);
-    return json(500, { error: e?.message || "Token creation failed" });
+  } catch (err: any) {
+    console.error("[/api/rooms/token] error:", err);
+    return json(500, {
+      error: err?.message || "Token creation failed",
+    });
   }
 }
