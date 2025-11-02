@@ -525,7 +525,7 @@ export default function RoomPage() {
     if (existing) {
       existing.muted = false;
       existing.autoplay = true;
-      existing.playsInline = true;
+      // existing.playsInline = true; // not valid on HTMLAudioElement
       existing.play().catch(() => {});
       return;
     }
@@ -534,7 +534,7 @@ export default function RoomPage() {
     el.style.display = "none";
     el.autoplay = true;
     el.muted = false;
-    el.playsInline = true;
+    // el.playsInline = true; // not valid on HTMLAudioElement
     document.body.appendChild(el);
     el.play().catch(() => {});
     map.set(sid, el);
@@ -593,7 +593,7 @@ export default function RoomPage() {
       if (existing) {
         existing.muted = false;
         existing.autoplay = true;
-        existing.playsInline = true;
+        // existing.playsInline = true; // not valid on HTMLAudioElement
         existing.play().catch(() => {});
         delete pendingTutorSubsRef.current[studentId];
         return;
@@ -603,7 +603,7 @@ export default function RoomPage() {
       el.style.display = "none";
       el.autoplay = true;
       el.muted = false;
-      el.playsInline = true;
+      // el.playsInline = true; // not valid on HTMLAudioElement
       document.body.appendChild(el);
       el.play().catch(() => {});
       map.set(sid, el);
@@ -1060,10 +1060,10 @@ export default function RoomPage() {
     // pick a tutor tile
     let tutorTile: typeof tiles[number] | undefined;
     if (lockedRole === "tutor") {
-        tutorTile =
-          tutorTiles.find((tt) => tt.isLocal) || tutorTiles[0] || undefined;
+      tutorTile =
+        tutorTiles.find((tt) => tt.isLocal) || tutorTiles[0] || undefined;
     } else {
-        tutorTile = tutorTiles[0];
+      tutorTile = tutorTiles[0];
     }
 
     const myTile = myTiles[0];
