@@ -1,7 +1,7 @@
 // src/app/auth/page.tsx
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import {
@@ -13,13 +13,7 @@ import { doc, getDoc, setDoc } from "firebase/firestore";
 
 type Role = "student" | "tutor" | "admin";
 
-/**
- * Force this page to be dynamic so Next.js doesn't try to fully prerender it.
- * (We ALSO wrap the hook usage in <Suspense> because Next 16 still insists.)
- */
-export const dynamic = "force-dynamic";
-
-function AuthPageInner() {
+export default function AuthPage() {
   const router = useRouter();
   const qp = useSearchParams();
   const from = qp.get("from") || "/";
@@ -43,11 +37,12 @@ function AuthPageInner() {
   }, [router]);
 
   async function finishAuthAndRouteHome(uid: string) {
+    // This just does a sanity read for now.
     const snap = await getDoc(doc(db, "users", uid));
     if (!snap.exists()) {
       console.warn("User doc missing in Firestore for uid", uid);
     }
-    // (Future: could route them based on role in Firestore)
+    // For now still route to "/", we'll add /dashboard later.
     router.replace("/");
   }
 
@@ -57,25 +52,61 @@ function AuthPageInner() {
 
     try {
       if (isLogin) {
-        // login
+        // ---------- LOGIN ----------
         const res = await signInWithEmailAndPassword(auth, email, password);
         await finishAuthAndRouteHome(res.user.uid);
       } else {
-        // signup
+        // ---------- SIGNUP ----------
         const res = await createUserWithEmailAndPassword(
           auth,
           email,
           password
         );
 
-        // store fixed role in Firestore (cannot be changed later without manual intervention)
-        await setDoc(doc(db, "users", res.user.uid), {
-          email,
-          role: signupRole,
-          createdAt: Date.now(),
-        });
+        const uid = res.user.uid;
+        const now = Date.now();
 
-        await finishAuthAndRouteHome(res.user.uid);
+        // A displayName we can reuse later in UI / queue, etc.
+        // You might let users customize later, but for now email prefix is OK.
+        const displayName =
+          email.split("@")[0] ||
+          (signupRole === "tutor" ? "Tutor" : "Student");
+
+        // If tutor, we are going to assign:
+        // - roomId: stable room name tied to this tutor
+        // - status: "offline" initially
+        // - subjects: empty for now (we'll let tutor edit later)
+        if (signupRole === "tutor") {
+          const roomId = `tutor_${uid}`;
+
+          await setDoc(doc(db, "users", uid), {
+            email,
+            role: signupRole, // "tutor"
+            createdAt: now,
+            displayName,
+            roomId, // <- important for routing later
+            status: "offline", // "offline" | "available" | "busy"
+            subjects: [], // array of strings
+          });
+        } else if (signupRole === "admin") {
+          // Admins don't get a room, but store displayName anyway
+          await setDoc(doc(db, "users", uid), {
+            email,
+            role: signupRole, // "admin"
+            createdAt: now,
+            displayName,
+          });
+        } else {
+          // Student
+          await setDoc(doc(db, "users", uid), {
+            email,
+            role: signupRole, // "student"
+            createdAt: now,
+            displayName,
+          });
+        }
+
+        await finishAuthAndRouteHome(uid);
       }
     } catch (err: any) {
       setError(err.message || "Auth failed");
@@ -161,10 +192,7 @@ function AuthPageInner() {
 
         {/* Back home */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button
-            style={ghostButtonStyle}
-            onClick={() => router.push("/")}
-          >
+          <button style={ghostButtonStyle} onClick={() => router.push("/")}>
             ← Back Home
           </button>
         </div>
@@ -357,8 +385,9 @@ function AuthPageInner() {
                   }}
                 >
                   • Students join tutoring sessions. <br />
-                  • Tutors run live math help for 1–2 students. <br />
-                  • Admin accounts manage billing, sessions, and user access.
+                  • Tutors run live math help rooms (1 student at a time, plus a
+                  queue). <br />
+                  • Admin accounts observe sessions.
                 </div>
               </div>
             )}
@@ -528,33 +557,5 @@ function AuthPageInner() {
         </div>
       </footer>
     </main>
-  );
-}
-
-// Default export wraps the inner page in Suspense so Next.js 16
-// stops complaining about useSearchParams() during build.
-export default function AuthPage() {
-  return (
-    <Suspense
-      fallback={
-        <main
-          style={{
-            minHeight: "100vh",
-            width: "100vw",
-            backgroundColor: "#0f0f0f",
-            color: "#fff",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontFamily: "system-ui, sans-serif",
-            fontSize: 14,
-          }}
-        >
-          Loading…
-        </main>
-      }
-    >
-      <AuthPageInner />
-    </Suspense>
   );
 }
