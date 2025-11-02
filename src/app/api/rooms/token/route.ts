@@ -4,7 +4,6 @@ import { getAuth } from "firebase-admin/auth";
 import { adminDb, ensureFirebaseAdmin } from "@/lib/firebaseAdmin";
 import { AccessToken } from "livekit-server-sdk";
 
-// IMPORTANT: force Node runtime so we can use livekit-server-sdk safely
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
