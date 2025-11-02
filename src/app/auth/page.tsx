@@ -1,7 +1,7 @@
 // src/app/auth/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import {
@@ -14,13 +14,12 @@ import { doc, getDoc, setDoc } from "firebase/firestore";
 type Role = "student" | "tutor" | "admin";
 
 /**
- * Force this page to render dynamically instead of being prerendered at build time.
- * This prevents Next.js 16 from trying to statically render /auth and complaining
- * about useSearchParams() needing a Suspense boundary.
+ * Force this page to be dynamic so Next.js doesn't try to fully prerender it.
+ * (We ALSO wrap the hook usage in <Suspense> because Next 16 still insists.)
  */
 export const dynamic = "force-dynamic";
 
-export default function AuthPage() {
+function AuthPageInner() {
   const router = useRouter();
   const qp = useSearchParams();
   const from = qp.get("from") || "/";
@@ -48,11 +47,7 @@ export default function AuthPage() {
     if (!snap.exists()) {
       console.warn("User doc missing in Firestore for uid", uid);
     }
-    // You COULD route based on role here if you want in future.
-    // Example:
-    //   const role = snap.data()?.role;
-    //   if (role === "tutor") router.replace("/room?name=Tutor&adminOverride=false");
-    // For now, go home:
+    // (Future: could route them based on role in Firestore)
     router.replace("/");
   }
 
@@ -67,7 +62,11 @@ export default function AuthPage() {
         await finishAuthAndRouteHome(res.user.uid);
       } else {
         // signup
-        const res = await createUserWithEmailAndPassword(auth, email, password);
+        const res = await createUserWithEmailAndPassword(
+          auth,
+          email,
+          password
+        );
 
         // store fixed role in Firestore (cannot be changed later without manual intervention)
         await setDoc(doc(db, "users", res.user.uid), {
@@ -529,5 +528,33 @@ export default function AuthPage() {
         </div>
       </footer>
     </main>
+  );
+}
+
+// Default export wraps the inner page in Suspense so Next.js 16
+// stops complaining about useSearchParams() during build.
+export default function AuthPage() {
+  return (
+    <Suspense
+      fallback={
+        <main
+          style={{
+            minHeight: "100vh",
+            width: "100vw",
+            backgroundColor: "#0f0f0f",
+            color: "#fff",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontFamily: "system-ui, sans-serif",
+            fontSize: 14,
+          }}
+        >
+          Loading…
+        </main>
+      }
+    >
+      <AuthPageInner />
+    </Suspense>
   );
 }
