@@ -1,38 +1,67 @@
 // src/lib/firebaseAdmin.ts
-import admin from "firebase-admin";
+import { cert, getApps, initializeApp, type App } from "firebase-admin/app";
+import { getAuth as getAdminAuth } from "firebase-admin/auth";
+import { getFirestore } from "firebase-admin/firestore";
 
-let initialized = false;
+// We’ll hold the initialized admin app & db in module scope
+let adminApp: App | null = null;
+let _db: FirebaseFirestore.Firestore | null = null;
 
+/**
+ * ensureFirebaseAdmin()
+ * - Safe to call multiple times.
+ * - Makes sure firebase-admin is initialized with service credentials.
+ */
 export function ensureFirebaseAdmin() {
-  if (!initialized) {
-    // IMPORTANT: Vercel env var for FIREBASE_PRIVATE_KEY is usually stored with literal "\n"
-    // so we need to fix those into real newlines.
+  if (adminApp && _db) {
+    return;
+  }
+
+  if (getApps().length === 0) {
+    // These must exist in Vercel env
+    const projectId = process.env.FIREBASE_PROJECT_ID;
+    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
     const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
 
-    if (!process.env.FIREBASE_PROJECT_ID) {
-      throw new Error("Missing FIREBASE_PROJECT_ID env");
-    }
-    if (!process.env.FIREBASE_CLIENT_EMAIL) {
-      throw new Error("Missing FIREBASE_CLIENT_EMAIL env");
-    }
-    if (!privateKey) {
-      throw new Error("Missing FIREBASE_PRIVATE_KEY env");
+    if (!projectId || !clientEmail || !privateKey) {
+      throw new Error("Missing Firebase admin env vars");
     }
 
-    admin.initializeApp({
-      credential: admin.credential.cert({
-        projectId: process.env.FIREBASE_PROJECT_ID,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    adminApp = initializeApp({
+      credential: cert({
+        projectId,
+        clientEmail,
         privateKey,
       }),
     });
-
-    initialized = true;
+  } else {
+    adminApp = getApps()[0]!;
   }
+
+  _db = getFirestore(adminApp);
 }
 
-// convenience export for Firestore admin
+/**
+ * adminDb
+ * - After ensureFirebaseAdmin() has run, this is your Firestore Admin DB instance.
+ */
 export function adminDb() {
-  ensureFirebaseAdmin();
-  return admin.firestore();
+  if (!_db) {
+    throw new Error(
+      "adminDb() called before ensureFirebaseAdmin(). Call ensureFirebaseAdmin() first."
+    );
+  }
+  return _db;
+}
+
+/**
+ * adminAuth (optional helper if you ever need it elsewhere)
+ */
+export function adminAuth() {
+  if (!adminApp) {
+    throw new Error(
+      "adminAuth() called before ensureFirebaseAdmin(). Call ensureFirebaseAdmin() first."
+    );
+  }
+  return getAdminAuth(adminApp);
 }
