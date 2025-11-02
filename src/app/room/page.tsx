@@ -11,7 +11,7 @@ import {
   Participant,
   LocalParticipant,
 } from "livekit-client";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
@@ -32,11 +32,6 @@ type StrokePoint = { x: number; y: number };
 type Stroke = { color: string; size: number; points: StrokePoint[] };
 
 // ---------- helpers ----------
-function qp(name: string, fallback?: string) {
-  if (typeof window === "undefined") return fallback;
-  return new URLSearchParams(window.location.search).get(name) ?? fallback;
-}
-
 function isStudentId(id: string | undefined | null) {
   if (!id) return false;
   return id.toLowerCase().startsWith("student");
@@ -47,11 +42,20 @@ function isTutorId(id: string | undefined | null) {
 }
 function isObserverId(id: string | undefined | null) {
   if (!id) return false;
-  return id.toLowerCase().startsWith("admin");
+  return (
+    id.toLowerCase().startsWith("admin") ||
+    id.toLowerCase().startsWith("observer")
+  );
 }
 
 export default function RoomPage() {
   const router = useRouter();
+  const sp = useSearchParams();
+
+  // pull name and requested roomId from query params
+  const desiredName = sp.get("name") ?? "Student";
+  const forcedRoomIdQP = sp.get("roomId") ?? "";
+  const adminOverride = (sp.get("adminOverride") ?? "") === "true";
 
   // ---------- AUTH / ROLE ----------
   const [authed, setAuthed] = useState(false);
@@ -59,14 +63,9 @@ export default function RoomPage() {
   const [lockedRole, setLockedRole] = useState<Role | null>(null);
 
   // which LiveKit room are we joining?
-  // for tutors: we read their own roomId from Firestore
-  // for students: we read ?roomId= from URL (the tutor’s room)
-  // for admin: they can also pass ?roomId=...
-  const initialRoomFromQP = qp("roomId", "") || "";
-  const [sessionRoomId, setSessionRoomId] = useState<string>(initialRoomFromQP);
-
-  // Query params
-  const desiredName = qp("name", "Student");
+  // tutors: join their own roomId from Firestore
+  // students/admin: join ?roomId= from URL
+  const [sessionRoomId, setSessionRoomId] = useState<string>("");
 
   // ---------- BASIC UI STATE ----------
   const [mounted, setMounted] = useState(false);
@@ -182,7 +181,11 @@ export default function RoomPage() {
       const snap = await getDoc(doc(db, "users", user.uid));
       const data = snap.exists() ? snap.data() : null;
 
-      const r = (data?.role as Role) || "student";
+      let r = (data?.role as Role) || "student";
+      if (r === "admin" && adminOverride) {
+        // allow viewing as admin/observer if adminOverride=true
+        r = "admin";
+      }
       setLockedRole(r);
 
       // tutor's personal roomId lives in their user doc
@@ -192,17 +195,21 @@ export default function RoomPage() {
       // priority:
       // 1. if this user is a tutor -> use their own tutorRoomIdFromDoc
       // 2. else if URL had ?roomId=... -> use that (student/admin joining)
-      // 3. else leave whatever we had (probably "")
-      setSessionRoomId((prev) => {
-        if (r === "tutor" && tutorRoomIdFromDoc) return tutorRoomIdFromDoc;
-        if (prev) return prev;
-        return initialRoomFromQP;
-      });
+      // 3. else fallback "default-classroom" (safety)
+      const finalRoom =
+        r === "tutor" && tutorRoomIdFromDoc
+          ? tutorRoomIdFromDoc
+          : forcedRoomIdQP
+          ? forcedRoomIdQP
+          : tutorRoomIdFromDoc
+          ? tutorRoomIdFromDoc
+          : "default-classroom";
+
+      setSessionRoomId(finalRoom);
     });
 
     return unsub;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [router]);
+  }, [router, forcedRoomIdQP, adminOverride]);
 
   // ---------- BOARD PERMISSION LOGIC ----------
   function canCurrentUserEditBoard(): boolean {
@@ -639,7 +646,10 @@ export default function RoomPage() {
 
     for (const pub of p.audioTrackPublications.values()) {
       if (pub.source === Track.Source.Microphone) {
-        handleTutorListenToStudent(pub as RemoteTrackPublication, studentId);
+        handleTutorListenToStudent(
+          pub as RemoteTrackPublication,
+          studentId
+        );
       }
     }
   }
@@ -844,8 +854,7 @@ export default function RoomPage() {
       try {
         const idToken = await auth.currentUser?.getIdToken();
 
-        // role we *tell* server: admin joins as "admin"
-        // server will still enforce who can join what
+        // send role, displayName, and the roomId we plan to join
         const bodyPayload: any = {
           role: lockedRole,
           name: desiredName,
@@ -877,7 +886,10 @@ export default function RoomPage() {
         setViewBoardFor(identity);
         viewBoardForRef.current = identity;
 
-        const signalingUrl = `${url}/${roomName}`;
+        // Build full signaling URL: <LIVEKIT_URL>/<roomName>
+        // We intentionally do NOT double slash.
+        const signalingUrl = `${url.replace(/\/+$/, "")}/${roomName}`;
+
         room = new Room();
         roomRef.current = room;
 
@@ -935,6 +947,7 @@ export default function RoomPage() {
           );
         }
 
+        // init permission maps
         if (lockedRole === "student") {
           hearMapRef.current[identity] = false;
           speakMapRef.current[identity] = false;
@@ -946,12 +959,12 @@ export default function RoomPage() {
           setCanHearTutor({});
           setCanSpeakToTutor({});
         }
-        // admin: no perms UI
 
+        // wire up events & roster
         wireEvents(room);
         refreshTilesAndRoster(room);
 
-        // broadcast my board to current peers
+        // broadcast my board to everyone already in room
         broadcastFullBoard(identity);
 
         setTimeout(() => {
@@ -1086,7 +1099,7 @@ export default function RoomPage() {
     studentTiles.sort((a, b) => a.name.localeCompare(b.name));
 
     if (lockedRole === "tutor") {
-      // tutor layout
+      // tutor layout: me first (prefer local), then students, then misc
       const ordered: typeof tiles = [];
       if (myTile) {
         ordered.push(myTile);
@@ -1103,7 +1116,7 @@ export default function RoomPage() {
       orderedTutorView.push(...studentTiles);
       orderedTutorView.push(...misc);
 
-      // safety filter in case somehow our observer tile sneaks in
+      // hide admin's own tile if it sneaks in
       const filtered = orderedTutorView.filter((t) => {
         if (t.pid === meId && isObserverId(t.pid)) return false;
         return true;
@@ -1111,8 +1124,7 @@ export default function RoomPage() {
 
       setOrderedTiles(filtered);
     } else {
-      // student view:
-      // tutor first, then me, no other students
+      // student view: tutor first, then me (no other students)
       const ordered: typeof tiles = [];
       if (tutorTile) ordered.push(tutorTile);
       if (myTile && myTile !== tutorTile) ordered.push(myTile);
@@ -1678,7 +1690,7 @@ export default function RoomPage() {
                   lineHeight: 1.2,
                 }}
               >
-                {editable ? "You can draw" : "Read only"}
+                {canCurrentUserEditBoard() ? "You can draw" : "Read only"}
               </span>
             </div>
 
