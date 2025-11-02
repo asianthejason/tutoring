@@ -4,207 +4,190 @@ import { getAuth } from "firebase-admin/auth";
 import { adminDb, ensureFirebaseAdmin } from "@/lib/firebaseAdmin";
 import { AccessToken } from "livekit-server-sdk";
 
+//
+// IMPORTANT: Next.js App Router API routes run on Edge by default in 16.x.
+// livekit-server-sdk uses Node APIs -> force Node runtime.
+//
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
 
 type Role = "tutor" | "student" | "admin";
 
-function isTutorRole(r: string | undefined | null) {
-  return r === "tutor";
-}
-function isStudentRole(r: string | undefined | null) {
-  return r === "student";
-}
-function isAdminRole(r: string | undefined | null) {
-  return r === "admin";
+// helper: read JSON body safely
+async function readBody(req: NextRequest) {
+  try {
+    return await req.json();
+  } catch {
+    return {};
+  }
 }
 
 export async function POST(req: NextRequest) {
   try {
-    await ensureFirebaseAdmin();
+    ensureFirebaseAdmin();
 
-    // --- 1. auth check ---
-    // Grab Firebase ID token from Authorization header
+    const body = await readBody(req);
+    const claimedRoleRaw = (body.role as string) || "";
+    const displayNameRaw = (body.name as string) || "User";
+    const requestedRoomId = (body.roomId as string) || "";
+
+    if (!requestedRoomId) {
+      return NextResponse.json(
+        { error: "Missing roomId" },
+        { status: 400 }
+      );
+    }
+
+    // verify Firebase auth token from client
     const authHeader = req.headers.get("authorization") || "";
     const match = authHeader.match(/^Bearer (.+)$/i);
-    const idToken = match?.[1];
-
+    const idToken = match ? match[1] : null;
     if (!idToken) {
-      console.error("[/api/rooms/token] missing bearer token");
       return NextResponse.json(
-        { error: "unauthenticated" },
+        { error: "Missing Firebase ID token" },
         { status: 401 }
       );
     }
 
-    let decoded;
-    try {
-      decoded = await getAuth().verifyIdToken(idToken);
-    } catch (err) {
-      console.error("[/api/rooms/token] verifyIdToken failed:", err);
+    const decoded = await getAuth().verifyIdToken(idToken, true).catch(() => null);
+    if (!decoded || !decoded.uid) {
       return NextResponse.json(
-        { error: "invalid id token" },
+        { error: "Invalid Firebase ID token" },
         { status: 401 }
       );
     }
 
     const uid = decoded.uid;
-    const email = decoded.email || "(no email)";
-    console.log("[/api/rooms/token] caller uid/email:", uid, email);
 
-    // --- 2. read request body ---
-    const body = await req.json();
-    const requestedRole = (body.role || "student") as Role;
-    const requestedRoomId = String(body.roomId || "");
-    const requestedName =
-      typeof body.name === "string" && body.name.trim() !== ""
-        ? body.name.trim()
-        : "Student";
+    // look up this user in Firestore admin side
+    const userSnap = await adminDb()
+      .collection("users")
+      .doc(uid)
+      .get();
 
-    if (!requestedRoomId) {
-      console.error("[/api/rooms/token] missing roomId");
-      return NextResponse.json(
-        { error: "missing roomId" },
-        { status: 400 }
-      );
-    }
-
-    // --- 3. look up this user in Firestore to confirm real role + tutor room ---
-    const userSnap = await adminDb.collection("users").doc(uid).get();
     if (!userSnap.exists) {
-      console.error("[/api/rooms/token] user doc not found:", uid);
       return NextResponse.json(
-        { error: "user profile missing" },
+        { error: "No Firestore user doc for this uid" },
         { status: 403 }
       );
     }
+
     const userData = userSnap.data() || {};
-    const dbRole = (userData.role || "student") as Role;
-    const tutorRoomIdFromDb =
-      typeof userData.roomId === "string" ? userData.roomId : "";
+    const trueRole: Role =
+      userData.role === "tutor"
+        ? "tutor"
+        : userData.role === "admin"
+        ? "admin"
+        : "student";
 
-    console.log("[/api/rooms/token] dbRole:", dbRole);
-    console.log("[/api/rooms/token] tutorRoomIdFromDb:", tutorRoomIdFromDb);
-    console.log("[/api/rooms/token] requestedRoomId:", requestedRoomId);
-
-    // --- 4. enforce access rules ---
-    // tutor can ONLY join their own roomId from Firestore
-    // student can ONLY join some tutor's room (passed as requestedRoomId)
-    // admin can join any roomId
-    let finalRole: Role = dbRole;
-    if (isAdminRole(dbRole)) {
-      finalRole = "admin";
-    } else if (isTutorRole(dbRole)) {
-      finalRole = "tutor";
-    } else {
-      finalRole = "student";
-    }
-
-    // pick the actual room this caller is allowed to join
-    let finalRoomId = requestedRoomId;
-    if (finalRole === "tutor") {
-      if (!tutorRoomIdFromDb) {
-        console.error("[/api/rooms/token] tutor missing roomId in db");
-        return NextResponse.json(
-          { error: "tutor roomId not set" },
-          { status: 403 }
-        );
-      }
-      if (tutorRoomIdFromDb !== requestedRoomId) {
-        // student tried to spoof a different room? block.
-        console.warn(
-          "[/api/rooms/token] tutor attempted to join different room, forcing their own."
-        );
-      }
-      finalRoomId = tutorRoomIdFromDb;
-    } else if (finalRole === "student") {
-      // students must NOT invent random rooms like "admin"
-      // Just basic sanity: require that requestedRoomId starts with "tutor_"
-      if (!requestedRoomId.toLowerCase().startsWith("tutor_")) {
-        console.error(
-          "[/api/rooms/token] student tried non-tutor room:",
-          requestedRoomId
-        );
-        return NextResponse.json(
-          { error: "forbidden room for student" },
-          { status: 403 }
-        );
-      }
-    } else if (finalRole === "admin") {
-      // admin can go anywhere, we trust. keep finalRoomId as requestedRoomId
-    }
-
-    // --- 5. build identity string for LiveKit ---
-    // we'll prefix by role so the front-end can tell who's who
-    // e.g. tutor_abc123, student_something, admin_observer
-    let identity = "";
-    if (finalRole === "tutor") {
-      identity = `tutor_${uid}`;
-    } else if (finalRole === "student") {
-      identity = `student_${uid}`;
-    } else {
-      identity = `admin_${uid}`;
-    }
-
-    // --- 6. sign LiveKit access token ---
-    const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
-    const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
-    const LIVEKIT_URL = process.env.LIVEKIT_URL;
-
-    if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET || !LIVEKIT_URL) {
-      console.error("[/api/rooms/token] LiveKit env missing", {
-        hasKey: !!LIVEKIT_API_KEY,
-        hasSecret: !!LIVEKIT_API_SECRET,
-        hasUrl: !!LIVEKIT_URL,
-      });
+    // enforce that client cannot lie about role
+    if (claimedRoleRaw && claimedRoleRaw !== trueRole) {
       return NextResponse.json(
-        { error: "Server misconfigured (LiveKit env)" },
+        { error: "Role mismatch" },
+        { status: 403 }
+      );
+    }
+
+    // figure out what room they're ALLOWED to join
+    // tutors: only their own personal roomId
+    // students & admins: whatever ?roomId they passed in
+    let allowedRoomId = requestedRoomId;
+
+    if (trueRole === "tutor") {
+      const tutorRoomIdFromDoc = typeof userData.roomId === "string" ? userData.roomId : "";
+      if (!tutorRoomIdFromDoc) {
+        return NextResponse.json(
+          { error: "Tutor has no roomId on record" },
+          { status: 403 }
+        );
+      }
+      if (tutorRoomIdFromDoc !== requestedRoomId) {
+        return NextResponse.json(
+          { error: "Tutor trying to join a different room" },
+          { status: 403 }
+        );
+      }
+
+      allowedRoomId = tutorRoomIdFromDoc;
+    }
+
+    // build LiveKit identity
+    // MUST be stable and unique inside the room
+    // tutor_xxx..., student_xxx..., admin_xxx...
+    let lkIdentity = "";
+    if (trueRole === "tutor") {
+      lkIdentity = `tutor_${uid}`;
+    } else if (trueRole === "admin") {
+      lkIdentity = `admin_${uid}`;
+    } else {
+      // student
+      lkIdentity = `student_${uid}`;
+    }
+
+    // OPTIONAL nice display name
+    const lkName =
+      userData.displayName ||
+      displayNameRaw ||
+      (trueRole === "tutor" ? "Tutor" : "Student");
+
+    // mint LiveKit server token
+    // we require LIVEKIT_API_KEY / LIVEKIT_API_SECRET / LIVEKIT_URL in env
+    const apiKey = process.env.LIVEKIT_API_KEY;
+    const apiSecret = process.env.LIVEKIT_API_SECRET;
+    const lkUrl = process.env.LIVEKIT_URL;
+
+    if (!apiKey || !apiSecret || !lkUrl) {
+      return NextResponse.json(
+        { error: "LiveKit env vars missing" },
         { status: 500 }
       );
     }
 
-    // create a token for THIS room only
-    const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
-      identity,
-      name: requestedName,
-      // ttl / metadata can go here if you want later
+    // create access token scoped to this room
+    const at = new AccessToken(apiKey, apiSecret, {
+      identity: lkIdentity,
+      name: lkName,
     });
 
-    // grant publish/subscribe permissions based on role
-    at.addGrant({
-      room: finalRoomId,
-      roomJoin: true,
-      canPublish:
-        finalRole === "tutor" || finalRole === "student" ? true : false,
-      canSubscribe: true,
-      canPublishData: true,
-    });
+    // permissions:
+    // - tutor: can publish & subscribe
+    // - student: can publish (cam/mic) & subscribe
+    // - admin: subscribe only, no publish
+    if (trueRole === "admin") {
+      at.addGrant({
+        roomJoin: true,
+        room: allowedRoomId,
+        canPublish: false,
+        canSubscribe: true,
+      });
+    } else {
+      at.addGrant({
+        roomJoin: true,
+        room: allowedRoomId,
+        canPublish: true,
+        canSubscribe: true,
+      });
+    }
 
     const jwt = await at.toJwt();
 
-    console.log("[/api/rooms/token] SUCCESS", {
-      finalRole,
-      identity,
-      finalRoomId,
-      livekitUrl: LIVEKIT_URL,
-    });
-
-    // --- 7. send data back to client ---
+    // Return info the client needs to connect:
+    // client will connect to `${lkUrl}/${allowedRoomId}`
+    // and pass `jwt` as the access token.
     return NextResponse.json(
       {
         token: jwt,
-        url: LIVEKIT_URL, // front-end will append /<roomName>
-        roomName: finalRoomId,
-        identity,
-        role: finalRole,
-        name: requestedName,
+        url: lkUrl,
+        roomName: allowedRoomId,
+        identity: lkIdentity,
+        role: trueRole,
+        name: lkName,
       },
       { status: 200 }
     );
   } catch (err: any) {
-    console.error("[/api/rooms/token] UNCAUGHT ERROR:", err);
+    console.error("[/api/rooms/token] ERROR", err);
     return NextResponse.json(
-      { error: err?.message || "server error" },
+      { error: err?.message || "internal error" },
       { status: 500 }
     );
   }
