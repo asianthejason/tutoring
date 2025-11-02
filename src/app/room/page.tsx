@@ -11,10 +11,12 @@ import {
   Participant,
   LocalParticipant,
 } from "livekit-client";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
+
+export const dynamic = "force-dynamic";
 
 type Role = "tutor" | "student" | "admin";
 
@@ -50,12 +52,25 @@ function isObserverId(id: string | undefined | null) {
 
 export default function RoomPage() {
   const router = useRouter();
-  const sp = useSearchParams();
 
-  // pull name and requested roomId from query params
-  const desiredName = sp.get("name") ?? "Student";
-  const forcedRoomIdQP = sp.get("roomId") ?? "";
-  const adminOverride = (sp.get("adminOverride") ?? "") === "true";
+  // ---------- QUERY PARAM STATE (we'll fill this after mount) ----------
+  const [desiredName, setDesiredName] = useState<string>("Student");
+  const [forcedRoomIdQP, setForcedRoomIdQP] = useState<string>("");
+  const [adminOverride, setAdminOverride] = useState<boolean>(false);
+
+  // read query params on the client only
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const search = new URLSearchParams(window.location.search);
+
+    const qName = search.get("name") ?? "Student";
+    const qRoomId = search.get("roomId") ?? "";
+    const qAdminOverride = (search.get("adminOverride") ?? "") === "true";
+
+    setDesiredName(qName);
+    setForcedRoomIdQP(qRoomId);
+    setAdminOverride(qAdminOverride);
+  }, []);
 
   // ---------- AUTH / ROLE ----------
   const [authed, setAuthed] = useState(false);
@@ -165,11 +180,16 @@ export default function RoomPage() {
     viewBoardForRef.current = viewBoardFor;
   }, [viewBoardFor]);
 
-  // ---------- On mount: Firebase auth -> figure out role + roomId ----------
+  // ---------- On mount & when query params are known: Firebase auth -> figure out role + roomId ----------
   useEffect(() => {
+    // don't run this effect until we've parsed query params,
+    // because we might depend on forcedRoomIdQP/adminOverride.
+    // We know query params have been parsed once desiredName state
+    // has been set from the first effect above.
+    if (!mounted) return;
+
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) {
-        // not logged in, bounce to /auth and remember they wanted /room
         router.replace("/auth?from=/room");
         return;
       }
@@ -177,25 +197,23 @@ export default function RoomPage() {
       setAuthed(true);
       setUserEmail(user.email ?? null);
 
-      // get the user doc so we know their role and (if tutor) their roomId
       const snap = await getDoc(doc(db, "users", user.uid));
       const data = snap.exists() ? snap.data() : null;
 
       let r = (data?.role as Role) || "student";
       if (r === "admin" && adminOverride) {
-        // allow viewing as admin/observer if adminOverride=true
         r = "admin";
       }
       setLockedRole(r);
 
-      // tutor's personal roomId lives in their user doc
       const tutorRoomIdFromDoc =
         typeof data?.roomId === "string" ? data.roomId : "";
 
       // priority:
-      // 1. if this user is a tutor -> use their own tutorRoomIdFromDoc
-      // 2. else if URL had ?roomId=... -> use that (student/admin joining)
-      // 3. else fallback "default-classroom" (safety)
+      // 1. tutor joins their own room from Firestore
+      // 2. else use ?roomId=
+      // 3. else fallback to tutor's room if it exists
+      // 4. else "default-classroom"
       const finalRoom =
         r === "tutor" && tutorRoomIdFromDoc
           ? tutorRoomIdFromDoc
@@ -209,7 +227,7 @@ export default function RoomPage() {
     });
 
     return unsub;
-  }, [router, forcedRoomIdQP, adminOverride]);
+  }, [router, mounted, forcedRoomIdQP, adminOverride]);
 
   // ---------- BOARD PERMISSION LOGIC ----------
   function canCurrentUserEditBoard(): boolean {
@@ -227,7 +245,7 @@ export default function RoomPage() {
     }
 
     if (lockedRole === "student") {
-      return me === target; // students only on their own board
+      return me === target; // students only draw on their own board
     }
 
     return false;
@@ -297,7 +315,6 @@ export default function RoomPage() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // background
     ctx.fillStyle = "#111";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -423,7 +440,6 @@ export default function RoomPage() {
 
     currentStrokeRef.current.points.push({ x, y });
 
-    // preview stroke
     const curViewedId = viewBoardForRef.current;
     const tempStrokes = [
       ...(boardsRef.current[curViewedId] || []),
@@ -451,10 +467,8 @@ export default function RoomPage() {
     const finalStroke = currentStrokeRef.current;
     currentStrokeRef.current = null;
 
-    // commit locally
     appendStroke(targetBoardId, finalStroke);
 
-    // broadcast stroke
     const msg = {
       type: "wbstroke",
       author: targetBoardId,
@@ -748,7 +762,7 @@ export default function RoomPage() {
 
         ensureBoard(p.identity || "");
 
-        // send my history to newcomers
+        // send my board history to newcomers
         broadcastFullBoard(myIdRef.current);
 
         if (lockedRole === "student") {
@@ -805,7 +819,7 @@ export default function RoomPage() {
           }
         }
 
-        // admin (observer): no audio
+        // admin (observer): force no audio
         if (lockedRole === "admin") {
           if (pub.kind === "audio") {
             const rpub = pub as RemoteTrackPublication;
@@ -843,6 +857,7 @@ export default function RoomPage() {
   // ---------- CONNECT TO LIVEKIT ----------
   useEffect(() => {
     // don't try until:
+    // - we have query params (desiredName set)
     // - we're logged in (authed)
     // - we know our role
     // - we know which roomId to join
@@ -854,7 +869,6 @@ export default function RoomPage() {
       try {
         const idToken = await auth.currentUser?.getIdToken();
 
-        // send role, displayName, and the roomId we plan to join
         const bodyPayload: any = {
           role: lockedRole,
           name: desiredName,
@@ -887,7 +901,7 @@ export default function RoomPage() {
         viewBoardForRef.current = identity;
 
         // Build full signaling URL: <LIVEKIT_URL>/<roomName>
-        // We intentionally do NOT double slash.
+        // (avoid trailing slashes)
         const signalingUrl = `${url.replace(/\/+$/, "")}/${roomName}`;
 
         room = new Room();
@@ -1690,7 +1704,7 @@ export default function RoomPage() {
                   lineHeight: 1.2,
                 }}
               >
-                {canCurrentUserEditBoard() ? "You can draw" : "Read only"}
+                {editable ? "You can draw" : "Read only"}
               </span>
             </div>
 
