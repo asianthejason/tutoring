@@ -1,4 +1,3 @@
-// src/app/room/page.tsx
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
@@ -28,11 +27,9 @@ type TokenResp = {
   name: string;
 };
 
-// whiteboard stroke types
 type StrokePoint = { x: number; y: number };
 type Stroke = { color: string; size: number; points: StrokePoint[] };
 
-// ---------- helpers ----------
 function qp(name: string, fallback?: string) {
   if (typeof window === "undefined") return fallback;
   return new URLSearchParams(window.location.search).get(name) ?? fallback;
@@ -54,21 +51,15 @@ function isObserverId(id: string | undefined | null) {
 export default function RoomPage() {
   const router = useRouter();
 
-  // ---------- AUTH / ROLE ----------
   const [authed, setAuthed] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [lockedRole, setLockedRole] = useState<Role | null>(null);
 
-  // which LiveKit room are we joining?
-  // for tutors: we'll read their own roomId from Firestore
-  // for students/admin: we'll read ?roomId= from URL (the tutor’s room)
   const initialRoomFromQP = qp("roomId", "") || "";
   const [sessionRoomId, setSessionRoomId] = useState<string>(initialRoomFromQP);
 
-  // Query params
   const desiredName = qp("name", "Student");
 
-  // ---------- BASIC UI STATE ----------
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
@@ -78,10 +69,8 @@ export default function RoomPage() {
   const [myIdentity, setMyIdentity] = useState<string>("");
   const myIdRef = useRef<string>("");
 
-  // tutor list of students (for tutor/admin layout logic)
   const [students, setStudents] = useState<{ id: string; name: string }[]>([]);
 
-  // raw LK tiles (camera feeds etc.)
   const [tiles, setTiles] = useState<
     {
       id: string;
@@ -93,56 +82,44 @@ export default function RoomPage() {
     }[]
   >([]);
 
-  // ordered tiles that get rendered
   const [orderedTiles, setOrderedTiles] = useState<typeof tiles>([]);
 
-  // tile size for layout
   const [tileSize, setTileSize] = useState<{ w: number; h: number }>({
     w: 360,
     h: 270,
   });
 
-  // active speakers
   const [activeSpeakers, setActiveSpeakers] = useState<Set<string>>(
     new Set()
   );
 
-  // local fallback mic/cam booleans
   const [camOn, setCamOn] = useState(false);
   const [micOn, setMicOn] = useState(false);
 
-  // student only: do I currently hear tutor?
   const [iCanHearTutor, setICanHearTutor] = useState<boolean | null>(null);
 
-  // tutor permissions
   const [canHearTutor, setCanHearTutor] = useState<Record<string, boolean>>({});
   const [canSpeakToTutor, setCanSpeakToTutor] = useState<
     Record<string, boolean>
   >({});
 
-  // refs with current perms
   const hearMapRef = useRef<Record<string, boolean>>({});
   const speakMapRef = useRef<Record<string, boolean>>({});
 
-  // bump version so DOM re-renders pills/colors
   const [permVersion, setPermVersion] = useState(0);
 
-  // tutor: pending subscriptions for student mics
   const pendingTutorSubsRef = useRef<Record<string, boolean>>({});
 
-  // refs to DOM / livekit
   const mainRef = useRef<HTMLElement>(null);
-  const videoColumnRef = useRef<HTMLDivElement>(null); // left column
-  const containerRef = useRef<HTMLDivElement>(null); // feeds wrapper
+  const videoColumnRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const roomRef = useRef<Room | null>(null);
 
-  // audio elements
   const tutorAudioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const studentAudioElsRef = useRef<Map<string, HTMLAudioElement>>(
     new Map()
   );
 
-  // ---------- WHITEBOARD STATE ----------
   const [boards, setBoards] = useState<Record<string, Stroke[]>>({});
   const boardsRef = useRef<Record<string, Stroke[]>>({});
 
@@ -159,24 +136,30 @@ export default function RoomPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wbContainerRef = useRef<HTMLDivElement>(null);
 
-  // keep ref synced with state
   useEffect(() => {
     viewBoardForRef.current = viewBoardFor;
   }, [viewBoardFor]);
 
-  // ---------- On mount: Firebase auth -> figure out role + roomId ----------
+  // 🔥 FIXED: preserve full URL (including ?roomId=...) when forcing login
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) {
-        // not logged in, bounce to /auth and remember they wanted /room
-        router.replace("/auth?from=/room");
+        // user not signed in -> send them to /auth
+        // include the ENTIRE /room?... in the "from" param
+        const fullDest =
+          typeof window !== "undefined"
+            ? window.location.pathname + window.location.search
+            : "/room";
+
+        router.replace(
+          `/auth?from=${encodeURIComponent(fullDest)}`
+        );
         return;
       }
 
       setAuthed(true);
       setUserEmail(user.email ?? null);
 
-      // get the user doc so we know their role and (if tutor) their roomId
       const snap = await getDoc(doc(db, "users", user.uid));
       const data = snap.exists() ? snap.data() : null;
 
@@ -186,13 +169,10 @@ export default function RoomPage() {
       const tutorRoomIdFromDoc =
         typeof data?.roomId === "string" ? data.roomId : "";
 
-      // --- SMART ROOM LOGIC START ---
       if (r === "tutor") {
-        // tutor always uses their own personal roomId from Firestore
         if (tutorRoomIdFromDoc) {
           setSessionRoomId(tutorRoomIdFromDoc);
 
-          // mark heartbeat so student dashboard knows I'm live
           try {
             await updateDoc(doc(db, "users", user.uid), {
               lastActiveAt: Date.now(),
@@ -201,59 +181,40 @@ export default function RoomPage() {
             /* ignore */
           }
 
-          // if tutor hit /room with no ?roomId=... then rewrite URL
           if (!initialRoomFromQP && typeof window !== "undefined") {
-            const newUrl = `/room?roomId=${encodeURIComponent(
-              tutorRoomIdFromDoc
-            )}`;
-            router.replace(newUrl);
+            router.replace(
+              `/room?roomId=${encodeURIComponent(tutorRoomIdFromDoc)}`
+            );
           }
         } else {
-          // tutor with no roomId configured? send them back so they can fix profile
           router.replace("/dashboard/tutor");
           return;
         }
       } else {
         // student or admin
         if (!initialRoomFromQP) {
-          // if you didn't come with a tutor's roomId, you shouldn't be here.
+          // you made it here without a tutor room -> bye
           router.replace("/dashboard/student");
           return;
         }
-
-        // student has a ?roomId -> lock that in
         setSessionRoomId(initialRoomFromQP);
       }
-      // --- SMART ROOM LOGIC END ---
     });
 
     return unsub;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router, initialRoomFromQP]);
 
-  // ---------- BOARD PERMISSION LOGIC ----------
   function canCurrentUserEditBoard(): boolean {
     const me = myIdRef.current;
     const target = viewBoardForRef.current;
     if (!me || !target || !lockedRole) return false;
 
-    // admin observers: read-only
-    if (lockedRole === "admin") {
-      return false;
-    }
-
-    if (lockedRole === "tutor") {
-      return true; // tutors can draw anywhere
-    }
-
-    if (lockedRole === "student") {
-      return me === target; // students only on their own board
-    }
-
+    if (lockedRole === "admin") return false;
+    if (lockedRole === "tutor") return true;
+    if (lockedRole === "student") return me === target;
     return false;
   }
 
-  // ---------- PERMISSION HELPERS ----------
   function computeStudentHearing(meId: string) {
     return !!hearMapRef.current[meId];
   }
@@ -274,7 +235,6 @@ export default function RoomPage() {
     });
   }
 
-  // ---------- LOCAL DEVICE FLAGS ----------
   function syncLocalAVFlags(lp: LocalParticipant | undefined) {
     if (!lp) return;
     const micEnabled = Array.from(lp.audioTrackPublications.values()).some(
@@ -291,7 +251,7 @@ export default function RoomPage() {
     kind: "camera" | "mic" | "both"
   ): Promise<void> {
     if (!navigator.mediaDevices?.getUserMedia) {
-      console.warn("No getUserMedia (likely non-HTTPS).");
+      console.warn("No getUserMedia.");
       return;
     }
 
@@ -310,14 +270,12 @@ export default function RoomPage() {
     }
   }
 
-  // ---------- WHITEBOARD RENDER HELPERS ----------
   function redrawCanvas(strokes: Stroke[] | undefined) {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // background
     ctx.fillStyle = "#111";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -351,7 +309,6 @@ export default function RoomPage() {
 
   function appendStroke(authorId: string, stroke: Stroke) {
     ensureBoard(authorId);
-
     const existing = boardsRef.current[authorId] || [];
     const updated = [...existing, stroke];
     boardsRef.current[authorId] = updated;
@@ -403,10 +360,8 @@ export default function RoomPage() {
     return () => window.removeEventListener("resize", onWinResize);
   }, [resizeCanvas]);
 
-  // ---------- DRAWING INPUT ----------
   function getActiveColor() {
-    if (tool === "eraser") return "#111";
-    return strokeColor;
+    return tool === "eraser" ? "#111" : strokeColor;
   }
 
   function getActiveSize() {
@@ -415,7 +370,6 @@ export default function RoomPage() {
 
   function startDraw(e: React.PointerEvent<HTMLCanvasElement>) {
     if (!canCurrentUserEditBoard()) return;
-
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -443,7 +397,6 @@ export default function RoomPage() {
 
     currentStrokeRef.current.points.push({ x, y });
 
-    // preview stroke
     const curViewedId = viewBoardForRef.current;
     const tempStrokes = [
       ...(boardsRef.current[curViewedId] || []),
@@ -471,10 +424,8 @@ export default function RoomPage() {
     const finalStroke = currentStrokeRef.current;
     currentStrokeRef.current = null;
 
-    // commit locally
     appendStroke(targetBoardId, finalStroke);
 
-    // broadcast stroke
     const msg = {
       type: "wbstroke",
       author: targetBoardId,
@@ -540,7 +491,6 @@ export default function RoomPage() {
     } catch {}
   }
 
-  // ---------- AUDIO: student hears tutor ----------
   function getTutorMicPub(room: Room) {
     const tutor = Array.from(room.remoteParticipants.values()).find((p) =>
       isTutorId(p.identity)
@@ -607,14 +557,13 @@ export default function RoomPage() {
     setPermVersion((v) => v + 1);
   }
 
-  // ---------- AUDIO: tutor hears students ----------
   function handleTutorListenToStudent(
     pub: RemoteTrackPublication,
     studentId: string
   ) {
     if (lockedRole !== "tutor") return;
 
-    const allow = computeTutorHearingStudent(studentId);
+    const allow = !!speakMapRef.current[studentId];
     const map = studentAudioElsRef.current;
     const sid = pub.trackSid || pub.track?.sid || `student-${studentId}`;
     const existing = map.get(sid);
@@ -671,7 +620,6 @@ export default function RoomPage() {
     }
   }
 
-  // ---------- DATA CHANNEL: perms + whiteboard sync ----------
   async function handleDataMessage(msg: any) {
     const room = roomRef.current;
     if (!room || !msg) return;
@@ -683,14 +631,8 @@ export default function RoomPage() {
       speakMapRef.current[studentId] = !!speak;
 
       if (lockedRole === "tutor") {
-        setCanHearTutor((prev) => ({
-          ...prev,
-          [studentId]: !!hear,
-        }));
-        setCanSpeakToTutor((prev) => ({
-          ...prev,
-          [studentId]: !!speak,
-        }));
+        setCanHearTutor((prev) => ({ ...prev, [studentId]: !!hear }));
+        setCanSpeakToTutor((prev) => ({ ...prev, [studentId]: !!speak }));
         reapplyTutorForStudent(room, studentId);
         setPermVersion((v) => v + 1);
       }
@@ -757,15 +699,12 @@ export default function RoomPage() {
     }
   }
 
-  // ---------- LIVEKIT EVENTS ----------
   function wireEvents(room: Room) {
     room
       .on(RoomEvent.ParticipantConnected, (p: Participant) => {
         refreshTilesAndRoster(room);
 
         ensureBoard(p.identity || "");
-
-        // send my history to newcomers
         broadcastFullBoard(myIdRef.current);
 
         if (lockedRole === "student") {
@@ -799,7 +738,6 @@ export default function RoomPage() {
             applyStudentHearing(room);
           }
           if (pub.kind === "audio" && studentPid) {
-            // students never hear other students
             const rpub = pub as RemoteTrackPublication;
             try {
               rpub.setSubscribed(false);
@@ -812,7 +750,7 @@ export default function RoomPage() {
           if (pub.kind === "audio" && studentPid) {
             if (
               pendingTutorSubsRef.current[pid] ||
-              computeTutorHearingStudent(pid)
+              speakMapRef.current[pid]
             ) {
               handleTutorListenToStudent(
                 pub as RemoteTrackPublication,
@@ -822,7 +760,6 @@ export default function RoomPage() {
           }
         }
 
-        // admin (observer): no audio
         if (lockedRole === "admin") {
           if (pub.kind === "audio") {
             const rpub = pub as RemoteTrackPublication;
@@ -857,19 +794,10 @@ export default function RoomPage() {
       });
   }
 
-  // ---------- CONNECT TO LIVEKIT ----------
   useEffect(() => {
-    // don't try until:
-    // - we're logged in (authed)
-    // - we know our role
-    // - we know which roomId to join
     if (!authed || !lockedRole) return;
 
-    // Students/admin MUST have sessionRoomId.
-    // Tutors will have gotten sessionRoomId from Firestore above.
     if (!sessionRoomId) {
-      // We already redirected in the auth effect for student/admin with no roomId.
-      // Just show a friendly status and bail out so we don't try LiveKit.
       setStatus("Missing room link");
       setError(
         "Ask your tutor for their session link (it includes ?roomId=...)"
@@ -884,7 +812,6 @@ export default function RoomPage() {
         const idToken = await auth.currentUser?.getIdToken();
 
         const bodyPayload: any = {
-          // server will IGNORE role from client, purely cosmetic here
           role: lockedRole,
           name: desiredName,
           roomId: sessionRoomId,
@@ -910,19 +837,16 @@ export default function RoomPage() {
         setMyIdentity(identity);
         myIdRef.current = identity;
 
-        // init my board & select it
         ensureBoard(identity);
         setViewBoardFor(identity);
         viewBoardForRef.current = identity;
 
-        // connect to LiveKit
         const signalingUrl = `${url}/${roomName}`;
         room = new Room();
         roomRef.current = room;
 
         await room.connect(signalingUrl, token);
 
-        // tutor can't collide with another tutor in the same room
         if (lockedRole === "tutor") {
           const otherTutor = Array.from(
             room.remoteParticipants.values()
@@ -935,7 +859,6 @@ export default function RoomPage() {
             return;
           }
 
-          // tutor heartbeat while inside room to signal "live"
           try {
             const currentUser = auth.currentUser;
             if (currentUser) {
@@ -948,7 +871,6 @@ export default function RoomPage() {
           }
         }
 
-        // admin observer defaults to cam/mic OFF
         if (lockedRole === "admin") {
           try {
             await room.localParticipant.setMicrophoneEnabled(false);
@@ -957,7 +879,6 @@ export default function RoomPage() {
             await room.localParticipant.setCameraEnabled(false);
           } catch {}
         } else {
-          // tutor / student: default mic+cam ON
           try {
             await room.localParticipant.setMicrophoneEnabled(true);
           } catch (err) {
@@ -979,9 +900,7 @@ export default function RoomPage() {
             "Tutor connected. Use Hear/Speak. Click a feed to view its whiteboard."
           );
         } else {
-          setStatus(
-            "Connected as Student. Click feeds to view boards."
-          );
+          setStatus("Connected as Student. Click feeds to view boards.");
         }
 
         if (lockedRole === "student") {
@@ -995,12 +914,10 @@ export default function RoomPage() {
           setCanHearTutor({});
           setCanSpeakToTutor({});
         }
-        // admin: no perms UI
 
         wireEvents(room);
         refreshTilesAndRoster(room);
 
-        // broadcast my board to current peers
         broadcastFullBoard(identity);
 
         setTimeout(() => {
@@ -1016,16 +933,13 @@ export default function RoomPage() {
     return () => {
       room?.disconnect();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authed, lockedRole, sessionRoomId, desiredName, resizeCanvas]);
 
-  // ---------- ROSTER / TILES ----------
   function refreshTilesAndRoster(room: Room) {
     const nextTiles: typeof tiles = [];
 
     const lp = room.localParticipant;
 
-    // ADMIN: we hide local tile
     if (lockedRole !== "admin") {
       const localVideoPubs: LocalTrackPublication[] = [];
       for (const pub of lp.trackPublications.values()) {
@@ -1057,7 +971,6 @@ export default function RoomPage() {
       }
     }
 
-    // remote participants
     const roster: { id: string; name: string }[] = [];
     for (const p of room.remoteParticipants.values()) {
       roster.push({ id: p.identity, name: p.name ?? p.identity });
@@ -1091,14 +1004,12 @@ export default function RoomPage() {
 
     setTiles(nextTiles);
 
-    // onlyStudents helps tutor/admin layout
     const onlyStudents = roster
       .filter((r) => isStudentId(r.id))
       .sort((a, b) => a.name.localeCompare(b.name));
     setStudents(onlyStudents);
   }
 
-  // build orderedTiles with tutor layout for both tutor AND admin
   useEffect(() => {
     if (!lockedRole) return;
 
@@ -1111,7 +1022,6 @@ export default function RoomPage() {
 
     for (const t of tiles) {
       const pid = t.pid;
-
       if (isTutorId(pid)) {
         tutorTiles.push(t);
       } else if (pid === meId) {
@@ -1123,7 +1033,6 @@ export default function RoomPage() {
       }
     }
 
-    // pick a tutor tile
     let tutorTile: typeof tiles[number] | undefined;
     if (lockedRole === "tutor") {
       tutorTile =
@@ -1136,7 +1045,6 @@ export default function RoomPage() {
     studentTiles.sort((a, b) => a.name.localeCompare(b.name));
 
     if (lockedRole === "tutor") {
-      // tutor layout
       const ordered: typeof tiles = [];
       if (myTile) {
         ordered.push(myTile);
@@ -1147,13 +1055,11 @@ export default function RoomPage() {
       ordered.push(...misc);
       setOrderedTiles(ordered);
     } else if (lockedRole === "admin") {
-      // admin gets tutor-style view:
       const orderedTutorView: typeof tiles = [];
       if (tutorTile) orderedTutorView.push(tutorTile);
       orderedTutorView.push(...studentTiles);
       orderedTutorView.push(...misc);
 
-      // safety filter in case somehow our observer tile sneaks in
       const filtered = orderedTutorView.filter((t) => {
         if (t.pid === meId && isObserverId(t.pid)) return false;
         return true;
@@ -1161,8 +1067,6 @@ export default function RoomPage() {
 
       setOrderedTiles(filtered);
     } else {
-      // student view:
-      // tutor first, then me, no other students
       const ordered: typeof tiles = [];
       if (tutorTile) ordered.push(tutorTile);
       if (myTile && myTile !== tutorTile) ordered.push(myTile);
@@ -1170,7 +1074,6 @@ export default function RoomPage() {
     }
   }, [tiles, lockedRole, myIdentity]);
 
-  // ---------- RESPONSIVE TILE SIZE ----------
   const resizeCanvasAndTiles = useCallback(() => {
     if (!mainRef.current || !videoColumnRef.current) return;
 
@@ -1178,9 +1081,6 @@ export default function RoomPage() {
     const vw = window.innerWidth;
 
     const tileCount = orderedTiles.length || 1;
-    the_gap: {
-      /* just a readable block label in case we expand later */
-    }
     const gap = 12;
 
     const rectMain = mainRef.current.getBoundingClientRect();
@@ -1240,7 +1140,6 @@ export default function RoomPage() {
     return () => window.removeEventListener("resize", onResize);
   }, [resizeCanvasAndTiles]);
 
-  // ---------- RENDER VIDEO COLUMN DOM ----------
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -1254,7 +1153,6 @@ export default function RoomPage() {
     container.style.overflow = "hidden";
     container.style.alignItems = "flex-start";
 
-    // clear current DOM tiles
     container
       .querySelectorAll("div[data-ordered-tilewrap]")
       .forEach((n) => n.remove());
@@ -1270,7 +1168,6 @@ export default function RoomPage() {
       wrap.style.gap = "4px";
       wrap.style.maxWidth = `${tileSize.w}px`;
 
-      // VIDEO FRAME
       const frame = document.createElement("div");
       frame.style.display = "flex";
       frame.style.flexDirection = "column";
@@ -1278,27 +1175,22 @@ export default function RoomPage() {
       frame.style.gap = "4px";
       frame.style.cursor = "pointer";
 
-      // click = switch viewed board
       frame.onclick = () => {
         setViewBoardFor(t.pid);
         viewBoardForRef.current = t.pid;
 
-        // ask for sync if we don't have strokes
         const have = boardsRef.current[t.pid] || [];
         if (have.length === 0) {
           requestBoardSync(t.pid);
         }
 
-        // draw what we do have
         redrawCanvas(boardsRef.current[t.pid] || []);
 
-        // recalc canvas size
         setTimeout(() => {
           resizeCanvas();
         }, 0);
       };
 
-      // attach track if available, else placeholder
       if (t.pub && t.pub.track) {
         const el = t.pub.track.attach();
         const vid = el as HTMLVideoElement;
@@ -1330,7 +1222,6 @@ export default function RoomPage() {
         frame.appendChild(ph);
       }
 
-      // label under video
       const label = document.createElement("div");
       label.textContent = t.name || (t.isLocal ? "You" : "Participant");
       label.style.fontSize = "14px";
@@ -1344,12 +1235,12 @@ export default function RoomPage() {
       const amAdmin = lockedRole === "admin";
       const amStudent = lockedRole === "student";
 
-      const isRemoteStudentTile = amTutor && !t.isLocal && isStudentId(t.pid);
+      const isRemoteStudentTile =
+        amTutor && !t.isLocal && isStudentId(t.pid);
 
       const isMeStudentTile =
         amStudent && t.pid === meId && isStudentId(t.pid);
 
-      // tutor Hear/Speak buttons for each student
       if (isRemoteStudentTile && !amAdmin) {
         const ctlRow = document.createElement("div");
         ctlRow.style.display = "flex";
@@ -1405,7 +1296,6 @@ export default function RoomPage() {
         wrap.appendChild(ctlRow);
       }
 
-      // student permission pills for themselves
       if (isMeStudentTile && !amAdmin) {
         const indicatorRow = document.createElement("div");
         indicatorRow.style.display = "flex";
@@ -1450,7 +1340,6 @@ export default function RoomPage() {
       container.appendChild(wrap);
     });
 
-    // cleanup detach on unmount or reorder
     return () => {
       orderedTiles.forEach((t) => {
         if (t.pub?.track) {
@@ -1468,11 +1357,10 @@ export default function RoomPage() {
     resizeCanvas,
   ]);
 
-  // ---------- CAMERA/MIC BUTTONS ----------
   async function turnCameraOn() {
     const room = roomRef.current;
     if (!room) return;
-    if (lockedRole === "admin") return; // admin stays hidden
+    if (lockedRole === "admin") return;
 
     await ensureLocalMediaPermission("camera");
     try {
@@ -1487,7 +1375,7 @@ export default function RoomPage() {
   async function turnMicOn() {
     const room = roomRef.current;
     if (!room) return;
-    if (lockedRole === "admin") return; // admin stays muted
+    if (lockedRole === "admin") return;
 
     await ensureLocalMediaPermission("mic");
     try {
@@ -1499,7 +1387,6 @@ export default function RoomPage() {
     }
   }
 
-  // ---------- COPY INVITE LINK (for tutors) ----------
   function copyInviteLink() {
     if (!sessionRoomId) return;
     const origin =
@@ -1507,18 +1394,14 @@ export default function RoomPage() {
     const link = `${origin}/room?roomId=${encodeURIComponent(
       sessionRoomId
     )}`;
-    navigator.clipboard.writeText(link).catch(() => {
-      /* ignore */
-    });
+    navigator.clipboard.writeText(link).catch(() => {});
   }
 
-  // ---------- SIGN OUT ----------
   async function handleSignOut() {
     await signOut(auth).catch(() => {});
     router.replace("/auth");
   }
 
-  // ---------- RENDER ----------
   const roleLabel = mounted
     ? lockedRole === "tutor"
       ? "Tutor"
@@ -1531,7 +1414,6 @@ export default function RoomPage() {
 
   const editable = canCurrentUserEditBoard();
 
-  // Tutor helper: show invite link UI if tutor
   const inviteLinkUI =
     lockedRole === "tutor" && sessionRoomId ? (
       <div
@@ -1593,7 +1475,6 @@ export default function RoomPage() {
       </div>
     ) : null;
 
-  // Student/admin missing room link UX:
   const showMissingRoomWarning =
     authed && lockedRole && lockedRole !== "tutor" && !sessionRoomId;
 
@@ -1613,7 +1494,6 @@ export default function RoomPage() {
         alignItems: "stretch",
       }}
     >
-      {/* Top bar */}
       <div
         style={{
           width: "100%",
@@ -1677,7 +1557,6 @@ export default function RoomPage() {
         </div>
       </div>
 
-      {/* status / banner */}
       <div
         style={{
           width: "100%",
@@ -1720,10 +1599,8 @@ export default function RoomPage() {
           </p>
         )}
 
-        {/* Tutor invite link UI */}
         {inviteLinkUI}
 
-        {/* Student/admin missing room link warning */}
         {showMissingRoomWarning && (
           <div
             style={{
@@ -1744,7 +1621,6 @@ export default function RoomPage() {
         )}
       </div>
 
-      {/* MAIN CONTENT: left feeds + right board */}
       <div
         style={{
           flex: "1 1 auto",
@@ -1757,7 +1633,6 @@ export default function RoomPage() {
           overflow: "hidden",
         }}
       >
-        {/* LEFT COLUMN: feeds */}
         <div
           ref={videoColumnRef}
           style={{
@@ -1785,7 +1660,6 @@ export default function RoomPage() {
           />
         </div>
 
-        {/* RIGHT COLUMN: Whiteboard + toolbar */}
         <div
           style={{
             flex: "1 1 auto",
@@ -1800,7 +1674,6 @@ export default function RoomPage() {
             overflow: "hidden",
           }}
         >
-          {/* header / toolbar row */}
           <div
             style={{
               flex: "0 0 auto",
@@ -1817,7 +1690,6 @@ export default function RoomPage() {
               rowGap: "8px",
             }}
           >
-            {/* left block: board info */}
             <div style={{ display: "flex", flexDirection: "column" }}>
               <span style={{ fontWeight: 600, color: "#fff" }}>
                 Whiteboard
@@ -1842,7 +1714,6 @@ export default function RoomPage() {
               </span>
             </div>
 
-            {/* right block: tools */}
             <div
               style={{
                 display: "flex",
@@ -1854,7 +1725,6 @@ export default function RoomPage() {
                 lineHeight: 1.2,
               }}
             >
-              {/* Palette */}
               <div
                 style={{
                   display: "flex",
@@ -1889,7 +1759,6 @@ export default function RoomPage() {
                 )}
               </div>
 
-              {/* Tool buttons */}
               <div
                 style={{
                   display: "flex",
@@ -1946,7 +1815,6 @@ export default function RoomPage() {
                 </button>
               </div>
 
-              {/* Size slider */}
               <div
                 style={{
                   display: "flex",
@@ -1986,7 +1854,6 @@ export default function RoomPage() {
                 </span>
               </div>
 
-              {/* Clear All */}
               <button
                 onClick={async () => {
                   if (!editable) return;
@@ -2011,7 +1878,6 @@ export default function RoomPage() {
             </div>
           </div>
 
-          {/* canvas body */}
           <div
             ref={wbContainerRef}
             style={{
@@ -2046,7 +1912,6 @@ export default function RoomPage() {
         </div>
       </div>
 
-      {/* mic/cam quick buttons */}
       <div
         style={{
           position: "absolute",
