@@ -100,7 +100,7 @@ export default function TutorDashboardPage() {
   useEffect(() => {
     if (!uid) return;
 
-    // write immediately once
+    // update immediately
     updateDoc(doc(db, "users", uid), {
       lastActiveAt: Date.now(),
     }).catch(() => {});
@@ -109,7 +109,7 @@ export default function TutorDashboardPage() {
       updateDoc(doc(db, "users", uid), {
         lastActiveAt: Date.now(),
       }).catch(() => {});
-    }, 15000); // 15s
+    }, 15000); // every 15s
 
     return () => {
       clearInterval(intervalId);
@@ -199,7 +199,7 @@ export default function TutorDashboardPage() {
         await updateDoc(doc(db, "users", uid), {
           status: newStatus,
           statusUpdatedAt: Date.now(),
-          lastActiveAt: Date.now(), // mark active when they click
+          lastActiveAt: Date.now(), // mark active when clicking
         });
       } catch (err) {
         console.error("Failed to update tutor status:", err);
@@ -335,9 +335,8 @@ export default function TutorDashboardPage() {
           <button
             style={ghostButtonStyle}
             onClick={() => {
-              const defaultName =
-                displayName || (userEmail || "").split("@")[0] || "Tutor";
-              router.push(`/room?name=${encodeURIComponent(defaultName)}`);
+              // NEW: smart room routing
+              router.push("/room");
             }}
           >
             Enter My Room
@@ -428,9 +427,9 @@ export default function TutorDashboardPage() {
               <div
                 style={{
                   borderRadius: 8,
-                  backgroundColor: statusColors(status || "offline").bg,
-                  border: `1px solid ${statusColors(status || "offline").border}`,
-                  color: statusColors(status || "offline").text,
+                  backgroundColor: statusUI.bg,
+                  border: `1px solid ${statusUI.border}`,
+                  color: statusUI.text,
                   fontSize: 12,
                   lineHeight: 1.2,
                   fontWeight: 500,
@@ -438,7 +437,7 @@ export default function TutorDashboardPage() {
                   textAlign: "center",
                 }}
               >
-                {statusColors(status || "offline").label}
+                {statusUI.label}
               </div>
               <div
                 style={{
@@ -598,15 +597,9 @@ export default function TutorDashboardPage() {
               </div>
 
               {bookings.map((b) => {
-                const canJoin = true; // tutor can always jump in
                 const joinHandler = () => {
-                  const defaultName =
-                    displayName ||
-                    (userEmail || "").split("@")[0] ||
-                    "Tutor";
-                  router.push(
-                    `/room?name=${encodeURIComponent(defaultName)}`
-                  );
+                  // tutors can always just go to their room
+                  router.push("/room");
                 };
 
                 return (
@@ -641,11 +634,8 @@ export default function TutorDashboardPage() {
 
                     <div>
                       <button
-                        style={
-                          canJoin ? primaryCtaStyleSmall : ghostButtonStyle
-                        }
-                        disabled={!canJoin}
-                        onClick={canJoin ? joinHandler : undefined}
+                        style={primaryCtaStyleSmall}
+                        onClick={joinHandler}
                       >
                         Join Session
                       </button>

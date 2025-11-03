@@ -15,7 +15,7 @@ import { useRouter } from "next/navigation";
 
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
+import { doc, getDoc, updateDoc } from "firebase/firestore";
 
 type Role = "tutor" | "student" | "admin";
 
@@ -60,8 +60,8 @@ export default function RoomPage() {
   const [lockedRole, setLockedRole] = useState<Role | null>(null);
 
   // which LiveKit room are we joining?
-  // for tutors: we read their own roomId from Firestore
-  // for students/admin: we read ?roomId= from URL (the tutor’s room)
+  // for tutors: we'll read their own roomId from Firestore
+  // for students/admin: we'll read ?roomId= from URL (the tutor’s room)
   const initialRoomFromQP = qp("roomId", "") || "";
   const [sessionRoomId, setSessionRoomId] = useState<string>(initialRoomFromQP);
 
@@ -79,9 +79,7 @@ export default function RoomPage() {
   const myIdRef = useRef<string>("");
 
   // tutor list of students (for tutor/admin layout logic)
-  const [students, setStudents] = useState<
-    { id: string; name: string }[]
-  >([]);
+  const [students, setStudents] = useState<{ id: string; name: string }[]>([]);
 
   // raw LK tiles (camera feeds etc.)
   const [tiles, setTiles] = useState<
@@ -182,27 +180,56 @@ export default function RoomPage() {
       const snap = await getDoc(doc(db, "users", user.uid));
       const data = snap.exists() ? snap.data() : null;
 
-      const r = (data?.role as Role) || "student";
+      const r = ((data?.role as Role) || "student") as Role;
       setLockedRole(r);
 
-      // tutor's personal roomId lives in their user doc
       const tutorRoomIdFromDoc =
         typeof data?.roomId === "string" ? data.roomId : "";
 
-      // priority:
-      // 1. if this user is a tutor -> use their own tutorRoomIdFromDoc
-      // 2. else if URL had ?roomId=... -> use that (student/admin joining)
-      // 3. else leave whatever we had (probably "")
-      setSessionRoomId((prev) => {
-        if (r === "tutor" && tutorRoomIdFromDoc) return tutorRoomIdFromDoc;
-        if (prev) return prev;
-        return initialRoomFromQP;
-      });
+      // --- SMART ROOM LOGIC START ---
+      if (r === "tutor") {
+        // tutor always uses their own personal roomId from Firestore
+        if (tutorRoomIdFromDoc) {
+          setSessionRoomId(tutorRoomIdFromDoc);
+
+          // mark heartbeat so student dashboard knows I'm live
+          try {
+            await updateDoc(doc(db, "users", user.uid), {
+              lastActiveAt: Date.now(),
+            });
+          } catch {
+            /* ignore */
+          }
+
+          // if tutor hit /room with no ?roomId=... then rewrite URL
+          if (!initialRoomFromQP && typeof window !== "undefined") {
+            const newUrl = `/room?roomId=${encodeURIComponent(
+              tutorRoomIdFromDoc
+            )}`;
+            router.replace(newUrl);
+          }
+        } else {
+          // tutor with no roomId configured? send them back so they can fix profile
+          router.replace("/dashboard/tutor");
+          return;
+        }
+      } else {
+        // student or admin
+        if (!initialRoomFromQP) {
+          // if you didn't come with a tutor's roomId, you shouldn't be here.
+          router.replace("/dashboard/student");
+          return;
+        }
+
+        // student has a ?roomId -> lock that in
+        setSessionRoomId(initialRoomFromQP);
+      }
+      // --- SMART ROOM LOGIC END ---
     });
 
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [router]);
+  }, [router, initialRoomFromQP]);
 
   // ---------- BOARD PERMISSION LOGIC ----------
   function canCurrentUserEditBoard(): boolean {
@@ -838,9 +865,11 @@ export default function RoomPage() {
     // - we know which roomId to join
     if (!authed || !lockedRole) return;
 
-    // If I'm NOT a tutor and I don't have sessionRoomId,
-    // that means I didn't come in with ?roomId=... so bail with nice msg
-    if (lockedRole !== "tutor" && !sessionRoomId) {
+    // Students/admin MUST have sessionRoomId.
+    // Tutors will have gotten sessionRoomId from Firestore above.
+    if (!sessionRoomId) {
+      // We already redirected in the auth effect for student/admin with no roomId.
+      // Just show a friendly status and bail out so we don't try LiveKit.
       setStatus("Missing room link");
       setError(
         "Ask your tutor for their session link (it includes ?roomId=...)"
@@ -855,10 +884,10 @@ export default function RoomPage() {
         const idToken = await auth.currentUser?.getIdToken();
 
         const bodyPayload: any = {
-          // server will IGNORE role from client, so this is just cosmetic
+          // server will IGNORE role from client, purely cosmetic here
           role: lockedRole,
           name: desiredName,
-          roomId: sessionRoomId, // students/admin MUST pass tutor roomId
+          roomId: sessionRoomId,
         };
 
         const res = await fetch("/api/rooms/token", {
@@ -886,9 +915,7 @@ export default function RoomPage() {
         setViewBoardFor(identity);
         viewBoardForRef.current = identity;
 
-        // token is now a REAL JWT string
-        // url is like wss://your-livekit-host.livekit.cloud
-        // we connect to url/roomName
+        // connect to LiveKit
         const signalingUrl = `${url}/${roomName}`;
         room = new Room();
         roomRef.current = room;
@@ -906,6 +933,18 @@ export default function RoomPage() {
             );
             room.disconnect();
             return;
+          }
+
+          // tutor heartbeat while inside room to signal "live"
+          try {
+            const currentUser = auth.currentUser;
+            if (currentUser) {
+              await updateDoc(doc(db, "users", currentUser.uid), {
+                lastActiveAt: Date.now(),
+              });
+            }
+          } catch {
+            /* ignore */
           }
         }
 
@@ -934,9 +973,7 @@ export default function RoomPage() {
         syncLocalAVFlags(room.localParticipant);
 
         if (lockedRole === "admin") {
-          setStatus(
-            `Observer mode in ${sessionRoomId} (mic/cam off)`
-          );
+          setStatus(`Observer mode in ${sessionRoomId} (mic/cam off)`);
         } else if (lockedRole === "tutor") {
           setStatus(
             "Tutor connected. Use Hear/Speak. Click a feed to view its whiteboard."
@@ -1089,10 +1126,10 @@ export default function RoomPage() {
     // pick a tutor tile
     let tutorTile: typeof tiles[number] | undefined;
     if (lockedRole === "tutor") {
-        tutorTile =
-          tutorTiles.find((tt) => tt.isLocal) || tutorTiles[0] || undefined;
+      tutorTile =
+        tutorTiles.find((tt) => tt.isLocal) || tutorTiles[0] || undefined;
     } else {
-        tutorTile = tutorTiles[0];
+      tutorTile = tutorTiles[0];
     }
 
     const myTile = myTiles[0];
@@ -1141,6 +1178,9 @@ export default function RoomPage() {
     const vw = window.innerWidth;
 
     const tileCount = orderedTiles.length || 1;
+    the_gap: {
+      /* just a readable block label in case we expand later */
+    }
     const gap = 12;
 
     const rectMain = mainRef.current.getBoundingClientRect();
@@ -1304,8 +1344,7 @@ export default function RoomPage() {
       const amAdmin = lockedRole === "admin";
       const amStudent = lockedRole === "student";
 
-      const isRemoteStudentTile =
-        amTutor && !t.isLocal && isStudentId(t.pid);
+      const isRemoteStudentTile = amTutor && !t.isLocal && isStudentId(t.pid);
 
       const isMeStudentTile =
         amStudent && t.pid === meId && isStudentId(t.pid);
@@ -1468,11 +1507,9 @@ export default function RoomPage() {
     const link = `${origin}/room?roomId=${encodeURIComponent(
       sessionRoomId
     )}`;
-    navigator.clipboard
-      .writeText(link)
-      .catch(() => {
-        // ignore
-      });
+    navigator.clipboard.writeText(link).catch(() => {
+      /* ignore */
+    });
   }
 
   // ---------- SIGN OUT ----------
@@ -1558,10 +1595,7 @@ export default function RoomPage() {
 
   // Student/admin missing room link UX:
   const showMissingRoomWarning =
-    authed &&
-    lockedRole &&
-    lockedRole !== "tutor" &&
-    !sessionRoomId;
+    authed && lockedRole && lockedRole !== "tutor" && !sessionRoomId;
 
   return (
     <main
@@ -1607,7 +1641,13 @@ export default function RoomPage() {
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button
-            onClick={() => router.push("/")}
+            onClick={() => {
+              if (lockedRole === "tutor") {
+                router.push("/dashboard/tutor");
+              } else {
+                router.push("/dashboard/student");
+              }
+            }}
             style={{
               padding: "6px 10px",
               borderRadius: 8,
@@ -1866,9 +1906,7 @@ export default function RoomPage() {
                     padding: "6px 10px",
                     borderRadius: 8,
                     background:
-                      tool === "pen" && editable
-                        ? "#3a6"
-                        : "#2a2a2a",
+                      tool === "pen" && editable ? "#3a6" : "#2a2a2a",
                     border:
                       tool === "pen" && editable
                         ? "1px solid #6ecf9a"
@@ -1892,9 +1930,7 @@ export default function RoomPage() {
                     padding: "6px 10px",
                     borderRadius: 8,
                     background:
-                      tool === "eraser" && editable
-                        ? "#3a6"
-                        : "#2a2a2a",
+                      tool === "eraser" && editable ? "#3a6" : "#2a2a2a",
                     border:
                       tool === "eraser" && editable
                         ? "1px solid #6ecf9a"

@@ -1,3 +1,4 @@
+// src/app/dashboard/student/page.tsx
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
@@ -122,7 +123,6 @@ export default function StudentDashboardPage() {
           });
         });
 
-        // soonest first
         list.sort((a, b) => {
           const ta = a.startTime || 0;
           const tb = b.startTime || 0;
@@ -158,7 +158,7 @@ export default function StudentDashboardPage() {
 
           const status = data.status || "offline";
           const lastActiveAt = data.lastActiveAt || 0;
-          const isFresh = now - lastActiveAt < 30000; // 30s window
+          const isFresh = now - lastActiveAt < 30000; // 30s
 
           // hide offline or stale tutors
           if (status === "offline") return;
@@ -175,7 +175,6 @@ export default function StudentDashboardPage() {
           });
         });
 
-        // sort: available first, then busy
         rows.sort((a, b) => {
           const order = (s: string) =>
             s === "available" ? 0 : s === "busy" ? 1 : 2;
@@ -225,6 +224,7 @@ export default function StudentDashboardPage() {
   const joinRoomNow = useCallback(
     (tutorRoomId: string) => {
       if (!tutorRoomId) return;
+      // IMPORTANT: include roomId in URL for students
       router.push(`/room?roomId=${encodeURIComponent(tutorRoomId)}`);
     },
     [router]
@@ -245,7 +245,7 @@ export default function StudentDashboardPage() {
     }
   }
 
-  // allow join button N mins before start
+  // allow join button ~15 min before start
   function canJoinBooking(startTime?: number) {
     if (!startTime) return false;
     const now = Date.now();
@@ -668,14 +668,7 @@ export default function StudentDashboardPage() {
                       {isAvailable && tutor.roomId && (
                         <button
                           style={primaryCtaStyleSmall}
-                          onClick={() => {
-                            if (!tutor.roomId) return;
-                            router.push(
-                              `/room?roomId=${encodeURIComponent(
-                                tutor.roomId
-                              )}`
-                            );
-                          }}
+                          onClick={() => joinRoomNow(tutor.roomId)}
                         >
                           Join Room
                         </button>
