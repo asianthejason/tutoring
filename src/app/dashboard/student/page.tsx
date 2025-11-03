@@ -1,4 +1,3 @@
-// src/app/dashboard/student/page.tsx
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
@@ -123,6 +122,7 @@ export default function StudentDashboardPage() {
           });
         });
 
+        // soonest first
         list.sort((a, b) => {
           const ta = a.startTime || 0;
           const tb = b.startTime || 0;
@@ -160,14 +160,9 @@ export default function StudentDashboardPage() {
           const lastActiveAt = data.lastActiveAt || 0;
           const isFresh = now - lastActiveAt < 30000; // 30s window
 
-          if (status === "offline") {
-            // completely hidden
-            return;
-          }
-          if (!isFresh) {
-            // stale tab / they left
-            return;
-          }
+          // hide offline or stale tutors
+          if (status === "offline") return;
+          if (!isFresh) return;
 
           rows.push({
             uid: tutorUid,
@@ -176,7 +171,7 @@ export default function StudentDashboardPage() {
             roomId: data.roomId || "",
             status,
             lastActiveAt,
-            queueCount: 0, // still placeholder
+            queueCount: 0, // placeholder until we live-count queue
           });
         });
 
@@ -250,6 +245,7 @@ export default function StudentDashboardPage() {
     }
   }
 
+  // allow join button N mins before start
   function canJoinBooking(startTime?: number) {
     if (!startTime) return false;
     const now = Date.now();
@@ -688,43 +684,7 @@ export default function StudentDashboardPage() {
                       {isBusy && (
                         <button
                           style={primaryCtaStyleSmall}
-                          onClick={async () => {
-                            if (!uid) return;
-                            const studentName =
-                              displayName ||
-                              (userEmail || "").split("@")[0] ||
-                              "Student";
-
-                            try {
-                              await setDoc(
-                                doc(
-                                  db,
-                                  "queues",
-                                  tutor.uid,
-                                  "waitlist",
-                                  uid
-                                ),
-                                {
-                                  studentId: uid,
-                                  studentName,
-                                  studentEmail: userEmail || "",
-                                  joinedAt: Date.now(),
-                                },
-                                { merge: true }
-                              );
-                              alert(
-                                "You’re in the queue! Stay on this page."
-                              );
-                            } catch (err) {
-                              console.error(
-                                "Failed to join queue:",
-                                err
-                              );
-                              alert(
-                                "Could not join queue. Try again."
-                              );
-                            }
-                          }}
+                          onClick={() => joinQueue(tutor.uid)}
                         >
                           Join Queue
                         </button>
@@ -858,8 +818,4 @@ function statusPillColors(status: string) {
         label: "Offline",
       };
   }
-}
-
-function ghostButtonStyleDisabled() {
-  /* placeholder to satisfy TS if needed elsewhere */
 }
