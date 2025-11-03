@@ -12,11 +12,10 @@ import {
   LocalParticipant,
 } from "livekit-client";
 import { useRouter } from "next/navigation";
+
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
-
-export const dynamic = "force-dynamic";
 
 type Role = "tutor" | "student" | "admin";
 
@@ -34,6 +33,11 @@ type StrokePoint = { x: number; y: number };
 type Stroke = { color: string; size: number; points: StrokePoint[] };
 
 // ---------- helpers ----------
+function qp(name: string, fallback?: string) {
+  if (typeof window === "undefined") return fallback;
+  return new URLSearchParams(window.location.search).get(name) ?? fallback;
+}
+
 function isStudentId(id: string | undefined | null) {
   if (!id) return false;
   return id.toLowerCase().startsWith("student");
@@ -44,33 +48,11 @@ function isTutorId(id: string | undefined | null) {
 }
 function isObserverId(id: string | undefined | null) {
   if (!id) return false;
-  return (
-    id.toLowerCase().startsWith("admin") ||
-    id.toLowerCase().startsWith("observer")
-  );
+  return id.toLowerCase().startsWith("admin");
 }
 
 export default function RoomPage() {
   const router = useRouter();
-
-  // ---------- QUERY PARAM STATE (we'll fill this after mount) ----------
-  const [desiredName, setDesiredName] = useState<string>("Student");
-  const [forcedRoomIdQP, setForcedRoomIdQP] = useState<string>("");
-  const [adminOverride, setAdminOverride] = useState<boolean>(false);
-
-  // read query params on the client only
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const search = new URLSearchParams(window.location.search);
-
-    const qName = search.get("name") ?? "Student";
-    const qRoomId = search.get("roomId") ?? "";
-    const qAdminOverride = (search.get("adminOverride") ?? "") === "true";
-
-    setDesiredName(qName);
-    setForcedRoomIdQP(qRoomId);
-    setAdminOverride(qAdminOverride);
-  }, []);
 
   // ---------- AUTH / ROLE ----------
   const [authed, setAuthed] = useState(false);
@@ -78,9 +60,13 @@ export default function RoomPage() {
   const [lockedRole, setLockedRole] = useState<Role | null>(null);
 
   // which LiveKit room are we joining?
-  // tutors: join their own roomId from Firestore
-  // students/admin: join ?roomId= from URL
-  const [sessionRoomId, setSessionRoomId] = useState<string>("");
+  // for tutors: we read their own roomId from Firestore
+  // for students/admin: we read ?roomId= from URL (the tutor’s room)
+  const initialRoomFromQP = qp("roomId", "") || "";
+  const [sessionRoomId, setSessionRoomId] = useState<string>(initialRoomFromQP);
+
+  // Query params
+  const desiredName = qp("name", "Student");
 
   // ---------- BASIC UI STATE ----------
   const [mounted, setMounted] = useState(false);
@@ -180,16 +166,11 @@ export default function RoomPage() {
     viewBoardForRef.current = viewBoardFor;
   }, [viewBoardFor]);
 
-  // ---------- On mount & when query params are known: Firebase auth -> figure out role + roomId ----------
+  // ---------- On mount: Firebase auth -> figure out role + roomId ----------
   useEffect(() => {
-    // don't run this effect until we've parsed query params,
-    // because we might depend on forcedRoomIdQP/adminOverride.
-    // We know query params have been parsed once desiredName state
-    // has been set from the first effect above.
-    if (!mounted) return;
-
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) {
+        // not logged in, bounce to /auth and remember they wanted /room
         router.replace("/auth?from=/room");
         return;
       }
@@ -197,37 +178,31 @@ export default function RoomPage() {
       setAuthed(true);
       setUserEmail(user.email ?? null);
 
+      // get the user doc so we know their role and (if tutor) their roomId
       const snap = await getDoc(doc(db, "users", user.uid));
       const data = snap.exists() ? snap.data() : null;
 
-      let r = (data?.role as Role) || "student";
-      if (r === "admin" && adminOverride) {
-        r = "admin";
-      }
+      const r = (data?.role as Role) || "student";
       setLockedRole(r);
 
+      // tutor's personal roomId lives in their user doc
       const tutorRoomIdFromDoc =
         typeof data?.roomId === "string" ? data.roomId : "";
 
       // priority:
-      // 1. tutor joins their own room from Firestore
-      // 2. else use ?roomId=
-      // 3. else fallback to tutor's room if it exists
-      // 4. else "default-classroom"
-      const finalRoom =
-        r === "tutor" && tutorRoomIdFromDoc
-          ? tutorRoomIdFromDoc
-          : forcedRoomIdQP
-          ? forcedRoomIdQP
-          : tutorRoomIdFromDoc
-          ? tutorRoomIdFromDoc
-          : "default-classroom";
-
-      setSessionRoomId(finalRoom);
+      // 1. if this user is a tutor -> use their own tutorRoomIdFromDoc
+      // 2. else if URL had ?roomId=... -> use that (student/admin joining)
+      // 3. else leave whatever we had (probably "")
+      setSessionRoomId((prev) => {
+        if (r === "tutor" && tutorRoomIdFromDoc) return tutorRoomIdFromDoc;
+        if (prev) return prev;
+        return initialRoomFromQP;
+      });
     });
 
     return unsub;
-  }, [router, mounted, forcedRoomIdQP, adminOverride]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router]);
 
   // ---------- BOARD PERMISSION LOGIC ----------
   function canCurrentUserEditBoard(): boolean {
@@ -245,7 +220,7 @@ export default function RoomPage() {
     }
 
     if (lockedRole === "student") {
-      return me === target; // students only draw on their own board
+      return me === target; // students only on their own board
     }
 
     return false;
@@ -315,6 +290,7 @@ export default function RoomPage() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
+    // background
     ctx.fillStyle = "#111";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -440,6 +416,7 @@ export default function RoomPage() {
 
     currentStrokeRef.current.points.push({ x, y });
 
+    // preview stroke
     const curViewedId = viewBoardForRef.current;
     const tempStrokes = [
       ...(boardsRef.current[curViewedId] || []),
@@ -467,8 +444,10 @@ export default function RoomPage() {
     const finalStroke = currentStrokeRef.current;
     currentStrokeRef.current = null;
 
+    // commit locally
     appendStroke(targetBoardId, finalStroke);
 
+    // broadcast stroke
     const msg = {
       type: "wbstroke",
       author: targetBoardId,
@@ -660,10 +639,7 @@ export default function RoomPage() {
 
     for (const pub of p.audioTrackPublications.values()) {
       if (pub.source === Track.Source.Microphone) {
-        handleTutorListenToStudent(
-          pub as RemoteTrackPublication,
-          studentId
-        );
+        handleTutorListenToStudent(pub as RemoteTrackPublication, studentId);
       }
     }
   }
@@ -762,7 +738,7 @@ export default function RoomPage() {
 
         ensureBoard(p.identity || "");
 
-        // send my board history to newcomers
+        // send my history to newcomers
         broadcastFullBoard(myIdRef.current);
 
         if (lockedRole === "student") {
@@ -819,7 +795,7 @@ export default function RoomPage() {
           }
         }
 
-        // admin (observer): force no audio
+        // admin (observer): no audio
         if (lockedRole === "admin") {
           if (pub.kind === "audio") {
             const rpub = pub as RemoteTrackPublication;
@@ -857,11 +833,20 @@ export default function RoomPage() {
   // ---------- CONNECT TO LIVEKIT ----------
   useEffect(() => {
     // don't try until:
-    // - we have query params (desiredName set)
     // - we're logged in (authed)
     // - we know our role
     // - we know which roomId to join
-    if (!authed || !lockedRole || !sessionRoomId) return;
+    if (!authed || !lockedRole) return;
+
+    // If I'm NOT a tutor and I don't have sessionRoomId,
+    // that means I didn't come in with ?roomId=... so bail with nice msg
+    if (lockedRole !== "tutor" && !sessionRoomId) {
+      setStatus("Missing room link");
+      setError(
+        "Ask your tutor for their session link (it includes ?roomId=...)"
+      );
+      return;
+    }
 
     let room: Room | null = null;
 
@@ -870,9 +855,10 @@ export default function RoomPage() {
         const idToken = await auth.currentUser?.getIdToken();
 
         const bodyPayload: any = {
+          // server will IGNORE role from client, so this is just cosmetic
           role: lockedRole,
           name: desiredName,
-          roomId: sessionRoomId,
+          roomId: sessionRoomId, // students/admin MUST pass tutor roomId
         };
 
         const res = await fetch("/api/rooms/token", {
@@ -900,10 +886,10 @@ export default function RoomPage() {
         setViewBoardFor(identity);
         viewBoardForRef.current = identity;
 
-        // Build full signaling URL: <LIVEKIT_URL>/<roomName>
-        // (avoid trailing slashes)
-        const signalingUrl = `${url.replace(/\/+$/, "")}/${roomName}`;
-
+        // token is now a REAL JWT string
+        // url is like wss://your-livekit-host.livekit.cloud
+        // we connect to url/roomName
+        const signalingUrl = `${url}/${roomName}`;
         room = new Room();
         roomRef.current = room;
 
@@ -961,7 +947,6 @@ export default function RoomPage() {
           );
         }
 
-        // init permission maps
         if (lockedRole === "student") {
           hearMapRef.current[identity] = false;
           speakMapRef.current[identity] = false;
@@ -973,12 +958,12 @@ export default function RoomPage() {
           setCanHearTutor({});
           setCanSpeakToTutor({});
         }
+        // admin: no perms UI
 
-        // wire up events & roster
         wireEvents(room);
         refreshTilesAndRoster(room);
 
-        // broadcast my board to everyone already in room
+        // broadcast my board to current peers
         broadcastFullBoard(identity);
 
         setTimeout(() => {
@@ -994,6 +979,7 @@ export default function RoomPage() {
     return () => {
       room?.disconnect();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authed, lockedRole, sessionRoomId, desiredName, resizeCanvas]);
 
   // ---------- ROSTER / TILES ----------
@@ -1103,17 +1089,17 @@ export default function RoomPage() {
     // pick a tutor tile
     let tutorTile: typeof tiles[number] | undefined;
     if (lockedRole === "tutor") {
-      tutorTile =
-        tutorTiles.find((tt) => tt.isLocal) || tutorTiles[0] || undefined;
+        tutorTile =
+          tutorTiles.find((tt) => tt.isLocal) || tutorTiles[0] || undefined;
     } else {
-      tutorTile = tutorTiles[0];
+        tutorTile = tutorTiles[0];
     }
 
     const myTile = myTiles[0];
     studentTiles.sort((a, b) => a.name.localeCompare(b.name));
 
     if (lockedRole === "tutor") {
-      // tutor layout: me first (prefer local), then students, then misc
+      // tutor layout
       const ordered: typeof tiles = [];
       if (myTile) {
         ordered.push(myTile);
@@ -1130,7 +1116,7 @@ export default function RoomPage() {
       orderedTutorView.push(...studentTiles);
       orderedTutorView.push(...misc);
 
-      // hide admin's own tile if it sneaks in
+      // safety filter in case somehow our observer tile sneaks in
       const filtered = orderedTutorView.filter((t) => {
         if (t.pid === meId && isObserverId(t.pid)) return false;
         return true;
@@ -1138,7 +1124,8 @@ export default function RoomPage() {
 
       setOrderedTiles(filtered);
     } else {
-      // student view: tutor first, then me (no other students)
+      // student view:
+      // tutor first, then me, no other students
       const ordered: typeof tiles = [];
       if (tutorTile) ordered.push(tutorTile);
       if (myTile && myTile !== tutorTile) ordered.push(myTile);
@@ -1473,6 +1460,21 @@ export default function RoomPage() {
     }
   }
 
+  // ---------- COPY INVITE LINK (for tutors) ----------
+  function copyInviteLink() {
+    if (!sessionRoomId) return;
+    const origin =
+      typeof window !== "undefined" ? window.location.origin : "";
+    const link = `${origin}/room?roomId=${encodeURIComponent(
+      sessionRoomId
+    )}`;
+    navigator.clipboard
+      .writeText(link)
+      .catch(() => {
+        // ignore
+      });
+  }
+
   // ---------- SIGN OUT ----------
   async function handleSignOut() {
     await signOut(auth).catch(() => {});
@@ -1491,6 +1493,75 @@ export default function RoomPage() {
     : "…";
 
   const editable = canCurrentUserEditBoard();
+
+  // Tutor helper: show invite link UI if tutor
+  const inviteLinkUI =
+    lockedRole === "tutor" && sessionRoomId ? (
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 8,
+          alignItems: "center",
+          background: "rgba(255,255,255,0.05)",
+          border: "1px solid rgba(255,255,255,0.15)",
+          borderRadius: 8,
+          padding: "8px 12px",
+          marginTop: 8,
+          maxWidth: "100%",
+          color: "#fff",
+          fontSize: 12,
+          lineHeight: 1.4,
+        }}
+      >
+        <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+          <div style={{ fontWeight: 500, marginBottom: 4 }}>
+            Invite your student:
+          </div>
+          <div
+            style={{
+              fontFamily: "monospace",
+              fontSize: 11,
+              lineHeight: 1.4,
+              wordBreak: "break-all",
+              color: "#9cf",
+            }}
+          >
+            {typeof window !== "undefined"
+              ? `${window.location.origin}/room?roomId=${sessionRoomId}`
+              : `/room?roomId=${sessionRoomId}`}
+          </div>
+          <div style={{ opacity: 0.7, marginTop: 4 }}>
+            Give them this link. They’ll log in and automatically join you.
+          </div>
+        </div>
+
+        <button
+          onClick={copyInviteLink}
+          style={{
+            flex: "0 0 auto",
+            padding: "6px 10px",
+            borderRadius: 8,
+            background: "#2a2a2a",
+            border: "1px solid #444",
+            color: "#fff",
+            fontSize: 12,
+            lineHeight: 1.2,
+            cursor: "pointer",
+            minWidth: 80,
+          }}
+        >
+          Copy link
+        </button>
+      </div>
+    ) : null;
+
+  // Student/admin missing room link UX:
+  const showMissingRoomWarning =
+    authed &&
+    lockedRole &&
+    lockedRole !== "tutor" &&
+    !sessionRoomId;
 
   return (
     <main
@@ -1607,6 +1678,29 @@ export default function RoomPage() {
           >
             Error: {error}
           </p>
+        )}
+
+        {/* Tutor invite link UI */}
+        {inviteLinkUI}
+
+        {/* Student/admin missing room link warning */}
+        {showMissingRoomWarning && (
+          <div
+            style={{
+              background: "rgba(255,0,0,0.08)",
+              border: "1px solid rgba(255,0,0,0.4)",
+              color: "#ff8b8b",
+              borderRadius: 8,
+              padding: "8px 12px",
+              marginTop: 12,
+              fontSize: 13,
+              lineHeight: 1.4,
+              maxWidth: 480,
+            }}
+          >
+            Ask your tutor for their session link. It should look like:
+            /room?roomId=theirRoomIdHere
+          </div>
         )}
       </div>
 
