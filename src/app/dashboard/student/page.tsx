@@ -38,7 +38,8 @@ type TutorInfo = {
   email: string;
   roomId: string;
   status: string; // "available" | "busy" | "offline"
-  queueCount: number; // currently always 0 here
+  queueCount: number;
+  lastActiveAt?: number;
 };
 
 export default function StudentDashboardPage() {
@@ -100,7 +101,6 @@ export default function StudentDashboardPage() {
   useEffect(() => {
     if (!uid) return;
 
-    // No orderBy here -> no composite index needed. We sort locally.
     const qRef = query(
       collection(db, "bookings"),
       where("studentId", "==", uid),
@@ -123,7 +123,6 @@ export default function StudentDashboardPage() {
           });
         });
 
-        // client-side sort by soonest first
         list.sort((a, b) => {
           const ta = a.startTime || 0;
           const tb = b.startTime || 0;
@@ -140,9 +139,8 @@ export default function StudentDashboardPage() {
     return unsub;
   }, [uid]);
 
-  // ---- subscribe to tutors who are available or busy ----
+  // ---- subscribe to tutors who are actually live ----
   useEffect(() => {
-    // listen to all tutors
     const tutorsRef = query(
       collection(db, "users"),
       where("role", "==", "tutor")
@@ -151,26 +149,38 @@ export default function StudentDashboardPage() {
     const unsub = onSnapshot(
       tutorsRef,
       (snap) => {
+        const now = Date.now();
         const rows: TutorInfo[] = [];
 
         snap.forEach((docSnap) => {
           const data = docSnap.data() as DocumentData;
           const tutorUid = docSnap.id;
-          const status = data.status || "offline";
 
-          const row: TutorInfo = {
+          const status = data.status || "offline";
+          const lastActiveAt = data.lastActiveAt || 0;
+          const isFresh = now - lastActiveAt < 30000; // 30s window
+
+          if (status === "offline") {
+            // completely hidden
+            return;
+          }
+          if (!isFresh) {
+            // stale tab / they left
+            return;
+          }
+
+          rows.push({
             uid: tutorUid,
             displayName: data.displayName || "Tutor",
             email: data.email || "",
             roomId: data.roomId || "",
             status,
-            queueCount: 0, // we'll keep 0 for now to avoid extra round-trips
-          };
-
-          rows.push(row);
+            lastActiveAt,
+            queueCount: 0, // still placeholder
+          });
         });
 
-        // sort: available first, then busy, then offline
+        // sort: available first, then busy
         rows.sort((a, b) => {
           const order = (s: string) =>
             s === "available" ? 0 : s === "busy" ? 1 : 2;
@@ -225,23 +235,21 @@ export default function StudentDashboardPage() {
     [router]
   );
 
-  // helpers
   function formatTime(ts?: number) {
     if (!ts) return "-";
     try {
-        const d = new Date(ts);
-        return d.toLocaleString(undefined, {
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        });
+      const d = new Date(ts);
+      return d.toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
     } catch {
-        return "-";
+      return "-";
     }
   }
 
-  // allow join button N mins before start
   function canJoinBooking(startTime?: number) {
     if (!startTime) return false;
     const now = Date.now();
@@ -546,7 +554,7 @@ export default function StudentDashboardPage() {
             If they’re helping someone (“Busy”), you can join their queue.
           </div>
 
-          {tutors.filter((t) => t.status !== "offline").length === 0 ? (
+          {tutors.length === 0 ? (
             <div
               style={{
                 paddingTop: 8,
@@ -563,134 +571,174 @@ export default function StudentDashboardPage() {
                 gap: 12,
               }}
             >
-              {tutors
-                .filter((t) => t.status !== "offline")
-                .map((tutor) => {
-                  const s = tutor.status;
-                  const isAvailable = s === "available";
-                  const isBusy = s === "busy";
+              {tutors.map((tutor) => {
+                const isAvailable = tutor.status === "available";
+                const isBusy = tutor.status === "busy";
 
-                  const pill = statusPillColors(s);
+                const pill = statusPillColors(tutor.status);
 
-                  return (
+                return (
+                  <div
+                    key={tutor.uid}
+                    style={{
+                      borderRadius: 12,
+                      background:
+                        "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.08) 0%, rgba(20,20,20,0.6) 60%)",
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      boxShadow:
+                        "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
+                      padding: "16px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 8,
+                    }}
+                  >
+                    {/* top row: name + status */}
                     <div
-                      key={tutor.uid}
                       style={{
-                        borderRadius: 12,
-                        background:
-                          "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.08) 0%, rgba(20,20,20,0.6) 60%)",
-                        border: "1px solid rgba(255,255,255,0.12)",
-                        boxShadow:
-                          "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
-                        padding: "16px",
                         display: "flex",
-                        flexDirection: "column",
+                        justifyContent: "space-between",
+                        flexWrap: "wrap",
                         gap: 8,
                       }}
                     >
-                      {/* top row: name + status */}
                       <div
                         style={{
                           display: "flex",
-                          justifyContent: "space-between",
-                          flexWrap: "wrap",
-                          gap: 8,
+                          flexDirection: "column",
+                          lineHeight: 1.3,
                         }}
                       >
                         <div
                           style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            lineHeight: 1.3,
+                            fontSize: 15,
+                            fontWeight: 600,
+                            letterSpacing: "-0.03em",
                           }}
                         >
-                          <div
-                            style={{
-                              fontSize: 15,
-                              fontWeight: 600,
-                              letterSpacing: "-0.03em",
-                            }}
-                          >
-                            {tutor.displayName || "Tutor"}
-                          </div>
-                          <div
-                            style={{
-                              fontSize: 12,
-                              color: "rgba(255,255,255,0.6)",
-                              lineHeight: 1.4,
-                              wordBreak: "break-word",
-                            }}
-                          >
-                            {tutor.email}
-                          </div>
+                          {tutor.displayName || "Tutor"}
                         </div>
-
                         <div
                           style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: 4,
-                            minWidth: 100,
-                            textAlign: "center",
+                            fontSize: 12,
+                            color: "rgba(255,255,255,0.6)",
+                            lineHeight: 1.4,
+                            wordBreak: "break-word",
                           }}
                         >
-                          <div
-                            style={{
-                              borderRadius: 8,
-                              backgroundColor: pill.bg,
-                              border: `1px solid ${pill.border}`,
-                              color: pill.text,
-                              fontSize: 12,
-                              lineHeight: 1.2,
-                              fontWeight: 500,
-                              padding: "6px 10px",
-                            }}
-                          >
-                            {pill.label}
-                          </div>
-                          <div
-                            style={{
-                              fontSize: 11,
-                              lineHeight: 1.4,
-                              color: "rgba(255,255,255,0.6)",
-                            }}
-                          >
-                            {tutor.queueCount === 0
-                              ? "No queue"
-                              : `${tutor.queueCount} waiting`}
-                          </div>
+                          {tutor.email}
                         </div>
                       </div>
 
-                      {/* actions */}
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                        {isAvailable && tutor.roomId && (
-                          <button
-                            style={primaryCtaStyleSmall}
-                            onClick={() => joinRoomNow(tutor.roomId)}
-                          >
-                            Join Room
-                          </button>
-                        )}
-
-                        {isBusy && (
-                          <button
-                            style={primaryCtaStyleSmall}
-                            onClick={() => joinQueue(tutor.uid)}
-                          >
-                            Join Queue
-                          </button>
-                        )}
-
-                        {!isAvailable && !isBusy && (
-                          <button style={ghostButtonStyleDisabled} disabled>
-                            Offline
-                          </button>
-                        )}
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 4,
+                          minWidth: 100,
+                          textAlign: "center",
+                        }}
+                      >
+                        <div
+                          style={{
+                            borderRadius: 8,
+                            backgroundColor: pill.bg,
+                            border: `1px solid ${pill.border}`,
+                            color: pill.text,
+                            fontSize: 12,
+                            lineHeight: 1.2,
+                            fontWeight: 500,
+                            padding: "6px 10px",
+                          }}
+                        >
+                          {pill.label}
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 11,
+                            lineHeight: 1.4,
+                            color: "rgba(255,255,255,0.6)",
+                          }}
+                        >
+                          {tutor.queueCount === 0
+                            ? "No queue"
+                            : `${tutor.queueCount} waiting`}
+                        </div>
                       </div>
                     </div>
-                  );
-                })}
+
+                    {/* actions */}
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      {isAvailable && tutor.roomId && (
+                        <button
+                          style={primaryCtaStyleSmall}
+                          onClick={() => {
+                            if (!tutor.roomId) return;
+                            router.push(
+                              `/room?roomId=${encodeURIComponent(
+                                tutor.roomId
+                              )}`
+                            );
+                          }}
+                        >
+                          Join Room
+                        </button>
+                      )}
+
+                      {isBusy && (
+                        <button
+                          style={primaryCtaStyleSmall}
+                          onClick={async () => {
+                            if (!uid) return;
+                            const studentName =
+                              displayName ||
+                              (userEmail || "").split("@")[0] ||
+                              "Student";
+
+                            try {
+                              await setDoc(
+                                doc(
+                                  db,
+                                  "queues",
+                                  tutor.uid,
+                                  "waitlist",
+                                  uid
+                                ),
+                                {
+                                  studentId: uid,
+                                  studentName,
+                                  studentEmail: userEmail || "",
+                                  joinedAt: Date.now(),
+                                },
+                                { merge: true }
+                              );
+                              alert(
+                                "You’re in the queue! Stay on this page."
+                              );
+                            } catch (err) {
+                              console.error(
+                                "Failed to join queue:",
+                                err
+                              );
+                              alert(
+                                "Could not join queue. Try again."
+                              );
+                            }
+                          }}
+                        >
+                          Join Queue
+                        </button>
+                      )}
+
+                      {!isAvailable && !isBusy && (
+                        <button style={ghostButtonStyleDisabled} disabled>
+                          Offline
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -751,7 +799,7 @@ export default function StudentDashboardPage() {
   );
 }
 
-/* styles + helpers */
+/* styles */
 
 const ghostButtonStyle: React.CSSProperties = {
   padding: "8px 12px",
@@ -810,4 +858,8 @@ function statusPillColors(status: string) {
         label: "Offline",
       };
   }
+}
+
+function ghostButtonStyleDisabled() {
+  /* placeholder to satisfy TS if needed elsewhere */
 }

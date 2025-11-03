@@ -73,7 +73,6 @@ export default function TutorDashboardPage() {
 
       const fixedRole = (data.role as Role) || "student";
       if (fixedRole !== "tutor") {
-        // tutors only
         if (fixedRole === "student") {
           router.replace("/dashboard/student");
         } else if (fixedRole === "admin") {
@@ -85,7 +84,9 @@ export default function TutorDashboardPage() {
       }
 
       setRole("tutor");
-      setDisplayName(data.displayName || (fbUser.email || "").split("@")[0] || "Tutor");
+      setDisplayName(
+        data.displayName || (fbUser.email || "").split("@")[0] || "Tutor"
+      );
       setRoomId(data.roomId || "");
       setStatus(data.status || "offline");
 
@@ -95,11 +96,30 @@ export default function TutorDashboardPage() {
     return () => unsub();
   }, [router]);
 
+  // --- HEARTBEAT: regularly update lastActiveAt while tutor dashboard is open ---
+  useEffect(() => {
+    if (!uid) return;
+
+    // write immediately once
+    updateDoc(doc(db, "users", uid), {
+      lastActiveAt: Date.now(),
+    }).catch(() => {});
+
+    const intervalId = setInterval(() => {
+      updateDoc(doc(db, "users", uid), {
+        lastActiveAt: Date.now(),
+      }).catch(() => {});
+    }, 15000); // 15s
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [uid]);
+
   // --- Subscribe to my queue (students waiting for homework help) ---
   useEffect(() => {
     if (!uid) return;
 
-    // /queues/{tutorUid}/waitlist/*
     const qRef = collection(db, "queues", uid, "waitlist");
 
     const unsub = onSnapshot(
@@ -132,8 +152,6 @@ export default function TutorDashboardPage() {
   useEffect(() => {
     if (!uid) return;
 
-    // NOTE: no orderBy here -> no composite index required
-    // We'll sort client-side.
     const qRef = query(
       collection(db, "bookings"),
       where("tutorId", "==", uid),
@@ -156,7 +174,6 @@ export default function TutorDashboardPage() {
           });
         });
 
-        // sort in-memory by startTime asc
         list.sort((a, b) => {
           const ta = a.startTime || 0;
           const tb = b.startTime || 0;
@@ -182,6 +199,7 @@ export default function TutorDashboardPage() {
         await updateDoc(doc(db, "users", uid), {
           status: newStatus,
           statusUpdatedAt: Date.now(),
+          lastActiveAt: Date.now(), // mark active when they click
         });
       } catch (err) {
         console.error("Failed to update tutor status:", err);
@@ -293,7 +311,6 @@ export default function TutorDashboardPage() {
             "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
         }}
       >
-        {/* left brand + role */}
         <div
           style={{
             color: "#fff",
@@ -314,7 +331,6 @@ export default function TutorDashboardPage() {
           <div style={{ fontSize: 11, opacity: 0.7 }}>Tutor Dashboard</div>
         </div>
 
-        {/* right actions */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button
             style={ghostButtonStyle}
@@ -412,9 +428,9 @@ export default function TutorDashboardPage() {
               <div
                 style={{
                   borderRadius: 8,
-                  backgroundColor: statusUI.bg,
-                  border: `1px solid ${statusUI.border}`,
-                  color: statusUI.text,
+                  backgroundColor: statusColors(status || "offline").bg,
+                  border: `1px solid ${statusColors(status || "offline").border}`,
+                  color: statusColors(status || "offline").text,
                   fontSize: 12,
                   lineHeight: 1.2,
                   fontWeight: 500,
@@ -422,7 +438,7 @@ export default function TutorDashboardPage() {
                   textAlign: "center",
                 }}
               >
-                {statusUI.label}
+                {statusColors(status || "offline").label}
               </div>
               <div
                 style={{
@@ -582,7 +598,7 @@ export default function TutorDashboardPage() {
               </div>
 
               {bookings.map((b) => {
-                const canJoin = true; // tutors can always go in
+                const canJoin = true; // tutor can always jump in
                 const joinHandler = () => {
                   const defaultName =
                     displayName ||
@@ -686,7 +702,7 @@ export default function TutorDashboardPage() {
   );
 }
 
-/* --- tiny shared styles (mirror HomePage styles) --- */
+/* --- tiny shared styles --- */
 const ghostButtonStyle: React.CSSProperties = {
   padding: "8px 12px",
   borderRadius: 8,
