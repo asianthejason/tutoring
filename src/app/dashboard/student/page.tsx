@@ -37,7 +37,7 @@ type TutorInfo = {
   displayName: string;
   email: string;
   roomId: string;
-  status: string; // "available" | "busy" | "offline"
+  status: string; // "waiting" | "busy" | "offline"
   queueCount: number;
   lastActiveAt?: number;
 };
@@ -176,8 +176,8 @@ export default function StudentDashboardPage() {
         });
 
         rows.sort((a, b) => {
-          const order = (s: string) =>
-            s === "available" ? 0 : s === "busy" ? 1 : 2;
+          // waiting (free) first, then busy, then anything else
+          const order = (s: string) => (s === "waiting" ? 0 : s === "busy" ? 1 : 2);
           const diff = order(a.status) - order(b.status);
           if (diff !== 0) return diff;
           return a.displayName.localeCompare(b.displayName);
@@ -220,7 +220,7 @@ export default function StudentDashboardPage() {
     [uid, userEmail, displayName]
   );
 
-  // ---- join live room immediately (available tutor) ----
+  // ---- join live room immediately (waiting tutor) ----
   const joinRoomNow = useCallback(
     (tutorRoomId: string) => {
       if (!tutorRoomId) return;
@@ -551,8 +551,8 @@ export default function StudentDashboardPage() {
               color: "rgba(255,255,255,0.6)",
             }}
           >
-            Click “Join Room” if the tutor is free.
-            If they’re helping someone (“Busy”), you can join their queue.
+            Click “Join Room” if the tutor is <b>Waiting</b>.
+            If they’re helping someone (<b>Busy</b>), you can join their queue.
           </div>
 
           {tutors.length === 0 ? (
@@ -573,7 +573,7 @@ export default function StudentDashboardPage() {
               }}
             >
               {tutors.map((tutor) => {
-                const isAvailable = tutor.status === "available";
+                const isWaiting = tutor.status === "waiting";
                 const isBusy = tutor.status === "busy";
 
                 const pill = statusPillColors(tutor.status);
@@ -670,7 +670,7 @@ export default function StudentDashboardPage() {
 
                     {/* actions */}
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      {isAvailable && tutor.roomId && (
+                      {isWaiting && tutor.roomId && (
                         <button
                           style={primaryCtaStyleSmall}
                           onClick={() => joinRoomNow(tutor.roomId)}
@@ -688,7 +688,7 @@ export default function StudentDashboardPage() {
                         </button>
                       )}
 
-                      {!isAvailable && !isBusy && (
+                      {!isWaiting && !isBusy && (
                         <button style={ghostButtonStyleDisabled} disabled>
                           Offline
                         </button>
@@ -727,8 +727,8 @@ export default function StudentDashboardPage() {
         </div>
 
         <div style={{ marginBottom: 12 }}>
-          If a tutor is “Available”, you can jump straight in.
-          If they’re “Busy”, you’ll be placed in line. Stay on this page and
+          If a tutor is <b>Waiting</b>, you can jump straight in.
+          If they’re <b>Busy</b>, you’ll be placed in line. Stay on this page and
           we’ll pull you in next.
         </div>
 
@@ -794,12 +794,12 @@ const primaryCtaStyleSmall: React.CSSProperties = {
 
 function statusPillColors(status: string) {
   switch (status) {
-    case "available":
+    case "waiting":
       return {
         bg: "#1f3b24",
         border: "#3a6",
         text: "#6ecf9a",
-        label: "Available",
+        label: "Waiting",
       };
     case "busy":
       return {

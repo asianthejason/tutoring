@@ -1,7 +1,7 @@
 // src/app/dashboard/tutor/page.tsx
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import {
@@ -49,7 +49,7 @@ export default function TutorDashboardPage() {
   const [displayName, setDisplayName] = useState<string>("");
   const [role, setRole] = useState<Role | null>(null);
   const [roomId, setRoomId] = useState<string>("");
-  const [status, setStatus] = useState<string>("offline"); // "offline" | "available" | "busy"
+  const [status, setStatus] = useState<string>("offline"); // "waiting" | "busy" | "offline"
 
   // queue + sessions
   const [queue, setQueue] = useState<QueueStudent[]>([]);
@@ -95,6 +95,16 @@ export default function TutorDashboardPage() {
 
     return () => unsub();
   }, [router]);
+
+  // --- On dashboard (not /room), force status "offline" once we know uid+role ---
+  useEffect(() => {
+    if (!uid || role !== "tutor") return;
+    updateDoc(doc(db, "users", uid), {
+      status: "offline",
+      statusUpdatedAt: Date.now(),
+      lastActiveAt: Date.now(),
+    }).catch(() => {});
+  }, [uid, role]);
 
   // --- HEARTBEAT: regularly update lastActiveAt while tutor dashboard is open ---
   useEffect(() => {
@@ -190,24 +200,6 @@ export default function TutorDashboardPage() {
     return unsub;
   }, [uid]);
 
-  // --- tutor sets their status in Firestore ---
-  const updateStatus = useCallback(
-    async (newStatus: "available" | "busy" | "offline") => {
-      if (!uid) return;
-      setStatus(newStatus);
-      try {
-        await updateDoc(doc(db, "users", uid), {
-          status: newStatus,
-          statusUpdatedAt: Date.now(),
-          lastActiveAt: Date.now(), // mark active when clicking
-        });
-      } catch (err) {
-        console.error("Failed to update tutor status:", err);
-      }
-    },
-    [uid]
-  );
-
   // helpers
   function formatTime(ts?: number) {
     if (!ts) return "-";
@@ -226,19 +218,19 @@ export default function TutorDashboardPage() {
 
   function statusColors(s: string) {
     switch (s) {
-      case "available":
+      case "waiting":
         return {
           bg: "#1f3b24",
           border: "#3a6",
           text: "#6ecf9a",
-          label: "Available",
+          label: "Waiting",
         };
       case "busy":
         return {
           bg: "#3b2f16",
           border: "#d4a23c",
           text: "#ffd277",
-          label: "Busy (helping someone)",
+          label: "Busy (helping)",
         };
       default:
         return {
@@ -420,7 +412,7 @@ export default function TutorDashboardPage() {
             </div>
           </div>
 
-          {/* status pill + queue */}
+          {/* status pill + queue (read-only) */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
             <div
               style={{
@@ -453,51 +445,13 @@ export default function TutorDashboardPage() {
                   textAlign: "center",
                 }}
               >
-                {queueCount === 0
+                {queue.length === 0
                   ? "No one waiting"
-                  : `${queueCount} waiting in queue`}
+                  : `${queue.length} waiting in queue`}
               </div>
             </div>
 
-            {/* status controls */}
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                flexWrap: "wrap",
-                gap: 8,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 11,
-                  lineHeight: 1.4,
-                  color: "rgba(255,255,255,0.6)",
-                }}
-              >
-                Set availability:
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                <button
-                  style={primaryCtaStyleSmall}
-                  onClick={() => updateStatus("available")}
-                >
-                  Go Available
-                </button>
-                <button
-                  style={primaryCtaStyleSmall}
-                  onClick={() => updateStatus("busy")}
-                >
-                  Mark Busy
-                </button>
-                <button
-                  style={ghostButtonStyle}
-                  onClick={() => updateStatus("offline")}
-                >
-                  Go Offline
-                </button>
-              </div>
-            </div>
+            {/* (Removed) manual status controls — status is automatic now */}
           </div>
 
           <div
@@ -507,9 +461,10 @@ export default function TutorDashboardPage() {
               color: "rgba(255,255,255,0.5)",
             }}
           >
-            “Available” = students can jump straight into your room. “Busy”
-            = you’re helping one student; new students can join the queue.
-            “Offline” = hidden from student dashboard.
+            Status is automatic: <b>Waiting</b> (you’re in your room with no
+            student), <b>Busy</b> (in your room with a student), and{" "}
+            <b>Offline</b> (not in your room or logged out). Open{" "}
+            <span style={{ color: "#9cf" }}>Enter My Room</span> to go live.
           </div>
         </div>
 
@@ -674,12 +629,13 @@ export default function TutorDashboardPage() {
             marginBottom: 6,
           }}
         >
-          You’re visible to students when “Available” or “Busy”.
+          You’re visible to students when you’re in your room as{" "}
+          <b>Waiting</b> or <b>Busy</b>.
         </div>
 
         <div style={{ marginBottom: 12 }}>
-          “Available” lets a student jump right in.
-          “Busy” means new students will queue.
+          Open <b>Enter My Room</b> to go live. Leave the room (or log out) to
+          be <b>Offline</b>.
         </div>
 
         <div

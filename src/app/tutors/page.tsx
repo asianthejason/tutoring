@@ -5,8 +5,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   collection,
-  doc,
-  getDoc,
   onSnapshot,
   query,
   where,
@@ -20,21 +18,18 @@ type TutorInfo = {
   displayName: string;
   email: string;
   roomId: string;
-  statusRaw: "offline" | "available" | "busy" | string;
+  statusRaw: "waiting" | "busy" | "offline" | string;
   subjects: string[];
-  lastActiveAt?: number; // ms epoch (derived)
-  presenceUpdatedAt?: number; // ms epoch (derived)
+  lastActiveAt?: number; // ms epoch
 };
 
-// consider presence stale after 90s
+// consider rows stale after 90s and hide them
 const STALE_MS = 90_000;
 
 /** Normalize Firestore timestamp-ish values into a ms epoch number */
 function tsToMs(v: unknown): number | undefined {
   if (!v) return undefined;
-  // Firestore Timestamp
   if (v instanceof Timestamp) return v.toMillis();
-  // { seconds, nanoseconds }
   if (
     typeof v === "object" &&
     v !== null &&
@@ -43,9 +38,7 @@ function tsToMs(v: unknown): number | undefined {
   ) {
     return (v as any).seconds * 1000;
   }
-  // number (ms epoch)
   if (typeof v === "number") return v;
-  // string (iso or ms)
   if (typeof v === "string") {
     const n = Number(v);
     if (!Number.isNaN(n) && n > 10_000_000_000) return n;
@@ -55,30 +48,14 @@ function tsToMs(v: unknown): number | undefined {
   return undefined;
 }
 
-function deriveStatusLabel(t: TutorInfo): {
-  label: "Available" | "Busy" | "Offline";
-  online: boolean;
-  busy: boolean;
-} {
-  const now = Date.now();
-  const freshest = Math.max(
-    t.presenceUpdatedAt ?? 0,
-    t.lastActiveAt ?? 0
-  );
-
-  const fresh = freshest > 0 && now - freshest < STALE_MS;
-
-  if (!fresh) {
-    return { label: "Offline", online: false, busy: false };
-  }
-
-  // Fresh heartbeat: only "Busy" if tutor explicitly set it
-  if (t.statusRaw === "busy") {
-    return { label: "Busy", online: true, busy: true };
-  }
-
-  // Any other fresh case => Available
-  return { label: "Available", online: true, busy: false };
+/** Direct mapping of users/{uid}.status -> UI label */
+function deriveStatusLabel(t: TutorInfo) {
+  const s = (t.statusRaw || "offline") as "waiting" | "busy" | "offline";
+  return {
+    label: s === "waiting" ? "Waiting" : s === "busy" ? "Busy" : "Offline",
+    online: s !== "offline",
+    busy: s === "busy",
+  };
 }
 
 export default function TutorsLobbyPage() {
@@ -87,14 +64,14 @@ export default function TutorsLobbyPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // 1) subscribe to all tutors
+    // Subscribe to all tutors
     const q = query(collection(db, "users"), where("role", "==", "tutor"));
 
     const unsub = onSnapshot(
       q,
-      async (snap) => {
+      (snap) => {
+        const now = Date.now();
         const base: TutorInfo[] = [];
-        const presenceReads: Promise<void>[] = [];
 
         snap.forEach((d) => {
           const data = d.data() as DocumentData;
@@ -109,43 +86,25 @@ export default function TutorsLobbyPage() {
             lastActiveAt: tsToMs(data.lastActiveAt),
           };
 
-          // 2) try to read a presence heartbeat doc per tutor (optional)
-          // If you don't maintain presence/{uid}, this read will 404 quickly and we'll just rely on lastActiveAt
-          presenceReads.push(
-            (async () => {
-              try {
-                const pDoc = await getDoc(doc(db, "presence", item.uid));
-                if (pDoc.exists()) {
-                  const p = pDoc.data();
-                  item.presenceUpdatedAt = tsToMs(
-                    p.updatedAt ?? p.lastSeen ?? p.ts
-                  );
-                }
-              } catch {
-                /* ignore */
-              }
-            })()
-          );
+          // Freshness filter: only show tutors with a recent heartbeat
+          const fresh =
+            typeof item.lastActiveAt === "number" &&
+            now - item.lastActiveAt < STALE_MS;
 
-          base.push(item);
+          if (fresh) base.push(item);
         });
 
-        // wait for presence lookups (they're very fast; still keep UI smooth)
-        await Promise.allSettled(presenceReads);
-
-        // 3) sort by derived status
-        const ranked = base
-          .slice()
-          .sort((a, b) => {
-            const sa = deriveStatusLabel(a);
-            const sb = deriveStatusLabel(b);
-            const rank = (s: ReturnType<typeof deriveStatusLabel>) =>
-              s.label === "Available" ? 0 : s.label === "Busy" ? 1 : 2;
-            const ra = rank(sa);
-            const rb = rank(sb);
-            if (ra !== rb) return ra - rb;
-            return (a.displayName || "").localeCompare(b.displayName || "");
-          });
+        // Sort: Waiting first, then Busy, then Offline; then by name
+        const ranked = base.slice().sort((a, b) => {
+          const sa = deriveStatusLabel(a);
+          const sb = deriveStatusLabel(b);
+          const rank = (s: ReturnType<typeof deriveStatusLabel>) =>
+            s.label === "Waiting" ? 0 : s.label === "Busy" ? 1 : 2;
+          const ra = rank(sa);
+          const rb = rank(sb);
+          if (ra !== rb) return ra - rb;
+          return (a.displayName || "").localeCompare(b.displayName || "");
+        });
 
         setTutors(ranked);
         setLoading(false);
@@ -162,12 +121,11 @@ export default function TutorsLobbyPage() {
   const cards = useMemo(() => {
     return tutors.map((t) => {
       const d = deriveStatusLabel(t);
-      const canJoin =
-        d.online && !d.busy && Boolean(t.roomId); // only allow instant join if Available
+      const canJoin = d.online && !d.busy && Boolean(t.roomId); // only instant join if Waiting
 
       const chip =
-        d.label === "Available"
-          ? { bg: "#163b24", border: "#3a6", text: "#6ecf9a", label: "Available" }
+        d.label === "Waiting"
+          ? { bg: "#163b24", border: "#3a6", text: "#6ecf9a", label: "Waiting" }
           : d.label === "Busy"
           ? { bg: "#3b2f16", border: "#d4a23c", text: "#ffd277", label: "Busy" }
           : { bg: "#442424", border: "#a66", text: "#ff8b8b", label: "Offline" };
@@ -238,10 +196,8 @@ export default function TutorsLobbyPage() {
                   fontWeight: 500,
                 }}
                 title={
-                  d.label !== "Offline"
-                    ? `Last seen ${new Date(
-                        Math.max(t.presenceUpdatedAt ?? 0, t.lastActiveAt ?? 0)
-                      ).toLocaleTimeString()}`
+                  typeof t.lastActiveAt === "number"
+                    ? `Last active ${new Date(t.lastActiveAt).toLocaleTimeString()}`
                     : "No recent heartbeat"
                 }
               >
@@ -402,8 +358,8 @@ export default function TutorsLobbyPage() {
             Get live math help
           </div>
           <div style={{ fontSize: 14, lineHeight: 1.4, opacity: 0.8, color: "#fff", marginTop: 8 }}>
-            Pick a tutor below. If they’re available, you’ll join their 1-on-1 room instantly. If they’re helping
-            someone, you’ll be placed in queue and they’ll pull you in next.
+            Pick a tutor below. If they’re <b>Waiting</b>, you’ll join their 1-on-1 room instantly.
+            If they’re <b>Busy</b>, you’ll be placed in queue and they’ll pull you in next.
           </div>
         </div>
 
@@ -421,7 +377,7 @@ export default function TutorsLobbyPage() {
             </div>
           ) : tutors.length === 0 ? (
             <div style={{ gridColumn: "1 / -1", fontSize: 14, color: "#fff", opacity: 0.7 }}>
-              No tutors yet. Check back soon.
+              No tutors live right now. Check back soon.
             </div>
           ) : (
             cards
@@ -446,7 +402,9 @@ export default function TutorsLobbyPage() {
         <div style={{ color: "rgba(255,255,255,0.8)", fontWeight: 500, marginBottom: 6 }}>
           Need math help tonight?
         </div>
-        <div style={{ marginBottom: 12 }}>Hop into an available room and get 1-on-1 support.</div>
+        <div style={{ marginBottom: 12 }}>
+          Join a <b>Waiting</b> tutor’s room to get started right away.
+        </div>
         <div style={{ fontSize: 11, lineHeight: 1.4, color: "rgba(255,255,255,0.4)", marginBottom: 4 }}>
           © {new Date().getFullYear()} Apex Tutoring · Calgary, AB
         </div>

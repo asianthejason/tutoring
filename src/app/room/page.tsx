@@ -15,7 +15,7 @@ import { useRouter } from "next/navigation";
 
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc } from "firebase/firestore"; // <-- add setDoc
 
 type Role = "tutor" | "student" | "admin";
 
@@ -49,6 +49,22 @@ function isTutorId(id: string | undefined | null) {
 function isObserverId(id: string | undefined | null) {
   if (!id) return false;
   return id.toLowerCase().startsWith("admin");
+}
+
+// ---------- tiny status helper (kept local to this file) ----------
+async function setTutorStatus(
+  uid: string,
+  status: "offline" | "waiting" | "busy"
+) {
+  try {
+    await setDoc(
+      doc(db, "users", uid),
+      { status, statusUpdatedAt: Date.now() },
+      { merge: true }
+    );
+  } catch {
+    // best-effort; ignore write errors so UI doesn't break
+  }
 }
 
 export default function RoomPage() {
@@ -895,6 +911,50 @@ export default function RoomPage() {
       room?.disconnect();
     };
   }, [authed, lockedRole, sessionRoomId, desiredName, resizeCanvas]);
+
+  // ---------- NEW: Automatic tutor status from room occupancy ----------
+  useEffect(() => {
+    if (lockedRole !== "tutor") return;
+    const room = roomRef.current;
+    if (!room) return;
+
+    let uid: string | null = null;
+    const unsubAuth = onAuthStateChanged(auth, (u) => {
+      uid = u?.uid ?? null;
+    });
+
+    const update = async () => {
+      if (!uid) return;
+      // student connected if any remote participant identity starts with "student"
+      const hasStudent = Array.from(room.remoteParticipants.values()).some((p) =>
+        isStudentId(p.identity)
+      );
+      await setTutorStatus(uid, hasStudent ? "busy" : "waiting");
+    };
+
+    // attach listeners
+    room.on("participantConnected", update);
+    room.on("participantDisconnected", update);
+    room.on("connected", update);
+
+    // prime immediately
+    update();
+
+    // mark offline on tab close
+    const bye = async () => {
+      if (uid) await setTutorStatus(uid, "offline");
+    };
+    window.addEventListener("beforeunload", bye);
+
+    return () => {
+      room.off("participantConnected", update);
+      room.off("participantDisconnected", update);
+      room.off("connected", update);
+      window.removeEventListener("beforeunload", bye);
+      unsubAuth();
+      if (uid) setTutorStatus(uid, "offline"); // best-effort offline on unmount
+    };
+  }, [lockedRole]);
 
   // ---------- ROSTER / TILES ----------
   function refreshTilesAndRoster(room: Room) {
