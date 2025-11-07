@@ -331,18 +331,24 @@ export default function TutorDashboardPage() {
           <div style={{ fontSize: 11, opacity: 0.7 }}>Tutor Dashboard</div>
         </div>
 
+        {/* right actions — Home first, then Enter Room, Profile, Sign out */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button style={ghostButtonStyle} onClick={() => router.push("/")}>
+            Home
+          </button>
           <button
             style={ghostButtonStyle}
             onClick={() => {
-              // NEW: smart room routing
               router.push("/room");
             }}
           >
             Enter My Room
           </button>
-          <button style={ghostButtonStyle} onClick={() => router.push("/")}>
-            Home
+          <button
+            style={ghostButtonStyle}
+            onClick={() => router.push("/profile")}
+          >
+            Profile
           </button>
           <button style={ghostButtonStyle} onClick={handleSignOut}>
             Sign out
@@ -598,7 +604,6 @@ export default function TutorDashboardPage() {
 
               {bookings.map((b) => {
                 const joinHandler = () => {
-                  // tutors can always just go to their room
                   router.push("/room");
                 };
 

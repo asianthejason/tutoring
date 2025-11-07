@@ -1,3 +1,4 @@
+// src/app/room/page.tsx
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
@@ -14,7 +15,7 @@ import { useRouter } from "next/navigation";
 
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, getDoc, updateDoc } from "firebase/firestore";
+import { doc, getDoc } from "firebase/firestore";
 
 type Role = "tutor" | "student" | "admin";
 
@@ -27,9 +28,11 @@ type TokenResp = {
   name: string;
 };
 
+// whiteboard stroke types
 type StrokePoint = { x: number; y: number };
 type Stroke = { color: string; size: number; points: StrokePoint[] };
 
+// ---------- helpers ----------
 function qp(name: string, fallback?: string) {
   if (typeof window === "undefined") return fallback;
   return new URLSearchParams(window.location.search).get(name) ?? fallback;
@@ -51,15 +54,20 @@ function isObserverId(id: string | undefined | null) {
 export default function RoomPage() {
   const router = useRouter();
 
+  // ---------- AUTH / ROLE ----------
   const [authed, setAuthed] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [lockedRole, setLockedRole] = useState<Role | null>(null);
 
-  const initialRoomFromQP = qp("roomId", "") || "";
-  const [sessionRoomId, setSessionRoomId] = useState<string>(initialRoomFromQP);
+  // which LiveKit room are we joining?
+  // tutors: from their own user doc
+  // students/admin: ?roomId= from URL
+  const [sessionRoomId, setSessionRoomId] = useState<string>("");
 
+  // Query params
   const desiredName = qp("name", "Student");
 
+  // ---------- BASIC UI STATE ----------
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
@@ -69,8 +77,10 @@ export default function RoomPage() {
   const [myIdentity, setMyIdentity] = useState<string>("");
   const myIdRef = useRef<string>("");
 
+  // tutor roster of students
   const [students, setStudents] = useState<{ id: string; name: string }[]>([]);
 
+  // raw LK tiles (camera feeds etc.)
   const [tiles, setTiles] = useState<
     {
       id: string;
@@ -82,44 +92,47 @@ export default function RoomPage() {
     }[]
   >([]);
 
+  // ordered tiles that get rendered
   const [orderedTiles, setOrderedTiles] = useState<typeof tiles>([]);
 
-  const [tileSize, setTileSize] = useState<{ w: number; h: number }>({
-    w: 360,
-    h: 270,
-  });
+  // tile size for layout
+  const [tileSize, setTileSize] = useState<{ w: number; h: number }>({ w: 360, h: 270 });
 
-  const [activeSpeakers, setActiveSpeakers] = useState<Set<string>>(
-    new Set()
-  );
+  // active speakers
+  const [activeSpeakers, setActiveSpeakers] = useState<Set<string>>(new Set());
 
+  // local fallback mic/cam booleans
   const [camOn, setCamOn] = useState(false);
   const [micOn, setMicOn] = useState(false);
 
+  // student only: do I currently hear tutor?
   const [iCanHearTutor, setICanHearTutor] = useState<boolean | null>(null);
 
+  // tutor permissions
   const [canHearTutor, setCanHearTutor] = useState<Record<string, boolean>>({});
-  const [canSpeakToTutor, setCanSpeakToTutor] = useState<
-    Record<string, boolean>
-  >({});
+  const [canSpeakToTutor, setCanSpeakToTutor] = useState<Record<string, boolean>>({});
 
+  // refs with current perms
   const hearMapRef = useRef<Record<string, boolean>>({});
   const speakMapRef = useRef<Record<string, boolean>>({});
 
+  // bump version so DOM re-renders pills/colors
   const [permVersion, setPermVersion] = useState(0);
 
+  // tutor: pending subscriptions for student mics
   const pendingTutorSubsRef = useRef<Record<string, boolean>>({});
 
+  // refs to DOM / livekit
   const mainRef = useRef<HTMLElement>(null);
-  const videoColumnRef = useRef<HTMLDivElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const videoColumnRef = useRef<HTMLDivElement>(null); // left column containing videos
+  const containerRef = useRef<HTMLDivElement>(null); // feeds wrapper
   const roomRef = useRef<Room | null>(null);
 
+  // audio elements
   const tutorAudioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
-  const studentAudioElsRef = useRef<Map<string, HTMLAudioElement>>(
-    new Map()
-  );
+  const studentAudioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
 
+  // ---------- WHITEBOARD STATE ----------
   const [boards, setBoards] = useState<Record<string, Stroke[]>>({});
   const boardsRef = useRef<Record<string, Stroke[]>>({});
 
@@ -136,85 +149,63 @@ export default function RoomPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wbContainerRef = useRef<HTMLDivElement>(null);
 
+  // keep ref synced with state
   useEffect(() => {
     viewBoardForRef.current = viewBoardFor;
   }, [viewBoardFor]);
 
-  // 🔥 FIXED: preserve full URL (including ?roomId=...) when forcing login
+  // ---------- On mount: Firebase auth -> figure out role + roomId ----------
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) {
-        // user not signed in -> send them to /auth
-        // include the ENTIRE /room?... in the "from" param
-        const fullDest =
-          typeof window !== "undefined"
-            ? window.location.pathname + window.location.search
-            : "/room";
-
-        router.replace(
-          `/auth?from=${encodeURIComponent(fullDest)}`
-        );
+        router.replace("/auth?from=/room");
         return;
       }
 
       setAuthed(true);
       setUserEmail(user.email ?? null);
 
+      // get the user doc so we know their role and (if tutor) their roomId
       const snap = await getDoc(doc(db, "users", user.uid));
       const data = snap.exists() ? snap.data() : null;
 
-      const r = ((data?.role as Role) || "student") as Role;
+      const r = (data?.role as Role) || "student";
       setLockedRole(r);
 
-      const tutorRoomIdFromDoc =
-        typeof data?.roomId === "string" ? data.roomId : "";
+      const tutorRoomIdFromDoc = typeof data?.roomId === "string" ? data.roomId : "";
+      const qpRoom = qp("roomId", "") || "";
 
-      if (r === "tutor") {
-        if (tutorRoomIdFromDoc) {
-          setSessionRoomId(tutorRoomIdFromDoc);
-
-          try {
-            await updateDoc(doc(db, "users", user.uid), {
-              lastActiveAt: Date.now(),
-            });
-          } catch {
-            /* ignore */
-          }
-
-          if (!initialRoomFromQP && typeof window !== "undefined") {
-            router.replace(
-              `/room?roomId=${encodeURIComponent(tutorRoomIdFromDoc)}`
-            );
-          }
-        } else {
-          router.replace("/dashboard/tutor");
-          return;
-        }
+      if (r === "tutor" && tutorRoomIdFromDoc) {
+        setSessionRoomId(tutorRoomIdFromDoc);
       } else {
-        // student or admin
-        if (!initialRoomFromQP) {
-          // you made it here without a tutor room -> bye
-          router.replace("/dashboard/student");
-          return;
-        }
-        setSessionRoomId(initialRoomFromQP);
+        setSessionRoomId(qpRoom); // students/admin must use ?roomId=
       }
     });
 
     return unsub;
-  }, [router, initialRoomFromQP]);
+  }, [router]);
 
+  // Safety net: if state is still empty, try to hydrate from URL once more.
+  useEffect(() => {
+    if (!sessionRoomId) {
+      const qpRoom = qp("roomId", "") || "";
+      if (qpRoom) setSessionRoomId(qpRoom);
+    }
+  }, [sessionRoomId]);
+
+  // ---------- BOARD PERMISSION LOGIC ----------
   function canCurrentUserEditBoard(): boolean {
     const me = myIdRef.current;
     const target = viewBoardForRef.current;
     if (!me || !target || !lockedRole) return false;
 
-    if (lockedRole === "admin") return false;
-    if (lockedRole === "tutor") return true;
-    if (lockedRole === "student") return me === target;
+    if (lockedRole === "admin") return false; // observers: read-only
+    if (lockedRole === "tutor") return true;   // tutors can draw anywhere
+    if (lockedRole === "student") return me === target; // students on their board only
     return false;
   }
 
+  // ---------- PERMISSION HELPERS ----------
   function computeStudentHearing(meId: string) {
     return !!hearMapRef.current[meId];
   }
@@ -235,6 +226,7 @@ export default function RoomPage() {
     });
   }
 
+  // ---------- LOCAL DEVICE FLAGS ----------
   function syncLocalAVFlags(lp: LocalParticipant | undefined) {
     if (!lp) return;
     const micEnabled = Array.from(lp.audioTrackPublications.values()).some(
@@ -247,20 +239,14 @@ export default function RoomPage() {
     setCamOn(camEnabled);
   }
 
-  async function ensureLocalMediaPermission(
-    kind: "camera" | "mic" | "both"
-  ): Promise<void> {
+  async function ensureLocalMediaPermission(kind: "camera" | "mic" | "both"): Promise<void> {
     if (!navigator.mediaDevices?.getUserMedia) {
-      console.warn("No getUserMedia.");
+      console.warn("No getUserMedia (likely non-HTTPS).");
       return;
     }
 
     const constraints: MediaStreamConstraints =
-      kind === "camera"
-        ? { video: true }
-        : kind === "mic"
-        ? { audio: true }
-        : { audio: true, video: true };
+      kind === "camera" ? { video: true } : kind === "mic" ? { audio: true } : { audio: true, video: true };
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -270,12 +256,13 @@ export default function RoomPage() {
     }
   }
 
+  // ---------- WHITEBOARD RENDER HELPERS ----------
   function redrawCanvas(strokes: Stroke[] | undefined) {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
 
+    // background
     ctx.fillStyle = "#111";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -309,6 +296,7 @@ export default function RoomPage() {
 
   function appendStroke(authorId: string, stroke: Stroke) {
     ensureBoard(authorId);
+
     const existing = boardsRef.current[authorId] || [];
     const updated = [...existing, stroke];
     boardsRef.current[authorId] = updated;
@@ -360,8 +348,10 @@ export default function RoomPage() {
     return () => window.removeEventListener("resize", onWinResize);
   }, [resizeCanvas]);
 
+  // ---------- DRAWING INPUT ----------
   function getActiveColor() {
-    return tool === "eraser" ? "#111" : strokeColor;
+    if (tool === "eraser") return "#111";
+    return strokeColor;
   }
 
   function getActiveSize() {
@@ -370,6 +360,7 @@ export default function RoomPage() {
 
   function startDraw(e: React.PointerEvent<HTMLCanvasElement>) {
     if (!canCurrentUserEditBoard()) return;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -397,11 +388,9 @@ export default function RoomPage() {
 
     currentStrokeRef.current.points.push({ x, y });
 
+    // preview stroke
     const curViewedId = viewBoardForRef.current;
-    const tempStrokes = [
-      ...(boardsRef.current[curViewedId] || []),
-      currentStrokeRef.current,
-    ];
+    const tempStrokes = [...(boardsRef.current[curViewedId] || []), currentStrokeRef.current];
     redrawCanvas(tempStrokes);
   }
 
@@ -424,8 +413,10 @@ export default function RoomPage() {
     const finalStroke = currentStrokeRef.current;
     currentStrokeRef.current = null;
 
+    // commit locally
     appendStroke(targetBoardId, finalStroke);
 
+    // broadcast stroke
     const msg = {
       type: "wbstroke",
       author: targetBoardId,
@@ -446,10 +437,7 @@ export default function RoomPage() {
 
     const room = roomRef.current;
     if (room) {
-      const msg = {
-        type: "wb_clear",
-        author: targetId,
-      };
+      const msg = { type: "wb_clear", author: targetId };
       const data = new TextEncoder().encode(JSON.stringify(msg));
       try {
         await room.localParticipant.publishData(data, { reliable: true });
@@ -463,11 +451,7 @@ export default function RoomPage() {
     ensureBoard(authorId);
 
     const fullBoard = boardsRef.current[authorId] || [];
-    const msg = {
-      type: "wb_sync",
-      author: authorId,
-      strokes: fullBoard,
-    };
+    const msg = { type: "wb_sync", author: authorId, strokes: fullBoard };
     const data = new TextEncoder().encode(JSON.stringify(msg));
     try {
       await room.localParticipant.publishData(data, { reliable: true });
@@ -481,20 +465,16 @@ export default function RoomPage() {
     const have = boardsRef.current[authorId] || [];
     if (have.length > 0) return;
 
-    const msg = {
-      type: "wb_request",
-      author: authorId,
-    };
+    const msg = { type: "wb_request", author: authorId };
     const data = new TextEncoder().encode(JSON.stringify(msg));
     try {
       await room.localParticipant.publishData(data, { reliable: true });
     } catch {}
   }
 
+  // ---------- AUDIO: student hears tutor ----------
   function getTutorMicPub(room: Room) {
-    const tutor = Array.from(room.remoteParticipants.values()).find((p) =>
-      isTutorId(p.identity)
-    );
+    const tutor = Array.from(room.remoteParticipants.values()).find((p) => isTutorId(p.identity));
     if (!tutor) return undefined;
     return Array.from(tutor.audioTrackPublications.values()).find(
       (pub) => pub.source === Track.Source.Microphone
@@ -557,13 +537,11 @@ export default function RoomPage() {
     setPermVersion((v) => v + 1);
   }
 
-  function handleTutorListenToStudent(
-    pub: RemoteTrackPublication,
-    studentId: string
-  ) {
+  // ---------- AUDIO: tutor hears students ----------
+  function handleTutorListenToStudent(pub: RemoteTrackPublication, studentId: string) {
     if (lockedRole !== "tutor") return;
 
-    const allow = !!speakMapRef.current[studentId];
+    const allow = computeTutorHearingStudent(studentId);
     const map = studentAudioElsRef.current;
     const sid = pub.trackSid || pub.track?.sid || `student-${studentId}`;
     const existing = map.get(sid);
@@ -608,9 +586,7 @@ export default function RoomPage() {
 
   function reapplyTutorForStudent(room: Room, studentId: string) {
     if (lockedRole !== "tutor") return;
-    const p = Array.from(room.remoteParticipants.values()).find(
-      (rp) => rp.identity === studentId
-    );
+    const p = Array.from(room.remoteParticipants.values()).find((rp) => rp.identity === studentId);
     if (!p) return;
 
     for (const pub of p.audioTrackPublications.values()) {
@@ -620,6 +596,7 @@ export default function RoomPage() {
     }
   }
 
+  // ---------- DATA CHANNEL: perms + whiteboard sync ----------
   async function handleDataMessage(msg: any) {
     const room = roomRef.current;
     if (!room || !msg) return;
@@ -637,10 +614,7 @@ export default function RoomPage() {
         setPermVersion((v) => v + 1);
       }
 
-      if (
-        lockedRole === "student" &&
-        (myIdRef.current || room.localParticipant.identity) === studentId
-      ) {
+      if (lockedRole === "student" && (myIdRef.current || room.localParticipant.identity) === studentId) {
         applyStudentHearing(room);
       } else if (lockedRole === "student") {
         setPermVersion((v) => v + 1);
@@ -654,10 +628,7 @@ export default function RoomPage() {
     }
 
     if (msg.type === "wb_sync") {
-      const { author, strokes } = msg as {
-        author: string;
-        strokes: Stroke[];
-      };
+      const { author, strokes } = msg as { author: string; strokes: Stroke[] };
       ensureBoard(author);
       replaceBoard(author, strokes);
     }
@@ -675,11 +646,7 @@ export default function RoomPage() {
     }
   }
 
-  async function broadcastPermUpdate(
-    studentId: string,
-    hear: boolean,
-    speak: boolean
-  ) {
+  async function broadcastPermUpdate(studentId: string, hear: boolean, speak: boolean) {
     const room = roomRef.current;
     if (!room) return;
 
@@ -699,12 +666,15 @@ export default function RoomPage() {
     }
   }
 
+  // ---------- LIVEKIT EVENTS ----------
   function wireEvents(room: Room) {
     room
       .on(RoomEvent.ParticipantConnected, (p: Participant) => {
         refreshTilesAndRoster(room);
 
         ensureBoard(p.identity || "");
+
+        // send my history to newcomers
         broadcastFullBoard(myIdRef.current);
 
         if (lockedRole === "student") {
@@ -738,6 +708,7 @@ export default function RoomPage() {
             applyStudentHearing(room);
           }
           if (pub.kind === "audio" && studentPid) {
+            // students never hear other students
             const rpub = pub as RemoteTrackPublication;
             try {
               rpub.setSubscribed(false);
@@ -748,18 +719,13 @@ export default function RoomPage() {
 
         if (lockedRole === "tutor") {
           if (pub.kind === "audio" && studentPid) {
-            if (
-              pendingTutorSubsRef.current[pid] ||
-              speakMapRef.current[pid]
-            ) {
-              handleTutorListenToStudent(
-                pub as RemoteTrackPublication,
-                pid
-              );
+            if (pendingTutorSubsRef.current[pid] || computeTutorHearingStudent(pid)) {
+              handleTutorListenToStudent(pub as RemoteTrackPublication, pid);
             }
           }
         }
 
+        // admin (observer): no audio
         if (lockedRole === "admin") {
           if (pub.kind === "audio") {
             const rpub = pub as RemoteTrackPublication;
@@ -794,14 +760,15 @@ export default function RoomPage() {
       });
   }
 
+  // ---------- CONNECT TO LIVEKIT ----------
   useEffect(() => {
+    // wait until we’re logged in, know our role, and have a roomId (or are tutor)
     if (!authed || !lockedRole) return;
 
-    if (!sessionRoomId) {
+    // If NOT a tutor and we don't have roomId, show guidance
+    if (lockedRole !== "tutor" && !sessionRoomId) {
       setStatus("Missing room link");
-      setError(
-        "Ask your tutor for their session link (it includes ?roomId=...)"
-      );
+      setError("Ask your tutor for their session link (it includes ?roomId=...)");
       return;
     }
 
@@ -812,9 +779,9 @@ export default function RoomPage() {
         const idToken = await auth.currentUser?.getIdToken();
 
         const bodyPayload: any = {
-          role: lockedRole,
+          role: lockedRole, // server ignores but OK to send
           name: desiredName,
-          roomId: sessionRoomId,
+          roomId: sessionRoomId, // students/admin MUST pass tutor roomId
         };
 
         const res = await fetch("/api/rooms/token", {
@@ -831,74 +798,63 @@ export default function RoomPage() {
           throw new Error(body?.error || `Token endpoint failed: ${res.status}`);
         }
 
-        const { token, url, roomName, identity } =
-          (await res.json()) as TokenResp;
+        const { token, url, roomName, identity } = (await res.json()) as TokenResp;
 
         setMyIdentity(identity);
         myIdRef.current = identity;
 
+        // init my board & select it
         ensureBoard(identity);
         setViewBoardFor(identity);
         viewBoardForRef.current = identity;
 
+        // LiveKit connect
         const signalingUrl = `${url}/${roomName}`;
-        room = new Room();
-        roomRef.current = room;
+        const roomInstance = new Room();
+        roomRef.current = roomInstance;
 
-        await room.connect(signalingUrl, token);
+        await roomInstance.connect(signalingUrl, token);
 
+        // tutor can't collide with another tutor in the same room
         if (lockedRole === "tutor") {
-          const otherTutor = Array.from(
-            room.remoteParticipants.values()
-          ).find((p) => isTutorId(p.identity));
+          const otherTutor = Array.from(roomInstance.remoteParticipants.values()).find((p) =>
+            isTutorId(p.identity)
+          );
           if (otherTutor) {
-            setStatus(
-              "Another tutor is already in the room. This tab will leave."
-            );
-            room.disconnect();
+            setStatus("Another tutor is already in the room. This tab will leave.");
+            roomInstance.disconnect();
             return;
-          }
-
-          try {
-            const currentUser = auth.currentUser;
-            if (currentUser) {
-              await updateDoc(doc(db, "users", currentUser.uid), {
-                lastActiveAt: Date.now(),
-              });
-            }
-          } catch {
-            /* ignore */
           }
         }
 
+        // observer defaults to cam/mic OFF
         if (lockedRole === "admin") {
           try {
-            await room.localParticipant.setMicrophoneEnabled(false);
+            await roomInstance.localParticipant.setMicrophoneEnabled(false);
           } catch {}
           try {
-            await room.localParticipant.setCameraEnabled(false);
+            await roomInstance.localParticipant.setCameraEnabled(false);
           } catch {}
         } else {
+          // tutor / student: default mic+cam ON
           try {
-            await room.localParticipant.setMicrophoneEnabled(true);
+            await roomInstance.localParticipant.setMicrophoneEnabled(true);
           } catch (err) {
             console.warn("[auto mic] failed:", err);
           }
           try {
-            await room.localParticipant.setCameraEnabled(true);
+            await roomInstance.localParticipant.setCameraEnabled(true);
           } catch (err) {
             console.warn("[auto cam] failed:", err);
           }
         }
 
-        syncLocalAVFlags(room.localParticipant);
+        syncLocalAVFlags(roomInstance.localParticipant);
 
         if (lockedRole === "admin") {
           setStatus(`Observer mode in ${sessionRoomId} (mic/cam off)`);
         } else if (lockedRole === "tutor") {
-          setStatus(
-            "Tutor connected. Use Hear/Speak. Click a feed to view its whiteboard."
-          );
+          setStatus("Tutor connected. Use Hear/Speak. Click a feed to view its whiteboard.");
         } else {
           setStatus("Connected as Student. Click feeds to view boards.");
         }
@@ -914,15 +870,20 @@ export default function RoomPage() {
           setCanHearTutor({});
           setCanSpeakToTutor({});
         }
+        // admin: no perms UI
 
-        wireEvents(room);
-        refreshTilesAndRoster(room);
+        wireEvents(roomInstance);
+        refreshTilesAndRoster(roomInstance);
 
+        // broadcast my board to current peers
         broadcastFullBoard(identity);
 
         setTimeout(() => {
           resizeCanvas();
         }, 0);
+
+        // store for cleanup in effect return
+        room = roomInstance;
       } catch (e: any) {
         console.error(e);
         setError(e?.message || String(e));
@@ -935,11 +896,13 @@ export default function RoomPage() {
     };
   }, [authed, lockedRole, sessionRoomId, desiredName, resizeCanvas]);
 
+  // ---------- ROSTER / TILES ----------
   function refreshTilesAndRoster(room: Room) {
     const nextTiles: typeof tiles = [];
 
     const lp = room.localParticipant;
 
+    // ADMIN: hide local tile
     if (lockedRole !== "admin") {
       const localVideoPubs: LocalTrackPublication[] = [];
       for (const pub of lp.trackPublications.values()) {
@@ -971,6 +934,7 @@ export default function RoomPage() {
       }
     }
 
+    // remote participants
     const roster: { id: string; name: string }[] = [];
     for (const p of room.remoteParticipants.values()) {
       roster.push({ id: p.identity, name: p.name ?? p.identity });
@@ -1004,12 +968,14 @@ export default function RoomPage() {
 
     setTiles(nextTiles);
 
+    // onlyStudents helps tutor/admin layout / perms
     const onlyStudents = roster
       .filter((r) => isStudentId(r.id))
       .sort((a, b) => a.name.localeCompare(b.name));
     setStudents(onlyStudents);
   }
 
+  // build orderedTiles with role-aware prioritization
   useEffect(() => {
     if (!lockedRole) return;
 
@@ -1022,6 +988,7 @@ export default function RoomPage() {
 
     for (const t of tiles) {
       const pid = t.pid;
+
       if (isTutorId(pid)) {
         tutorTiles.push(t);
       } else if (pid === meId) {
@@ -1033,10 +1000,10 @@ export default function RoomPage() {
       }
     }
 
+    // pick a tutor tile
     let tutorTile: typeof tiles[number] | undefined;
     if (lockedRole === "tutor") {
-      tutorTile =
-        tutorTiles.find((tt) => tt.isLocal) || tutorTiles[0] || undefined;
+      tutorTile = tutorTiles.find((tt) => tt.isLocal) || tutorTiles[0] || undefined;
     } else {
       tutorTile = tutorTiles[0];
     }
@@ -1045,6 +1012,7 @@ export default function RoomPage() {
     studentTiles.sort((a, b) => a.name.localeCompare(b.name));
 
     if (lockedRole === "tutor") {
+      // tutor layout
       const ordered: typeof tiles = [];
       if (myTile) {
         ordered.push(myTile);
@@ -1055,6 +1023,7 @@ export default function RoomPage() {
       ordered.push(...misc);
       setOrderedTiles(ordered);
     } else if (lockedRole === "admin") {
+      // admin gets tutor-style view (but shouldn't see self-tile)
       const orderedTutorView: typeof tiles = [];
       if (tutorTile) orderedTutorView.push(tutorTile);
       orderedTutorView.push(...studentTiles);
@@ -1067,6 +1036,7 @@ export default function RoomPage() {
 
       setOrderedTiles(filtered);
     } else {
+      // student view: tutor first, then me, no other students
       const ordered: typeof tiles = [];
       if (tutorTile) ordered.push(tutorTile);
       if (myTile && myTile !== tutorTile) ordered.push(myTile);
@@ -1074,6 +1044,7 @@ export default function RoomPage() {
     }
   }, [tiles, lockedRole, myIdentity]);
 
+  // ---------- RESPONSIVE TILE SIZE ----------
   const resizeCanvasAndTiles = useCallback(() => {
     if (!mainRef.current || !videoColumnRef.current) return;
 
@@ -1112,15 +1083,9 @@ export default function RoomPage() {
     let h_fromWidth = w_fromWidth * (3 / 4);
 
     if (h_fromWidth > rawVideoH) {
-      setTileSize({
-        w: w_fromHeight,
-        h: h_fromHeight,
-      });
+      setTileSize({ w: w_fromHeight, h: h_fromHeight });
     } else {
-      setTileSize({
-        w: w_fromWidth,
-        h: h_fromWidth,
-      });
+      setTileSize({ w: w_fromWidth, h: h_fromWidth });
     }
 
     setTimeout(() => {
@@ -1140,6 +1105,7 @@ export default function RoomPage() {
     return () => window.removeEventListener("resize", onResize);
   }, [resizeCanvasAndTiles]);
 
+  // ---------- RENDER VIDEO COLUMN DOM ----------
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -1153,9 +1119,8 @@ export default function RoomPage() {
     container.style.overflow = "hidden";
     container.style.alignItems = "flex-start";
 
-    container
-      .querySelectorAll("div[data-ordered-tilewrap]")
-      .forEach((n) => n.remove());
+    // clear current DOM tiles
+    container.querySelectorAll("div[data-ordered-tilewrap]").forEach((n) => n.remove());
 
     const meId = myIdRef.current;
 
@@ -1165,24 +1130,24 @@ export default function RoomPage() {
       wrap.style.display = "flex";
       wrap.style.flexDirection = "column";
       wrap.style.alignItems = "flex-start";
-      wrap.style.gap = "4px";
+      wrap.style.gap = "6px";
       wrap.style.maxWidth = `${tileSize.w}px`;
 
+      // VIDEO FRAME
       const frame = document.createElement("div");
       frame.style.display = "flex";
       frame.style.flexDirection = "column";
       frame.style.alignItems = "flex-start";
-      frame.style.gap = "4px";
+      frame.style.gap = "6px";
       frame.style.cursor = "pointer";
 
+      // click = switch viewed board
       frame.onclick = () => {
         setViewBoardFor(t.pid);
         viewBoardForRef.current = t.pid;
 
         const have = boardsRef.current[t.pid] || [];
-        if (have.length === 0) {
-          requestBoardSync(t.pid);
-        }
+        if (have.length === 0) requestBoardSync(t.pid);
 
         redrawCanvas(boardsRef.current[t.pid] || []);
 
@@ -1191,6 +1156,7 @@ export default function RoomPage() {
         }, 0);
       };
 
+      // attach track if available, else placeholder
       if (t.pub && t.pub.track) {
         const el = t.pub.track.attach();
         const vid = el as HTMLVideoElement;
@@ -1222,12 +1188,38 @@ export default function RoomPage() {
         frame.appendChild(ph);
       }
 
-      const label = document.createElement("div");
-      label.textContent = t.name || (t.isLocal ? "You" : "Participant");
-      label.style.fontSize = "14px";
-      label.style.opacity = "0.9";
-      label.style.color = "#fff";
-      frame.appendChild(label);
+      // ------- PROFILE BLOCK UNDER VIDEO -------
+      const profileWrap = document.createElement("div");
+      profileWrap.style.display = "flex";
+      profileWrap.style.flexDirection = "column";
+      profileWrap.style.alignItems = "flex-start";
+      profileWrap.style.gap = "2px";
+
+      const nameEl = document.createElement("div");
+      nameEl.textContent = t.name || t.pid;
+      nameEl.style.fontSize = "14px";
+      nameEl.style.fontWeight = "600";
+      nameEl.style.color = "#fff";
+
+      let roleText = isTutorId(t.pid)
+        ? "Tutor"
+        : isStudentId(t.pid)
+        ? "Student"
+        : isObserverId(t.pid)
+        ? "Observer"
+        : "Participant";
+
+      const isMe = t.pid === meId;
+      if (isMe) roleText += " (You)";
+
+      const roleEl = document.createElement("div");
+      roleEl.textContent = roleText;
+      roleEl.style.fontSize = "12px";
+      roleEl.style.color = "rgba(255,255,255,0.7)";
+
+      profileWrap.appendChild(nameEl);
+      profileWrap.appendChild(roleEl);
+      frame.appendChild(profileWrap);
 
       wrap.appendChild(frame);
 
@@ -1235,12 +1227,10 @@ export default function RoomPage() {
       const amAdmin = lockedRole === "admin";
       const amStudent = lockedRole === "student";
 
-      const isRemoteStudentTile =
-        amTutor && !t.isLocal && isStudentId(t.pid);
+      const isRemoteStudentTile = amTutor && !t.isLocal && isStudentId(t.pid);
+      const isMeStudentTile = amStudent && t.pid === meId && isStudentId(t.pid);
 
-      const isMeStudentTile =
-        amStudent && t.pid === meId && isStudentId(t.pid);
-
+      // tutor Hear/Speak buttons for each remote student
       if (isRemoteStudentTile && !amAdmin) {
         const ctlRow = document.createElement("div");
         ctlRow.style.display = "flex";
@@ -1259,9 +1249,7 @@ export default function RoomPage() {
         hearBtn.style.fontSize = "13px";
         hearBtn.style.lineHeight = "1.2";
         hearBtn.style.background = hearOn ? "#3a6" : "#2a2a2a";
-        hearBtn.style.border = hearOn
-          ? "1px solid #6ecf9a"
-          : "1px solid #444";
+        hearBtn.style.border = hearOn ? "1px solid #6ecf9a" : "1px solid #444";
         hearBtn.style.color = "#fff";
         hearBtn.style.cursor = "pointer";
 
@@ -1279,9 +1267,7 @@ export default function RoomPage() {
         speakBtn.style.fontSize = "13px";
         speakBtn.style.lineHeight = "1.2";
         speakBtn.style.background = speakOn ? "#3a6" : "#2a2a2a";
-        speakBtn.style.border = speakOn
-          ? "1px solid #6ecf9a"
-          : "1px solid #444";
+        speakBtn.style.border = speakOn ? "1px solid #6ecf9a" : "1px solid #444";
         speakBtn.style.color = "#fff";
         speakBtn.style.cursor = "pointer";
 
@@ -1296,6 +1282,7 @@ export default function RoomPage() {
         wrap.appendChild(ctlRow);
       }
 
+      // student permission pills for themselves
       if (isMeStudentTile && !amAdmin) {
         const indicatorRow = document.createElement("div");
         indicatorRow.style.display = "flex";
@@ -1340,6 +1327,7 @@ export default function RoomPage() {
       container.appendChild(wrap);
     });
 
+    // cleanup detach on unmount or reorder
     return () => {
       orderedTiles.forEach((t) => {
         if (t.pub?.track) {
@@ -1347,20 +1335,13 @@ export default function RoomPage() {
         }
       });
     };
-  }, [
-    orderedTiles,
-    lockedRole,
-    canHearTutor,
-    canSpeakToTutor,
-    tileSize,
-    permVersion,
-    resizeCanvas,
-  ]);
+  }, [orderedTiles, lockedRole, canHearTutor, canSpeakToTutor, tileSize, permVersion, resizeCanvas]);
 
+  // ---------- CAMERA/MIC BUTTONS ----------
   async function turnCameraOn() {
     const room = roomRef.current;
     if (!room) return;
-    if (lockedRole === "admin") return;
+    if (lockedRole === "admin") return; // admin stays hidden
 
     await ensureLocalMediaPermission("camera");
     try {
@@ -1375,7 +1356,7 @@ export default function RoomPage() {
   async function turnMicOn() {
     const room = roomRef.current;
     if (!room) return;
-    if (lockedRole === "admin") return;
+    if (lockedRole === "admin") return; // admin stays muted
 
     await ensureLocalMediaPermission("mic");
     try {
@@ -1387,21 +1368,23 @@ export default function RoomPage() {
     }
   }
 
+  // ---------- COPY INVITE LINK (for tutors) ----------
   function copyInviteLink() {
     if (!sessionRoomId) return;
-    const origin =
-      typeof window !== "undefined" ? window.location.origin : "";
-    const link = `${origin}/room?roomId=${encodeURIComponent(
-      sessionRoomId
-    )}`;
-    navigator.clipboard.writeText(link).catch(() => {});
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    const link = `${origin}/room?roomId=${encodeURIComponent(sessionRoomId)}`;
+    navigator.clipboard.writeText(link).catch(() => {
+      /* ignore */
+    });
   }
 
+  // ---------- SIGN OUT ----------
   async function handleSignOut() {
     await signOut(auth).catch(() => {});
     router.replace("/auth");
   }
 
+  // ---------- RENDER ----------
   const roleLabel = mounted
     ? lockedRole === "tutor"
       ? "Tutor"
@@ -1414,6 +1397,7 @@ export default function RoomPage() {
 
   const editable = canCurrentUserEditBoard();
 
+  // Tutor helper: show invite link UI if tutor
   const inviteLinkUI =
     lockedRole === "tutor" && sessionRoomId ? (
       <div
@@ -1434,9 +1418,7 @@ export default function RoomPage() {
         }}
       >
         <div style={{ flex: "1 1 auto", minWidth: 0 }}>
-          <div style={{ fontWeight: 500, marginBottom: 4 }}>
-            Invite your student:
-          </div>
+          <div style={{ fontWeight: 500, marginBottom: 4 }}>Invite your student:</div>
           <div
             style={{
               fontFamily: "monospace",
@@ -1455,28 +1437,14 @@ export default function RoomPage() {
           </div>
         </div>
 
-        <button
-          onClick={copyInviteLink}
-          style={{
-            flex: "0 0 auto",
-            padding: "6px 10px",
-            borderRadius: 8,
-            background: "#2a2a2a",
-            border: "1px solid #444",
-            color: "#fff",
-            fontSize: 12,
-            lineHeight: 1.2,
-            cursor: "pointer",
-            minWidth: 80,
-          }}
-        >
+        <button onClick={copyInviteLink} style={ghostButtonStyle}>
           Copy link
         </button>
       </div>
     ) : null;
 
-  const showMissingRoomWarning =
-    authed && lockedRole && lockedRole !== "tutor" && !sessionRoomId;
+  // Student/admin missing room link UX:
+  const showMissingRoomWarning = authed && lockedRole && lockedRole !== "tutor" && !sessionRoomId;
 
   return (
     <main
@@ -1494,87 +1462,83 @@ export default function RoomPage() {
         alignItems: "stretch",
       }}
     >
-      <div
+      {/* HEADER BAR (matches site) */}
+      <header
         style={{
           width: "100%",
-          maxWidth: "100%",
+          maxWidth: "1280px",
+          margin: "0 auto 12px",
+          padding: "16px 24px",
           display: "flex",
           flexWrap: "wrap",
           justifyContent: "space-between",
-          alignItems: "center",
-          background: "rgba(255,255,255,0.08)",
+          alignItems: "stretch",
+          borderRadius: 12,
+          background: "linear-gradient(180deg, rgba(255,255,255,0.07) 0%, rgba(15,15,15,0.0) 100%)",
           border: "1px solid rgba(255,255,255,0.15)",
-          borderRadius: 10,
-          padding: "8px 12px",
-          marginBottom: 12,
-          flex: "0 0 auto",
+          boxShadow: "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
         }}
       >
-        <div style={{ fontSize: 14, lineHeight: 1.4 }}>
-          <div style={{ fontWeight: 500, color: "#fff" }}>
-            {userEmail ? userEmail : "…"}
+        {/* left brand/info */}
+        <div
+          style={{
+            color: "#fff",
+            display: "flex",
+            flexDirection: "column",
+            lineHeight: 1.2,
+          }}
+        >
+          <div
+            style={{
+              fontSize: 16,
+              fontWeight: 600,
+              letterSpacing: "-0.03em",
+            }}
+          >
+            Apex Tutoring
           </div>
-          <div style={{ opacity: 0.8, color: "#fff" }}>
-            Signed in as {roleLabel}
-          </div>
+          <div style={{ fontSize: 11, opacity: 0.7 }}>Tutoring Room ({roleLabel})</div>
         </div>
 
+        {/* right actions (Home first) */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button
-            onClick={() => {
-              if (lockedRole === "tutor") {
-                router.push("/dashboard/tutor");
-              } else {
-                router.push("/dashboard/student");
-              }
-            }}
-            style={{
-              padding: "6px 10px",
-              borderRadius: 8,
-              background: "#2a2a2a",
-              border: "1px solid #444",
-              color: "#fff",
-              fontSize: 14,
-              lineHeight: 1.2,
-            }}
-          >
+          <button style={ghostButtonStyle} onClick={() => router.push("/")}>
             Home
           </button>
+          <button style={ghostButtonStyle} onClick={() => router.push("/profile")}>
+            Profile
+          </button>
           <button
-            onClick={handleSignOut}
-            style={{
-              padding: "6px 10px",
-              borderRadius: 8,
-              background: "#2a2a2a",
-              border: "1px solid #444",
-              color: "#fff",
-              fontSize: 14,
-              lineHeight: 1.2,
+            style={ghostButtonStyle}
+            onClick={() => {
+              if (lockedRole === "tutor") router.push("/dashboard/tutor");
+              else if (lockedRole === "student") router.push("/dashboard/student");
+              else router.push("/admin");
             }}
           >
+            Dashboard
+          </button>
+          {lockedRole === "student" && (
+            <button style={ghostButtonStyle} onClick={() => router.push("/tutors")}>
+              Find a Tutor
+            </button>
+          )}
+          <button style={ghostButtonStyle} onClick={handleSignOut}>
             Sign out
           </button>
         </div>
-      </div>
+      </header>
 
+      {/* status / banner */}
       <div
         style={{
           width: "100%",
-          maxWidth: "100%",
+          maxWidth: "1280px",
+          margin: "0 auto 8px",
           flex: "0 0 auto",
           color: "#fff",
         }}
       >
-        <h1
-          style={{
-            margin: "0 0 4px",
-            color: "#fff",
-            fontSize: 16,
-            lineHeight: 1.3,
-          }}
-        >
-          Tutoring Room ({roleLabel})
-        </h1>
         <p
           style={{
             margin: "0 0 8px",
@@ -1599,8 +1563,10 @@ export default function RoomPage() {
           </p>
         )}
 
+        {/* Tutor invite link UI */}
         {inviteLinkUI}
 
+        {/* Student/admin missing room link warning */}
         {showMissingRoomWarning && (
           <div
             style={{
@@ -1621,18 +1587,22 @@ export default function RoomPage() {
         )}
       </div>
 
+      {/* MAIN CONTENT: left feeds + right board */}
       <div
         style={{
           flex: "1 1 auto",
           minHeight: 0,
           minWidth: 0,
           width: "100%",
+          maxWidth: "1280px",
+          margin: "0 auto",
           display: "flex",
           flexDirection: "row",
           gap: 16,
           overflow: "hidden",
         }}
       >
+        {/* LEFT COLUMN: feeds */}
         <div
           ref={videoColumnRef}
           style={{
@@ -1660,6 +1630,7 @@ export default function RoomPage() {
           />
         </div>
 
+        {/* RIGHT COLUMN: Whiteboard + toolbar */}
         <div
           style={{
             flex: "1 1 auto",
@@ -1674,6 +1645,7 @@ export default function RoomPage() {
             overflow: "hidden",
           }}
         >
+          {/* header / toolbar row */}
           <div
             style={{
               flex: "0 0 auto",
@@ -1690,30 +1662,18 @@ export default function RoomPage() {
               rowGap: "8px",
             }}
           >
+            {/* left block: board info */}
             <div style={{ display: "flex", flexDirection: "column" }}>
-              <span style={{ fontWeight: 600, color: "#fff" }}>
-                Whiteboard
-              </span>
-              <span
-                style={{
-                  color: "rgba(255,255,255,0.7)",
-                  fontSize: 12,
-                  lineHeight: 1.2,
-                }}
-              >
+              <span style={{ fontWeight: 600, color: "#fff" }}>Whiteboard</span>
+              <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 12, lineHeight: 1.2 }}>
                 Viewing: {viewBoardFor || "—"}
               </span>
-              <span
-                style={{
-                  color: "rgba(255,255,255,0.6)",
-                  fontSize: 11,
-                  lineHeight: 1.2,
-                }}
-              >
+              <span style={{ color: "rgba(255,255,255,0.6)", fontSize: 11, lineHeight: 1.2 }}>
                 {editable ? "You can draw" : "Read only"}
               </span>
             </div>
 
+            {/* right block: tools */}
             <div
               style={{
                 display: "flex",
@@ -1725,47 +1685,32 @@ export default function RoomPage() {
                 lineHeight: 1.2,
               }}
             >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  opacity: editable ? 1 : 0.4,
-                }}
-              >
-                {["#ffffff", "#ffe066", "#ff6b6b", "#4dabf7", "#51cf66"].map(
-                  (col) => (
-                    <div
-                      key={col}
-                      onClick={() => {
-                        if (!editable) return;
-                        setTool("pen");
-                        setStrokeColor(col);
-                      }}
-                      style={{
-                        width: 18,
-                        height: 18,
-                        borderRadius: 4,
-                        backgroundColor: col,
-                        border:
-                          strokeColor === col && tool === "pen"
-                            ? "2px solid #6ecf9a"
-                            : "2px solid #444",
-                        cursor: editable ? "pointer" : "default",
-                      }}
-                      title={`Color ${col}`}
-                    />
-                  )
-                )}
+              {/* Palette */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, opacity: editable ? 1 : 0.4 }}>
+                {["#ffffff", "#ffe066", "#ff6b6b", "#4dabf7", "#51cf66"].map((col) => (
+                  <div
+                    key={col}
+                    onClick={() => {
+                      if (!editable) return;
+                      setTool("pen");
+                      setStrokeColor(col);
+                    }}
+                    style={{
+                      width: 18,
+                      height: 18,
+                      borderRadius: 4,
+                      backgroundColor: col,
+                      border:
+                        strokeColor === col && tool === "pen" ? "2px solid #6ecf9a" : "2px solid #444",
+                      cursor: editable ? "pointer" : "default",
+                    }}
+                    title={`Color ${col}`}
+                  />
+                ))}
               </div>
 
-              <div
-                style={{
-                  display: "flex",
-                  gap: 6,
-                  opacity: editable ? 1 : 0.4,
-                }}
-              >
+              {/* Tool buttons */}
+              <div style={{ display: "flex", gap: 6, opacity: editable ? 1 : 0.4 }}>
                 <button
                   onClick={() => {
                     if (!editable) return;
@@ -1774,12 +1719,8 @@ export default function RoomPage() {
                   style={{
                     padding: "6px 10px",
                     borderRadius: 8,
-                    background:
-                      tool === "pen" && editable ? "#3a6" : "#2a2a2a",
-                    border:
-                      tool === "pen" && editable
-                        ? "1px solid #6ecf9a"
-                        : "1px solid #444",
+                    background: tool === "pen" && editable ? "#3a6" : "#2a2a2a",
+                    border: tool === "pen" && editable ? "1px solid #6ecf9a" : "1px solid #444",
                     color: "#fff",
                     fontSize: 12,
                     lineHeight: 1.2,
@@ -1798,12 +1739,8 @@ export default function RoomPage() {
                   style={{
                     padding: "6px 10px",
                     borderRadius: 8,
-                    background:
-                      tool === "eraser" && editable ? "#3a6" : "#2a2a2a",
-                    border:
-                      tool === "eraser" && editable
-                        ? "1px solid #6ecf9a"
-                        : "1px solid #444",
+                    background: tool === "eraser" && editable ? "#3a6" : "#2a2a2a",
+                    border: tool === "eraser" && editable ? "1px solid #6ecf9a" : "1px solid #444",
                     color: "#fff",
                     fontSize: 12,
                     lineHeight: 1.2,
@@ -1815,6 +1752,7 @@ export default function RoomPage() {
                 </button>
               </div>
 
+              {/* Size slider */}
               <div
                 style={{
                   display: "flex",
@@ -1837,23 +1775,12 @@ export default function RoomPage() {
                     const v = parseInt(e.target.value, 10);
                     setStrokeSize(v);
                   }}
-                  style={{
-                    width: 80,
-                    cursor: editable ? "pointer" : "default",
-                  }}
+                  style={{ width: 80, cursor: editable ? "pointer" : "default" }}
                 />
-                <span
-                  style={{
-                    minWidth: 24,
-                    textAlign: "right",
-                    fontSize: 11,
-                    opacity: 0.8,
-                  }}
-                >
-                  {strokeSize}
-                </span>
+                <span style={{ minWidth: 24, textAlign: "right", fontSize: 11, opacity: 0.8 }}>{strokeSize}</span>
               </div>
 
+              {/* Clear All */}
               <button
                 onClick={async () => {
                   if (!editable) return;
@@ -1863,9 +1790,7 @@ export default function RoomPage() {
                   padding: "6px 10px",
                   borderRadius: 8,
                   background: editable ? "#a33" : "#2a2a2a",
-                  border: editable
-                    ? "1px solid #ff8b8b"
-                    : "1px solid #444",
+                  border: editable ? "1px solid #ff8b8b" : "1px solid #444",
                   color: "#fff",
                   fontSize: 12,
                   lineHeight: 1.2,
@@ -1878,6 +1803,7 @@ export default function RoomPage() {
             </div>
           </div>
 
+          {/* canvas body */}
           <div
             ref={wbContainerRef}
             style={{
@@ -1897,11 +1823,7 @@ export default function RoomPage() {
                 width: "100%",
                 height: "100%",
                 touchAction: "none",
-                cursor: editable
-                  ? tool === "eraser"
-                    ? "cell"
-                    : "crosshair"
-                  : "default",
+                cursor: editable ? (tool === "eraser" ? "cell" : "crosshair") : "default",
               }}
               onPointerDown={startDraw}
               onPointerMove={moveDraw}
@@ -1912,6 +1834,7 @@ export default function RoomPage() {
         </div>
       </div>
 
+      {/* mic/cam quick buttons */}
       <div
         style={{
           position: "absolute",
@@ -1925,39 +1848,13 @@ export default function RoomPage() {
         }}
       >
         {lockedRole !== "admin" && !camOn && (
-          <button
-            onClick={turnCameraOn}
-            style={{
-              padding: "8px 10px",
-              borderRadius: 8,
-              background: "#2a2a2a",
-              border: "1px solid #444",
-              color: "#fff",
-              fontSize: 13,
-              lineHeight: 1.2,
-              minWidth: 120,
-              textAlign: "left",
-            }}
-          >
+          <button onClick={turnCameraOn} style={ghostButtonStyle}>
             Turn Camera On
           </button>
         )}
 
         {lockedRole !== "admin" && !micOn && (
-          <button
-            onClick={turnMicOn}
-            style={{
-              padding: "8px 10px",
-              borderRadius: 8,
-              background: "#2a2a2a",
-              border: "1px solid #444",
-              color: "#fff",
-              fontSize: 13,
-              lineHeight: 1.2,
-              minWidth: 120,
-              textAlign: "left",
-            }}
-          >
+          <button onClick={turnMicOn} style={ghostButtonStyle}>
             Mic On
           </button>
         )}
@@ -1965,3 +1862,17 @@ export default function RoomPage() {
     </main>
   );
 }
+
+/* --- header/ghost button style to match dashboards --- */
+const ghostButtonStyle: React.CSSProperties = {
+  padding: "8px 12px",
+  borderRadius: 8,
+  background: "#2a2a2a",
+  border: "1px solid #444",
+  color: "#fff",
+  fontSize: 13,
+  lineHeight: 1.2,
+  cursor: "pointer",
+  minWidth: 80,
+  textAlign: "center",
+};

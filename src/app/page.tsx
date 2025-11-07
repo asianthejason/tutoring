@@ -26,11 +26,9 @@ export default function HomePage() {
       }
 
       setUserEmail(user.email ?? null);
-
       const snap = await getDoc(doc(db, "users", user.uid));
       const fixedRole = (snap.data()?.role as Role) || "student";
       setRole(fixedRole);
-
       setCheckingAuth(false);
     });
 
@@ -43,22 +41,31 @@ export default function HomePage() {
     setRole(null);
   }
 
-  // used for CTA buttons ("Get Started", "Enter Classroom", etc.)
-  function handleLoginOrDashboard() {
+  function handleProfile() {
+    router.push("/profile");
+  }
+
+  /** Primary CTA:
+   *  - Logged out → /auth
+   *  - Logged in  → correct dashboard for role
+   */
+  function handlePrimaryCta() {
     if (!userEmail || !role) {
-      // not logged in
       router.push("/auth");
       return;
     }
-
-    if (role === "admin") {
-      router.push("/admin");
-      return;
+    switch (role) {
+      case "admin":
+        router.push("/admin");
+        break;
+      case "tutor":
+        router.push("/dashboard/tutor");
+        break;
+      case "student":
+      default:
+        router.push("/dashboard/student");
+        break;
     }
-
-    // student or tutor -> classroom
-    const defaultName = userEmail ? userEmail.split("@")[0] : "Student";
-    router.push(`/room?name=${encodeURIComponent(defaultName)}`);
   }
 
   // --- NAV BAR ---
@@ -89,23 +96,10 @@ export default function HomePage() {
           lineHeight: 1.2,
         }}
       >
-        <div
-          style={{
-            fontSize: 16,
-            fontWeight: 600,
-            letterSpacing: "-0.03em",
-          }}
-        >
+        <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>
           Apex Tutoring
         </div>
-        <div
-          style={{
-            fontSize: 11,
-            opacity: 0.7,
-          }}
-        >
-          Calgary Math Specialists
-        </div>
+        <div style={{ fontSize: 11, opacity: 0.7 }}>Calgary Math Specialists</div>
       </div>
 
       {/* middle - nav links */}
@@ -121,36 +115,31 @@ export default function HomePage() {
       >
         <button
           style={navButtonStyle}
-          onClick={() => {
-            window.scrollTo({ top: 0, behavior: "smooth" });
-          }}
+          onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
         >
           Home
         </button>
         <button
           style={navButtonStyle}
-          onClick={() => {
-            const el = document.getElementById("how-it-works");
-            el?.scrollIntoView({ behavior: "smooth" });
-          }}
+          onClick={() =>
+            document.getElementById("how-it-works")?.scrollIntoView({ behavior: "smooth" })
+          }
         >
           How it works
         </button>
         <button
           style={navButtonStyle}
-          onClick={() => {
-            const el = document.getElementById("why-apex");
-            el?.scrollIntoView({ behavior: "smooth" });
-          }}
+          onClick={() =>
+            document.getElementById("why-apex")?.scrollIntoView({ behavior: "smooth" })
+          }
         >
           Why Apex
         </button>
         <button
           style={navButtonStyle}
-          onClick={() => {
-            const el = document.getElementById("programs");
-            el?.scrollIntoView({ behavior: "smooth" });
-          }}
+          onClick={() =>
+            document.getElementById("programs")?.scrollIntoView({ behavior: "smooth" })
+          }
         >
           Programs
         </button>
@@ -160,41 +149,23 @@ export default function HomePage() {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         {userEmail && role ? (
           <>
-            {role === "admin" ? (
-              <button
-                style={primaryCtaStyle}
-                onClick={() => router.push("/admin")}
-              >
-                Admin Dashboard
-              </button>
-            ) : (
-              <button
-                style={primaryCtaStyle}
-                onClick={handleLoginOrDashboard}
-              >
-                Enter Classroom
-              </button>
-            )}
-
-            <button
-              style={ghostButtonStyle}
-              onClick={handleSignOut}
-            >
+            <button style={primaryCtaStyle} onClick={handlePrimaryCta}>
+              {role === "admin" ? "Admin Dashboard" : "Dashboard"}
+            </button>
+            {/* NEW: Profile button */}
+            <button style={ghostButtonStyle} onClick={handleProfile}>
+              Profile
+            </button>
+            <button style={ghostButtonStyle} onClick={handleSignOut}>
               Sign out
             </button>
           </>
         ) : (
           <>
-            <button
-              style={primaryCtaStyle}
-              onClick={handleLoginOrDashboard}
-            >
+            <button style={primaryCtaStyle} onClick={handlePrimaryCta}>
               Get Started
             </button>
-            <button
-              style={ghostButtonStyle}
-              onClick={() => router.push("/auth")}
-            >
+            <button style={ghostButtonStyle} onClick={() => router.push("/auth")}>
               Log in
             </button>
           </>
@@ -216,7 +187,7 @@ export default function HomePage() {
         gap: "24px",
       }}
     >
-      {/* left column: marketing copy */}
+      {/* left column */}
       <div
         style={{
           color: "#fff",
@@ -237,8 +208,7 @@ export default function HomePage() {
             maxWidth: 500,
           }}
         >
-          Math help that actually fixes gaps — and builds top-tier
-          confidence.
+          Math help that actually fixes gaps — and builds top-tier confidence.
         </div>
 
         <p
@@ -250,9 +220,8 @@ export default function HomePage() {
             marginBottom: 16,
           }}
         >
-          Apex Tutoring gives Calgary students focused, human math
-          support. Real tutors, not AI chat. We target exactly what your
-          child is stuck on, and we stay with them until it clicks.
+          Apex Tutoring gives Calgary students focused, human math support. Real tutors, not AI
+          chat. We target exactly what your child is stuck on, and we stay with them until it clicks.
         </p>
 
         <ul
@@ -275,18 +244,14 @@ export default function HomePage() {
         <div style={{ height: 20 }} />
 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <button
-            style={primaryCtaStyleLarge}
-            onClick={handleLoginOrDashboard}
-          >
-            Book a free consult
+          <button style={primaryCtaStyleLarge} onClick={handlePrimaryCta}>
+            {userEmail && role ? "Go to Dashboard" : "Book a free consult"}
           </button>
           <button
             style={ghostButtonStyle}
-            onClick={() => {
-              const el = document.getElementById("programs");
-              el?.scrollIntoView({ behavior: "smooth" });
-            }}
+            onClick={() =>
+              document.getElementById("programs")?.scrollIntoView({ behavior: "smooth" })
+            }
           >
             View programs
           </button>
@@ -302,21 +267,19 @@ export default function HomePage() {
             maxWidth: 420,
           }}
         >
-          We’re currently accepting new math students in Calgary and
-          surrounding area. All sessions are online — no driving, no
-          pickup/dropoff stress.
+          We’re currently accepting new math students in Calgary and surrounding area. All sessions
+          are online — no driving, no pickup/dropoff stress.
         </div>
       </div>
 
-      {/* right column: hero visual */}
+      {/* right column (visual) */}
       <div
         style={{
           minHeight: 320,
           background:
             "radial-gradient(circle at 20% 20%, rgba(77,177,255,0.4) 0%, rgba(0,0,0,0) 70%), radial-gradient(circle at 80% 30%, rgba(80,255,150,0.25) 0%, rgba(0,0,0,0) 60%)",
           border: "1px solid rgba(255,255,255,0.15)",
-          boxShadow:
-            "0 40px 120px rgba(0,0,0,0.9), 0 2px 4px rgba(0,0,0,0.6) inset",
+          boxShadow: "0 40px 120px rgba(0,0,0,0.9), 0 2px 4px rgba(255,255,255,0.6) inset",
           borderRadius: 16,
           position: "relative",
           overflow: "hidden",
@@ -326,7 +289,6 @@ export default function HomePage() {
           justifyContent: "flex-end",
         }}
       >
-        {/* pseudo screenshot card 1 */}
         <div
           style={{
             background: "rgba(15,15,15,0.9)",
@@ -342,9 +304,7 @@ export default function HomePage() {
             marginBottom: 12,
           }}
         >
-          <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 4 }}>
-            Whiteboard • Live
-          </div>
+          <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 4 }}>Whiteboard • Live</div>
           <div style={{ fontWeight: 500, marginBottom: 6 }}>
             Tutor: “Let's solve this step together.”
           </div>
@@ -354,7 +314,6 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* pseudo screenshot card 2 */}
         <div
           style={{
             background: "rgba(15,15,15,0.9)",
@@ -407,7 +366,6 @@ export default function HomePage() {
         gap: "24px",
       }}
     >
-      {/* Title row full width */}
       <div
         style={{
           gridColumn: "1 / -1",
@@ -417,13 +375,7 @@ export default function HomePage() {
           gap: 4,
         }}
       >
-        <div
-          style={{
-            fontSize: 20,
-            fontWeight: 600,
-            letterSpacing: "-0.03em",
-          }}
-        >
+        <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: "-0.03em" }}>
           Math support built around how your child learns
         </div>
         <div
@@ -434,19 +386,17 @@ export default function HomePage() {
             maxWidth: 700,
           }}
         >
-          All sessions are online with live audio, video, and a shared math
-          whiteboard. Select what fits: personal attention, small-group
-          efficiency, or a standing weekly block.
+          All sessions are online with live audio, video, and a shared math whiteboard. Select what
+          fits: personal attention, small-group efficiency, or a standing weekly block.
         </div>
       </div>
 
-      {/* Card: 1-on-1 */}
+      {/* 1-on-1 */}
       <div style={programCardStyle}>
         <div style={programCardHeaderStyle}>1-on-1 Private Math Tutoring</div>
         <p style={programCardBodyStyle}>
-          Pure focus. The tutor works with just your child. We identify
-          weaknesses (fractions, factoring, word problems, algebra steps, exam
-          anxiety) and rebuild from there.
+          Pure focus. The tutor works with just your child. We identify weaknesses (fractions,
+          factoring, word problems, algebra steps, exam anxiety) and rebuild from there.
         </p>
         <ul style={programListStyle}>
           <li>Fastest way to close gaps</li>
@@ -456,15 +406,12 @@ export default function HomePage() {
         <div style={programCtaStyle}>Best for: catching up fast</div>
       </div>
 
-      {/* Card: 2-student */}
+      {/* 2-student */}
       <div style={programCardStyle}>
-        <div style={programCardHeaderStyle}>
-          Semi-Private (2 Students + 1 Tutor)
-        </div>
+        <div style={programCardHeaderStyle}>Semi-Private (2 Students + 1 Tutor)</div>
         <p style={programCardBodyStyle}>
-          Two students share a tutor. Students can still ask questions
-          individually — we can mute / unmute so they’re not talking over each
-          other.
+          Two students share a tutor. Students can still ask questions individually — we can mute /
+          unmute so they’re not talking over each other.
         </p>
         <ul style={programListStyle}>
           <li>Lower cost than full private</li>
@@ -474,12 +421,12 @@ export default function HomePage() {
         <div style={programCtaStyle}>Best for: steady weekly help</div>
       </div>
 
-      {/* Card: Weekly Program */}
+      {/* Weekly plan */}
       <div style={programCardStyle}>
         <div style={programCardHeaderStyle}>Weekly Math Support Plan</div>
         <p style={programCardBodyStyle}>
-          A recurring spot every week with the same tutor. We review current
-          class topics, prep for quizzes, and keep assignments from piling up.
+          A recurring spot every week with the same tutor. We review current class topics, prep for
+          quizzes, and keep assignments from piling up.
         </p>
         <ul style={programListStyle}>
           <li>Prevents “snowball panic” before exams</li>
@@ -514,13 +461,7 @@ export default function HomePage() {
           gap: 4,
         }}
       >
-        <div
-          style={{
-            fontSize: 20,
-            fontWeight: 600,
-            letterSpacing: "-0.03em",
-          }}
-        >
+        <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: "-0.03em" }}>
           How Apex works
         </div>
         <div
@@ -539,8 +480,8 @@ export default function HomePage() {
         <div style={stepNumberStyle}>1</div>
         <div style={stepTitleStyle}>Tell us what’s going on</div>
         <div style={stepBodyStyle}>
-          Struggling with factoring? Word problems? Failing quizzes even after
-          doing homework? Tell us. We listen first.
+          Struggling with factoring? Word problems? Failing quizzes even after doing homework? Tell
+          us. We listen first.
         </div>
       </div>
 
@@ -548,8 +489,8 @@ export default function HomePage() {
         <div style={stepNumberStyle}>2</div>
         <div style={stepTitleStyle}>We match a math tutor</div>
         <div style={stepBodyStyle}>
-          You’ll work with a real human math tutor — not a script, not a bot. We
-          pick someone who actually teaches that grade level.
+          You’ll work with a real human math tutor — not a script, not a bot. We pick someone who
+          actually teaches that grade level.
         </div>
       </div>
 
@@ -557,8 +498,8 @@ export default function HomePage() {
         <div style={stepNumberStyle}>3</div>
         <div style={stepTitleStyle}>Live session, shared whiteboard</div>
         <div style={stepBodyStyle}>
-          Your child talks through the problem out loud while solving it on a
-          shared digital whiteboard. We correct in real time.
+          Your child talks through the problem out loud while solving it on a shared digital
+          whiteboard. We correct in real time.
         </div>
       </div>
 
@@ -566,8 +507,8 @@ export default function HomePage() {
         <div style={stepNumberStyle}>4</div>
         <div style={stepTitleStyle}>Weekly momentum</div>
         <div style={stepBodyStyle}>
-          We stick with them every week, so math stops being an emergency and
-          starts being under control.
+          We stick with them every week, so math stops being an emergency and starts being under
+          control.
         </div>
       </div>
     </section>
@@ -587,7 +528,6 @@ export default function HomePage() {
         gap: "24px",
       }}
     >
-      {/* text block */}
       <div
         style={{
           color: "#fff",
@@ -597,14 +537,7 @@ export default function HomePage() {
           minWidth: 0,
         }}
       >
-        <div
-          style={{
-            fontSize: 20,
-            fontWeight: 600,
-            letterSpacing: "-0.03em",
-            color: "#fff",
-          }}
-        >
+        <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: "-0.03em", color: "#fff" }}>
           Why parents choose Apex
         </div>
 
@@ -616,9 +549,8 @@ export default function HomePage() {
             maxWidth: 520,
           }}
         >
-          We’re not just homework help. We teach math in plain English, build
-          habits that actually work for your kid, and give them the confidence
-          to raise their hand in class again.
+          We’re not just homework help. We teach math in plain English, build habits that actually
+          work for your kid, and give them the confidence to raise their hand in class again.
         </div>
 
         <ul
@@ -634,37 +566,21 @@ export default function HomePage() {
         >
           <li>We focus on understanding, not memorizing steps</li>
           <li>We catch tiny mistakes before they become big Fs</li>
-          <li>
-            We know Alberta curriculum — this is not generic “YouTube math”
-          </li>
+          <li>We know Alberta curriculum — this is not generic “YouTube math”</li>
           <li>We speak to teens like humans, not robots</li>
         </ul>
 
-        <div
-          style={{
-            display: "flex",
-            gap: 12,
-            flexWrap: "wrap",
-            marginTop: 8,
-          }}
-        >
-          <button
-            style={primaryCtaStyle}
-            onClick={handleLoginOrDashboard}
-          >
-            Talk to a tutor
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8 }}>
+          <button style={primaryCtaStyle} onClick={handlePrimaryCta}>
+            {userEmail && role ? "Dashboard" : "Talk to a tutor"}
           </button>
 
-          <button
-            style={ghostButtonStyle}
-            onClick={() => router.push("/auth")}
-          >
-            Create account
+          <button style={ghostButtonStyle} onClick={() => router.push("/auth")}>
+            {userEmail && role ? "Switch account" : "Create account"}
           </button>
         </div>
       </div>
 
-      {/* tutor highlight card */}
       <div
         style={{
           background:
@@ -685,29 +601,14 @@ export default function HomePage() {
         }}
       >
         <div>
-          <div
-            style={{
-              fontSize: 12,
-              opacity: 0.7,
-              marginBottom: 8,
-            }}
-          >
-            Meet a tutor
-          </div>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "flex-start",
-              gap: 12,
-            }}
-          >
+          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>Meet a tutor</div>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
             <div
               style={{
                 width: 48,
                 height: 48,
                 borderRadius: 10,
-                background:
-                  "linear-gradient(135deg,#4db1ff 0%,#1e1e1e 60%)",
+                background: "linear-gradient(135deg,#4db1ff 0%,#1e1e1e 60%)",
                 border: "1px solid rgba(255,255,255,0.4)",
                 boxShadow:
                   "0 20px 40px rgba(0,0,0,0.8), 0 1px 2px rgba(255,255,255,0.4) inset",
@@ -725,31 +626,17 @@ export default function HomePage() {
               >
                 Jason · Lead Math Tutor
               </div>
-              <div
-                style={{
-                  fontSize: 12,
-                  lineHeight: 1.4,
-                  color: "rgba(255,255,255,0.8)",
-                }}
-              >
-                Specializes in Jr. High math foundations, Algebra I/II,
-                factoring & radicals, Grade 10-12 exam prep, and building “I can
-                actually do this” confidence.
+              <div style={{ fontSize: 12, lineHeight: 1.4, color: "rgba(255,255,255,0.8)" }}>
+                Specializes in Jr. High math foundations, Algebra I/II, factoring & radicals,
+                Grade 10–12 exam prep, and building “I can actually do this” confidence.
               </div>
             </div>
           </div>
         </div>
 
-        <div
-          style={{
-            marginTop: 16,
-            fontSize: 12,
-            lineHeight: 1.5,
-            color: "rgba(255,255,255,0.7)",
-          }}
-        >
-          “Our goal is simple: if a student is scared of math, we make math feel
-          non-scary. If they’re already strong, we make them dangerous.”
+        <div style={{ marginTop: 16, fontSize: 12, lineHeight: 1.5, color: "rgba(255,255,255,0.7)" }}>
+          “Our goal is simple: if a student is scared of math, we make math feel non-scary.
+          If they’re already strong, we make them dangerous.”
         </div>
       </div>
     </section>
@@ -775,54 +662,25 @@ export default function HomePage() {
         gap: 16,
       }}
     >
-      <div
-        style={{
-          fontSize: 18,
-          fontWeight: 600,
-          letterSpacing: "-0.03em",
-          lineHeight: 1.3,
-          color: "#fff",
-        }}
-      >
+      <div style={{ fontSize: 18, fontWeight: 600, letterSpacing: "-0.03em", lineHeight: 1.3, color: "#fff" }}>
         Ready to take math from “I hate this” to “I’ve got this”?
       </div>
 
-      <div
-        style={{
-          fontSize: 14,
-          lineHeight: 1.5,
-          color: "rgba(255,255,255,0.8)",
-          maxWidth: 600,
-        }}
-      >
-        Book a free consultation call. We’ll map out where your child is right
-        now, where they need to be, and what it’ll take to get there. Zero
-        pressure.
+      <div style={{ fontSize: 14, lineHeight: 1.5, color: "rgba(255,255,255,0.8)", maxWidth: 600 }}>
+        Book a free consultation call. We’ll map out where your child is right now, where they need
+        to be, and what it’ll take to get there. Zero pressure.
       </div>
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <button
-          style={primaryCtaStyleLarge}
-          onClick={handleLoginOrDashboard}
-        >
-          Book a free consult
+        <button style={primaryCtaStyleLarge} onClick={handlePrimaryCta}>
+          {userEmail && role ? "Open Dashboard" : "Book a free consult"}
         </button>
-        <button
-          style={ghostButtonStyle}
-          onClick={() => router.push("/auth")}
-        >
-          Create account
+        <button style={ghostButtonStyle} onClick={() => router.push("/auth")}>
+          {userEmail && role ? "Switch account" : "Create account"}
         </button>
       </div>
 
-      <div
-        style={{
-          fontSize: 11,
-          lineHeight: 1.4,
-          color: "rgba(255,255,255,0.5)",
-          marginTop: 8,
-        }}
-      >
+      <div style={{ fontSize: 11, lineHeight: 1.4, color: "rgba(255,255,255,0.5)", marginTop: 8 }}>
         Apex Tutoring · Calgary, AB · Online math tutoring for Grades 4–12
       </div>
     </section>
@@ -842,22 +700,11 @@ export default function HomePage() {
         flexDirection: "column",
       }}
     >
-      {/* NAV */}
       <div style={{ flex: "0 0 auto", paddingTop: 24 }}>{NavBar}</div>
-
-      {/* HERO */}
       <div style={{ flex: "0 0 auto" }}>{Hero}</div>
-
-      {/* PROGRAMS */}
       <div style={{ flex: "0 0 auto" }}>{Programs}</div>
-
-      {/* HOW IT WORKS */}
       <div style={{ flex: "0 0 auto" }}>{HowItWorks}</div>
-
-      {/* WHY APEX */}
       <div style={{ flex: "0 0 auto" }}>{WhyApex}</div>
-
-      {/* FOOTER CTA */}
       <div style={{ flex: "0 0 auto" }}>{FooterCta}</div>
     </main>
   );

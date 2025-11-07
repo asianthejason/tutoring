@@ -224,7 +224,6 @@ export default function StudentDashboardPage() {
   const joinRoomNow = useCallback(
     (tutorRoomId: string) => {
       if (!tutorRoomId) return;
-      // IMPORTANT: include roomId in URL for students
       router.push(`/room?roomId=${encodeURIComponent(tutorRoomId)}`);
     },
     [router]
@@ -333,16 +332,22 @@ export default function StudentDashboardPage() {
           <div style={{ fontSize: 11, opacity: 0.7 }}>Student Dashboard</div>
         </div>
 
-        {/* right actions */}
+        {/* right actions — Home first, then Find, Profile, Sign out */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button style={ghostButtonStyle} onClick={() => router.push("/")}>
+            Home
+          </button>
           <button
             style={ghostButtonStyle}
             onClick={() => router.push("/tutors")}
           >
             Find a Tutor
           </button>
-          <button style={ghostButtonStyle} onClick={() => router.push("/")}>
-            Home
+          <button
+            style={ghostButtonStyle}
+            onClick={() => router.push("/profile")}
+          >
+            Profile
           </button>
           <button style={ghostButtonStyle} onClick={handleSignOut}>
             Sign out

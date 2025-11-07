@@ -13,48 +13,79 @@ import { doc, getDoc, setDoc } from "firebase/firestore";
 
 type Role = "student" | "tutor" | "admin";
 
-// Force this page to be rendered dynamically (not prerendered at build).
 export const dynamic = "force-dynamic";
 
-/**
- * Actual auth UI.
- * We keep this in its own component because it uses useSearchParams().
- * We'll wrap THIS component in <Suspense /> in the default export below,
- * which satisfies Next's requirement.
- */
+function guessTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+async function ensureTutorDefaults(uid: string) {
+  const ref = doc(db, "users", uid);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return;
+
+  const data = snap.data() || {};
+  if (data.role !== "tutor") return;
+
+  const patch: any = {};
+  if (!data.timezone) patch.timezone = guessTimezone();
+  if (!data.availability) {
+    patch.availability = {
+      mon: [],
+      tue: [],
+      wed: [],
+      thu: [],
+      fri: [],
+      sat: [],
+      sun: [],
+    };
+  }
+
+  if (Object.keys(patch).length > 0) {
+    await setDoc(ref, patch, { merge: true });
+  }
+}
+
 function AuthInner() {
   const router = useRouter();
   const qp = useSearchParams();
-
-  // we don't actually use `from` yet for redirect, but we might later
   const from = qp.get("from") || "/";
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-
-  // role is ONLY chosen at signup time
   const [signupRole, setSignupRole] = useState<Role>("student");
-
   const [isLogin, setIsLogin] = useState(true);
   const [error, setError] = useState("");
 
-  // If already logged in, bounce to "/"
+  // If already logged in, bounce to dashboard
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) return;
-      router.replace("/");
+      // ensure tutor defaults in background (no await needed)
+      ensureTutorDefaults(user.uid).catch(() => {});
+      // send to dashboard
+      router.replace("/dashboard/" + (await roleToPath(user.uid)));
     });
     return unsub;
   }, [router]);
 
-  async function finishAuthAndRouteHome(uid: string) {
-    // sanity read
+  async function roleToPath(uid: string): Promise<string> {
     const snap = await getDoc(doc(db, "users", uid));
-    if (!snap.exists()) {
-      console.warn("User doc missing in Firestore for uid", uid);
-    }
-    // could change this to /dashboard later
-    router.replace("/");
+    const role = (snap.data()?.role as Role) || "student";
+    if (role === "tutor") return "tutor";
+    if (role === "admin") return "admin"; // you can have /admin route
+    return "student";
+  }
+
+  async function finishAuthAndRoute(uid: string) {
+    // Best-effort ensure defaults for legacy tutors
+    await ensureTutorDefaults(uid).catch(() => {});
+    const seg = await roleToPath(uid);
+    router.replace("/dashboard/" + seg);
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -63,64 +94,61 @@ function AuthInner() {
 
     try {
       if (isLogin) {
-        // LOGIN
         const res = await signInWithEmailAndPassword(auth, email, password);
-        await finishAuthAndRouteHome(res.user.uid);
+        await finishAuthAndRoute(res.user.uid);
       } else {
-        // SIGNUP
-        const res = await createUserWithEmailAndPassword(
-          auth,
-          email,
-          password
-        );
-
+        const res = await createUserWithEmailAndPassword(auth, email, password);
         const uid = res.user.uid;
         const now = Date.now();
-
-        // nice displayName for tutor cards / queue later
         const displayName =
           email.split("@")[0] ||
           (signupRole === "tutor" ? "Tutor" : "Student");
 
         if (signupRole === "tutor") {
-          // tutor profile document
           const roomId = `tutor_${uid}`;
-
           await setDoc(doc(db, "users", uid), {
             email,
-            role: signupRole, // "tutor"
+            role: signupRole,
             createdAt: now,
             displayName,
-            roomId, // unique stable ID for their room
-            status: "offline", // "offline" | "available" | "busy"
-            subjects: [], // later: ["Math 10C", "Math 20-1"] etc.
+            roomId,
+            status: "offline",
+            subjects: [],
+            // NEW: initialize defaults on fresh tutor
+            timezone: guessTimezone(),
+            availability: {
+              mon: [],
+              tue: [],
+              wed: [],
+              thu: [],
+              fri: [],
+              sat: [],
+              sun: [],
+            },
           });
         } else if (signupRole === "admin") {
-          // admin / observer
           await setDoc(doc(db, "users", uid), {
             email,
-            role: signupRole, // "admin"
+            role: signupRole,
             createdAt: now,
             displayName,
           });
         } else {
-          // student
           await setDoc(doc(db, "users", uid), {
             email,
-            role: signupRole, // "student"
+            role: signupRole,
             createdAt: now,
             displayName,
           });
         }
 
-        await finishAuthAndRouteHome(uid);
+        await finishAuthAndRoute(uid);
       }
     } catch (err: any) {
       setError(err.message || "Auth failed");
     }
   }
 
-  // shared button styles
   const ghostButtonStyle: React.CSSProperties = {
     padding: "8px 12px",
     borderRadius: 8,
@@ -150,7 +178,6 @@ function AuthInner() {
         paddingBottom: 24,
       }}
     >
-      {/* NAV BAR / HEADER */}
       <header
         style={{
           width: "100%",
@@ -169,35 +196,10 @@ function AuthInner() {
             "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
         }}
       >
-        {/* Brand / tagline */}
-        <div
-          style={{
-            color: "#fff",
-            display: "flex",
-            flexDirection: "column",
-            lineHeight: 1.2,
-          }}
-        >
-          <div
-            style={{
-              fontSize: 16,
-              fontWeight: 600,
-              letterSpacing: "-0.03em",
-            }}
-          >
-            Apex Tutoring
-          </div>
-          <div
-            style={{
-              fontSize: 11,
-              opacity: 0.7,
-            }}
-          >
-            Calgary Math Specialists
-          </div>
+        <div style={{ color: "#fff", display: "flex", flexDirection: "column", lineHeight: 1.2 }}>
+          <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>Apex Tutoring</div>
+          <div style={{ fontSize: 11, opacity: 0.7 }}>Calgary Math Specialists</div>
         </div>
-
-        {/* Back home */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button style={ghostButtonStyle} onClick={() => router.push("/")}>
             ← Back Home
@@ -205,7 +207,6 @@ function AuthInner() {
         </div>
       </header>
 
-      {/* AUTH BODY */}
       <section
         style={{
           flex: "1 1 auto",
@@ -215,7 +216,6 @@ function AuthInner() {
           padding: 24,
         }}
       >
-        {/* AUTH CARD */}
         <div
           style={{
             width: "100%",
@@ -234,53 +234,20 @@ function AuthInner() {
             gap: 20,
           }}
         >
-          {/* Heading / subheading */}
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <div
-              style={{
-                fontSize: 20,
-                fontWeight: 600,
-                lineHeight: 1.3,
-                color: "#fff",
-                letterSpacing: "-0.03em",
-              }}
-            >
+            <div style={{ fontSize: 20, fontWeight: 600, lineHeight: 1.3, color: "#fff", letterSpacing: "-0.03em" }}>
               {isLogin ? "Welcome back" : "Create your account"}
             </div>
-
-            <div
-              style={{
-                fontSize: 14,
-                lineHeight: 1.4,
-                color: "rgba(255,255,255,0.7)",
-              }}
-            >
+            <div style={{ fontSize: 14, lineHeight: 1.4, color: "rgba(255,255,255,0.7)" }}>
               {isLogin
                 ? "Sign in to access live math tutoring."
                 : "Sign up, choose Student / Tutor / Admin, and you're in."}
             </div>
           </div>
 
-          {/* FORM */}
-          <form
-            onSubmit={handleSubmit}
-            style={{
-              display: "grid",
-              gap: 12,
-              marginBottom: 4,
-            }}
-          >
-            {/* Email */}
-            <div style={{ display: "grid", gap: 6 }}>
-              <label
-                style={{
-                  fontSize: 13,
-                  color: "rgba(255,255,255,0.8)",
-                  lineHeight: 1.4,
-                }}
-              >
-                Email
-              </label>
+          <form onSubmit={handleSubmit} style={{ display: "grid", gap: 12, marginBottom: 4 }}>
+            <label style={{ display: "grid", gap: 6 }}>
+              <div style={{ fontSize: 13, color: "rgba(255,255,255,0.8)", lineHeight: 1.4 }}>Email</div>
               <input
                 type="email"
                 placeholder="you@example.com"
@@ -299,19 +266,10 @@ function AuthInner() {
                   outline: "none",
                 }}
               />
-            </div>
+            </label>
 
-            {/* Password */}
-            <div style={{ display: "grid", gap: 6 }}>
-              <label
-                style={{
-                  fontSize: 13,
-                  color: "rgba(255,255,255,0.8)",
-                  lineHeight: 1.4,
-                }}
-              >
-                Password
-              </label>
+            <label style={{ display: "grid", gap: 6 }}>
+              <div style={{ fontSize: 13, color: "rgba(255,255,255,0.8)", lineHeight: 1.4 }}>Password</div>
               <input
                 type="password"
                 placeholder="••••••••"
@@ -330,28 +288,16 @@ function AuthInner() {
                   outline: "none",
                 }}
               />
-            </div>
+            </label>
 
-            {/* Role selector (signup only) */}
             {!isLogin && (
-              <div style={{ display: "grid", gap: 6 }}>
-                <label
-                  style={{
-                    fontSize: 13,
-                    color: "rgba(255,255,255,0.8)",
-                    lineHeight: 1.4,
-                  }}
-                >
+              <label style={{ display: "grid", gap: 6 }}>
+                <div style={{ fontSize: 13, color: "rgba(255,255,255,0.8)", lineHeight: 1.4 }}>
                   Account type (cannot be changed later)
-                </label>
-
+                </div>
                 <select
                   value={signupRole}
-                  onChange={(e) =>
-                    setSignupRole(
-                      e.target.value as "student" | "tutor" | "admin"
-                    )
-                  }
+                  onChange={(e) => setSignupRole(e.target.value as Role)}
                   style={{
                     padding: "10px 12px",
                     borderRadius: 8,
@@ -364,42 +310,24 @@ function AuthInner() {
                     appearance: "none",
                   }}
                 >
-                  <option
-                    value="student"
-                    style={{ backgroundColor: "#000", color: "#fff" }}
-                  >
+                  <option value="student" style={{ backgroundColor: "#000", color: "#fff" }}>
                     Student
                   </option>
-                  <option
-                    value="tutor"
-                    style={{ backgroundColor: "#000", color: "#fff" }}
-                  >
+                  <option value="tutor" style={{ backgroundColor: "#000", color: "#fff" }}>
                     Tutor
                   </option>
-                  <option
-                    value="admin"
-                    style={{ backgroundColor: "#000", color: "#fff" }}
-                  >
+                  <option value="admin" style={{ backgroundColor: "#000", color: "#fff" }}>
                     Admin
                   </option>
                 </select>
-
-                <div
-                  style={{
-                    fontSize: 12,
-                    lineHeight: 1.4,
-                    color: "rgba(255,255,255,0.5)",
-                  }}
-                >
+                <div style={{ fontSize: 12, lineHeight: 1.4, color: "rgba(255,255,255,0.5)" }}>
                   • Students join tutoring sessions. <br />
-                  • Tutors run live math help rooms (1 student at a time,
-                  plus a queue). <br />
+                  • Tutors run live math help rooms (1 student at a time, plus a queue). <br />
                   • Admin accounts observe sessions.
                 </div>
-              </div>
+              </label>
             )}
 
-            {/* Submit */}
             <button
               type="submit"
               style={{
@@ -420,29 +348,13 @@ function AuthInner() {
             </button>
           </form>
 
-          {/* Error */}
           {error && (
-            <div
-              style={{
-                color: "tomato",
-                fontSize: 13,
-                lineHeight: 1.4,
-                marginTop: 4,
-              }}
-            >
+            <div style={{ color: "tomato", fontSize: 13, lineHeight: 1.4, marginTop: 4 }}>
               {error}
             </div>
           )}
 
-          {/* Switch login/signup */}
-          <div
-            style={{
-              fontSize: 13,
-              lineHeight: 1.5,
-              color: "rgba(255,255,255,0.8)",
-              textAlign: "center",
-            }}
-          >
+          <div style={{ fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.8)", textAlign: "center" }}>
             {isLogin ? (
               <>
                 Need an account?{" "}
@@ -486,7 +398,6 @@ function AuthInner() {
         </div>
       </section>
 
-      {/* FOOTER / TRUST STRIP */}
       <footer
         style={{
           flex: "0 0 auto",
@@ -500,66 +411,16 @@ function AuthInner() {
           textAlign: "center",
         }}
       >
-        <div
-          style={{
-            color: "rgba(255,255,255,0.8)",
-            fontWeight: 500,
-            marginBottom: 6,
-          }}
-        >
+        <div style={{ color: "rgba(255,255,255,0.8)", fontWeight: 500, marginBottom: 6 }}>
           Need math help this week?
         </div>
-
         <div style={{ marginBottom: 12 }}>
-          You can create a Student account and be in a live tutoring room in
-          minutes.
+          You can create a Student account and be in a live tutoring room in minutes.
         </div>
-
-        <div
-          style={{
-            marginBottom: 24,
-            display: "flex",
-            justifyContent: "center",
-          }}
-        >
-          <button
-            onClick={() => setIsLogin(false)}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 8,
-              background: "#3a6",
-              border: "1px solid #6ecf9a",
-              color: "#fff",
-              fontSize: 14,
-              lineHeight: 1.2,
-              fontWeight: 500,
-              cursor: "pointer",
-              minWidth: 150,
-              textAlign: "center",
-            }}
-          >
-            Get Started
-          </button>
-        </div>
-
-        <div
-          style={{
-            fontSize: 11,
-            lineHeight: 1.4,
-            color: "rgba(255,255,255,0.4)",
-            marginBottom: 4,
-          }}
-        >
+        <div style={{ fontSize: 11, lineHeight: 1.4, color: "rgba(255,255,255,0.4)", marginBottom: 4 }}>
           © {new Date().getFullYear()} Apex Tutoring · Calgary, AB
         </div>
-        <div
-          style={{
-            fontSize: 11,
-            lineHeight: 1.4,
-            color: "rgba(255,255,255,0.4)",
-            paddingBottom: 16,
-          }}
-        >
+        <div style={{ fontSize: 11, lineHeight: 1.4, color: "rgba(255,255,255,0.4)", paddingBottom: 16 }}>
           Online math tutoring for grades 4–12
         </div>
       </footer>
@@ -567,11 +428,6 @@ function AuthInner() {
   );
 }
 
-/**
- * Default export: wrap AuthInner in Suspense.
- * This satisfies Next.js's "useSearchParams must be inside a Suspense boundary"
- * rule for client components during build.
- */
 export default function AuthPage() {
   return (
     <Suspense fallback={<div style={{ color: "#fff" }}>Loading…</div>}>
