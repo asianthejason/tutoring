@@ -644,6 +644,29 @@ export default function RoomPage() {
     }
   }
 
+  // ✅ MISSING BEFORE: broadcast perm updates over data channel
+  async function broadcastPermUpdate(studentId: string, hear: boolean, speak: boolean) {
+    const room = roomRef.current;
+    if (!room) return;
+
+    hearMapRef.current[studentId] = hear;
+    speakMapRef.current[studentId] = speak;
+
+    setCanHearTutor((prev) => ({ ...prev, [studentId]: hear }));
+    setCanSpeakToTutor((prev) => ({ ...prev, [studentId]: speak }));
+    setPermVersion((v) => v + 1);
+
+    const msg = { type: "perm", studentId, hear, speak };
+    const data = new TextEncoder().encode(JSON.stringify(msg));
+    try {
+      await room.localParticipant.publishData(data, { reliable: true });
+    } catch {}
+
+    if (lockedRole === "tutor") {
+      reapplyTutorForStudent(room, studentId);
+    }
+  }
+
   // ---------- LIVEKIT EVENTS ----------
   function wireEvents(room: Room) {
     room
