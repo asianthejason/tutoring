@@ -1,7 +1,7 @@
 // src/app/admin/page.tsx
 "use client";
 
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import {
@@ -38,15 +38,13 @@ type SessionRow = {
 
 type UserRow = {
   uid: string;
-  role: Role;
   displayName?: string;
   email?: string;
+  role: Role;
   status?: "offline" | "waiting" | "busy";
   lastActiveAt?: number;
   roomId?: string;
   createdAt?: number;
-  // keep full doc in case you add more fields later
-  _raw?: Record<string, any>;
 };
 
 export default function AdminPage() {
@@ -57,22 +55,28 @@ export default function AdminPage() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<Role | null>(null);
 
+  // tabs
+  const [activeTab, setActiveTab] = useState<"sessions" | "tutors" | "students">(
+    "sessions"
+  );
+
   // live sessions
   const [liveSessions, setLiveSessions] = useState<SessionRow[]>([]);
-  const unsubSessionsRef = useRef<null | (() => void)>(null);
+  const sessionsUnsubRef = useRef<null | (() => void)>(null);
 
-  // users (tutors/students)
+  // users
   const [tutors, setTutors] = useState<UserRow[]>([]);
   const [students, setStudents] = useState<UserRow[]>([]);
-  const unsubTutorsRef = useRef<null | (() => void)>(null);
-  const unsubStudentsRef = useRef<null | (() => void)>(null);
+  const tutorsUnsubRef = useRef<null | (() => void)>(null);
+  const studentsUnsubRef = useRef<null | (() => void)>(null);
 
-  // searching
+  // search
   const [tutorQuery, setTutorQuery] = useState("");
   const [studentQuery, setStudentQuery] = useState("");
 
-  // profile modal
-  const [selectedUser, setSelectedUser] = useState<UserRow | null>(null);
+  // modal
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileUser, setProfileUser] = useState<UserRow | null>(null);
 
   // load auth + role, block non-admin
   useEffect(() => {
@@ -103,22 +107,22 @@ export default function AdminPage() {
     return unsub;
   }, [router]);
 
-  // subscribe to sessions
+  // subscribe to active sessions (with fallback)
   useEffect(() => {
     if (checkingAuth || userRole !== "admin") return;
 
-    function startListener(qry: Query<DocumentData>, isFallback: boolean) {
-      if (unsubSessionsRef.current) {
-        unsubSessionsRef.current();
-        unsubSessionsRef.current = null;
+    const startListener = (qry: Query<DocumentData>, isFallback: boolean) => {
+      if (sessionsUnsubRef.current) {
+        sessionsUnsubRef.current();
+        sessionsUnsubRef.current = null;
       }
-      unsubSessionsRef.current = onSnapshot(
+      sessionsUnsubRef.current = onSnapshot(
         qry,
         (snap) => {
           const rows: SessionRow[] = [];
           snap.forEach((d) => {
             const data = d.data() as DocumentData;
-            const row: SessionRow = {
+            rows.push({
               roomId: (data.roomId as string) || d.id,
               active: !!data.active,
               tutorUid: data.tutorUid,
@@ -133,10 +137,8 @@ export default function AdminPage() {
                   : 0,
               startedAt: typeof data.startedAt === "number" ? data.startedAt : undefined,
               updatedAt: typeof data.updatedAt === "number" ? data.updatedAt : undefined,
-            };
-            rows.push(row);
+            });
           });
-
           const finalRows = isFallback ? rows.filter((r) => r.active) : rows;
           setLiveSessions(finalRows);
         },
@@ -156,7 +158,7 @@ export default function AdminPage() {
           setLiveSessions([]);
         }
       );
-    }
+    };
 
     try {
       const indexedQ = query(
@@ -176,100 +178,90 @@ export default function AdminPage() {
     }
 
     return () => {
-      if (unsubSessionsRef.current) {
-        unsubSessionsRef.current();
-        unsubSessionsRef.current = null;
+      if (sessionsUnsubRef.current) {
+        sessionsUnsubRef.current();
+        sessionsUnsubRef.current = null;
       }
     };
   }, [checkingAuth, userRole]);
 
-  // subscribe to tutors
+  // subscribe to tutors & students (each with gentle fallbacks)
   useEffect(() => {
     if (checkingAuth || userRole !== "admin") return;
 
-    function startListenerUsers(qry: Query<DocumentData>, isFallback: boolean, setRows: (v: UserRow[]) => void, roleWanted: Role) {
-      const refHolder = roleWanted === "tutor" ? unsubTutorsRef : unsubStudentsRef;
-      if (refHolder.current) {
-        refHolder.current();
-        refHolder.current = null;
-      }
-      const unsub = onSnapshot(
-        qry,
-        (snap) => {
-          const rows: UserRow[] = [];
-          snap.forEach((d) => {
-            const data = d.data() as DocumentData;
-            const row: UserRow = {
-              uid: d.id,
-              role: (data.role || "student") as Role,
-              displayName: typeof data.displayName === "string" ? data.displayName : undefined,
-              email: typeof data.email === "string" ? data.email : undefined,
-              status: data.status,
-              lastActiveAt: typeof data.lastActiveAt === "number" ? data.lastActiveAt : undefined,
-              roomId: typeof data.roomId === "string" ? data.roomId : undefined,
-              createdAt: typeof data.createdAt === "number" ? data.createdAt : undefined,
-              _raw: data,
-            };
-            rows.push(row);
-          });
-
-          const finalRows = isFallback ? rows.filter((r) => r.role === roleWanted) : rows;
-          setRows(
-            finalRows.sort((a, b) => {
-              const an = (a.displayName || a.email || a.uid).toLowerCase();
-              const bn = (b.displayName || b.email || b.uid).toLowerCase();
-              return an.localeCompare(bn);
-            })
-          );
-        },
-        (err) => {
-          if (!isFallback) {
-            try {
-              const fallbackQ = query(collection(db, "users"), limit(300));
-              startListenerUsers(fallbackQ, true, setRows, roleWanted);
-              return;
-            } catch {}
-          }
-          console.error(`[admin users ${roleWanted} onSnapshot]`, err);
-          setRows([]);
+    const startUserListener = (
+      role: "tutor" | "student",
+      setFn: (rows: UserRow[]) => void,
+      unsubRef: React.MutableRefObject<null | (() => void)>
+    ) => {
+      const start = (qry: Query<DocumentData>, _fallback: boolean) => {
+        if (unsubRef.current) {
+          unsubRef.current();
+          unsubRef.current = null;
         }
-      );
-      refHolder.current = unsub;
-    }
+        unsubRef.current = onSnapshot(
+          qry,
+          (snap) => {
+            const rows: UserRow[] = [];
+            snap.forEach((d) => {
+              const v = d.data() as DocumentData;
+              rows.push({
+                uid: d.id,
+                displayName: v.displayName,
+                email: v.email,
+                role: (v.role as Role) ?? "student",
+                status: v.status,
+                lastActiveAt:
+                  typeof v.lastActiveAt === "number" ? (v.lastActiveAt as number) : undefined,
+                roomId: typeof v.roomId === "string" ? v.roomId : undefined,
+                createdAt: typeof v.createdAt === "number" ? v.createdAt : undefined,
+              });
+            });
+            setFn(rows);
+          },
+          (err) => {
+            console.warn(`[users ${role}] indexed query failed`, err);
+            // fallback (no orderBy)
+            try {
+              const q2 = query(
+                collection(db, "users"),
+                where("role", "==", role),
+                limit(300)
+              );
+              start(q2, true);
+            } catch (err2) {
+              console.error(`[users ${role}] fallback query failed`, err2);
+              setFn([]);
+            }
+          }
+        );
+      };
 
-    // Prefer index-friendly queries (role equality + limit) – no orderBy to avoid composite index need
-    try {
-      const tutorsQ = query(
-        collection(db, "users"),
-        where("role", "==", "tutor"),
-        limit(300)
-      );
-      startListenerUsers(tutorsQ, false, setTutors, "tutor");
-    } catch {
-      const fbQ = query(collection(db, "users"), limit(300));
-      startListenerUsers(fbQ, true, setTutors, "tutor");
-    }
+      try {
+        const q1 = query(
+          collection(db, "users"),
+          where("role", "==", role),
+          orderBy("lastActiveAt", "desc"),
+          limit(300)
+        );
+        start(q1, false);
+      } catch {
+        const q2 = query(collection(db, "users"), where("role", "==", role), limit(300));
+        start(q2, true);
+      }
+    };
 
-    try {
-      const studentsQ = query(
-        collection(db, "users"),
-        where("role", "==", "student"),
-        limit(500)
-      );
-      startListenerUsers(studentsQ, false, setStudents, "student");
-    } catch {
-      const fbQ = query(collection(db, "users"), limit(500));
-      startListenerUsers(fbQ, true, setStudents, "student");
-    }
+    startUserListener("tutor", setTutors, tutorsUnsubRef);
+    startUserListener("student", setStudents, studentsUnsubRef);
 
     return () => {
-      if (unsubTutorsRef.current) {
-        unsubTutorsRef.current();
-        unsubTutorsRef.current = null;
+      if (tutorsUnsubRef.current) {
+        tutorsUnsubRef.current();
+        tutorsUnsubRef.current = null;
       }
-      if (unsubStudentsRef.current) {
-        unsubStudentsRef.current();
-        unsubStudentsRef.current = null;
+      if (studentsUnsubRef.current) {
+        studentsUnsubRef.current();
+        studentsUnsubRef.current = null;
       }
     };
   }, [checkingAuth, userRole]);
@@ -288,7 +280,7 @@ export default function AdminPage() {
     );
   }
 
-  // ------ UI helpers ------
+  // helpers
   function formatTime(ts?: number) {
     if (!ts) return "—";
     try {
@@ -303,32 +295,33 @@ export default function AdminPage() {
       return "—";
     }
   }
-
-  const filteredTutors = useMemo(() => {
-    const q = tutorQuery.trim().toLowerCase();
-    if (!q) return tutors;
-    return tutors.filter((u) => {
-      const hay =
-        `${u.displayName || ""} ${u.email || ""} ${u.uid}`.toLowerCase();
-      return hay.includes(q);
-    });
-  }, [tutors, tutorQuery]);
-
-  const filteredStudents = useMemo(() => {
-    const q = studentQuery.trim().toLowerCase();
-    if (!q) return students;
-    return students.filter((u) => {
-      const hay =
-        `${u.displayName || ""} ${u.email || ""} ${u.uid}`.toLowerCase();
-      return hay.includes(q);
-    });
-  }, [students, studentQuery]);
+  function ellipsis(s?: string, n = 24) {
+    if (!s) return "—";
+    if (s.length <= n) return s;
+    return s.slice(0, n - 1) + "…";
+  }
 
   const bgPage = "#0f0f0f";
   const cardBg =
     "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.06) 0%, rgba(20,20,20,0.7) 60%)";
 
   if (checkingAuth) return null;
+
+  // filtered lists
+  const tq = tutorQuery.trim().toLowerCase();
+  const sq = studentQuery.trim().toLowerCase();
+  const tutorsShown = tutors.filter((u) =>
+    !tq
+      ? true
+      : (u.displayName || "").toLowerCase().includes(tq) ||
+        (u.email || "").toLowerCase().includes(tq)
+  );
+  const studentsShown = students.filter((u) =>
+    !sq
+      ? true
+      : (u.displayName || "").toLowerCase().includes(sq) ||
+        (u.email || "").toLowerCase().includes(sq)
+  );
 
   return (
     <main
@@ -346,7 +339,7 @@ export default function AdminPage() {
         gap: 24,
       }}
     >
-      {/* top nav / header */}
+      {/* header */}
       <header
         style={{
           width: "100%",
@@ -365,21 +358,8 @@ export default function AdminPage() {
             "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
         }}
       >
-        <div
-          style={{
-            color: "#fff",
-            display: "flex",
-            flexDirection: "column",
-            lineHeight: 1.2,
-          }}
-        >
-          <div
-            style={{
-              fontSize: 16,
-              fontWeight: 600,
-              letterSpacing: "-0.03em",
-            }}
-          >
+        <div style={{ color: "#fff", display: "flex", flexDirection: "column", lineHeight: 1.2 }}>
+          <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>
             Apex Tutoring
           </div>
           <div style={{ fontSize: 11, opacity: 0.7 }}>Admin Dashboard</div>
@@ -388,17 +368,17 @@ export default function AdminPage() {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button
             onClick={() => router.push("/")}
-            style={ghostBtn}
+            style={ghostButton}
           >
             Home
           </button>
-          <button onClick={handleSignOut} style={ghostBtn}>
+          <button onClick={handleSignOut} style={ghostButton}>
             Sign out
           </button>
         </div>
       </header>
 
-      {/* admin account summary + overview */}
+      {/* account summary */}
       <section
         style={{
           width: "100%",
@@ -406,39 +386,60 @@ export default function AdminPage() {
           margin: "0 auto",
           display: "grid",
           gap: "16px",
-          gridTemplateColumns:
-            "repeat(auto-fit, minmax(min(320px,100%),1fr))",
+          gridTemplateColumns: "repeat(auto-fit, minmax(min(320px,100%),1fr))",
         }}
       >
-        {/* Account card */}
-        <div style={cardStyle(cardBg)}>
-          <div style={cardTitle}>Admin Account</div>
-
-          <div style={{ opacity: 0.9, fontSize: 13 }}>
-            <div>
-              <span style={{ opacity: 0.6 }}>Email: </span>
-              <span>{userEmail || "…"}</span>
-            </div>
-            <div>
-              <span style={{ opacity: 0.6 }}>Role: </span>
-              <span>{userRole || "…"}</span>
-            </div>
+        <div
+          style={{
+            background: cardBg,
+            borderRadius: 12,
+            border: "1px solid rgba(255,255,255,0.15)",
+            boxShadow:
+              "0 30px 80px rgba(0,0,0,0.9), 0 2px 4px rgba(255,255,255,0.08) inset",
+            color: "#fff",
+            padding: "16px 20px",
+            fontSize: 13,
+            lineHeight: 1.4,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            minHeight: 140,
+          }}
+        >
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Admin Account</div>
+          <div style={{ opacity: 0.9 }}>
+            <div><span style={{ opacity: 0.6 }}>Email: </span><span>{userEmail || "…"}</span></div>
+            <div><span style={{ opacity: 0.6 }}>Role: </span><span>{userRole || "…"}</span></div>
             <div>
               <span style={{ opacity: 0.6 }}>Status: </span>
-              <span style={{ color: "#6ecf9a", fontWeight: 500 }}>
-                Verified admin
+              <span style={{ color: userRole === "admin" ? "#6ecf9a" : "rgba(255,255,255,0.6)", fontWeight: 500 }}>
+                {userRole === "admin" ? "Verified admin" : "—"}
               </span>
             </div>
           </div>
-
           <div style={{ marginTop: 12, fontSize: 11, color: "rgba(255,255,255,0.6)" }}>
             Only admins can view this page. Tutors / students get redirected.
           </div>
         </div>
 
-        {/* Live Classroom Overview card */}
-        <div style={cardStyle(cardBg)}>
-          <div style={cardTitle}>Live Classroom Overview</div>
+        <div
+          style={{
+            background: cardBg,
+            borderRadius: 12,
+            border: "1px solid rgba(255,255,255,0.15)",
+            boxShadow:
+              "0 30px 80px rgba(0,0,0,0.9), 0 2px 4px rgba(255,255,255,0.08) inset",
+            color: "#fff",
+            padding: "16px 20px",
+            fontSize: 13,
+            lineHeight: 1.4,
+            minHeight: 140,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          <div style={{ fontSize: 14, fontWeight: 600 }}>Live Classroom Overview</div>
           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>
             You can:
             <ul style={{ marginTop: 4, marginBottom: 4, paddingLeft: 18, lineHeight: 1.5 }}>
@@ -453,296 +454,307 @@ export default function AdminPage() {
         </div>
       </section>
 
-      {/* Sessions table */}
-      <section style={{ width: "100%", maxWidth: "1280px", margin: "0 auto" }}>
-        <div style={sectionTitle}>Active Sessions</div>
-
-        <div style={tableWrap}>
-          {/* header */}
-          <div style={tableHeaderGrid}>
-            <div>Room / Tutor</div>
-            <div>Students</div>
-            <div>Started</div>
-            <div>Action</div>
-          </div>
-
-          {/* rows */}
-          <div style={{ fontSize: 13, lineHeight: 1.4, color: "#fff" }}>
-            {liveSessions.length === 0 ? (
-              <div style={{ padding: 16, color: "rgba(255,255,255,0.6)" }}>
-                No live sessions right now.
-              </div>
-            ) : (
-              liveSessions.map((s) => {
-                const studentList =
-                  s.students?.length
-                    ? s.students.map((x) => x.name || x.id).join(", ")
-                    : "—";
-                return (
-                  <div
-                    key={`${s.roomId}-${s.updatedAt ?? ""}`}
-                    style={tableRowGrid}
-                  >
-                    <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
-                      <div style={{ fontWeight: 500 }}>{s.roomId || "—"}</div>
-                      <div style={{ color: "rgba(255,255,255,0.8)", fontSize: 12 }}>
-                        {s.tutorName || "Tutor"}{" "}
-                        <span style={{ opacity: 0.6, fontWeight: 400 }}>
-                          ({s.tutorEmail || "—"})
-                        </span>
-                      </div>
-                      <div style={{ fontSize: 11, marginTop: 2, color: "#6ecf9a" }}>
-                        Active
-                      </div>
-                    </div>
-
-                    <div style={{ fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                      {studentList}
-                    </div>
-
-                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.85)" }}>
-                      {formatTime(s.startedAt)}
-                    </div>
-
-                    <div style={{ display: "flex", alignItems: "flex-start" }}>
-                      <button
-                        onClick={() => joinQuietly(s.roomId)}
-                        style={ghostBtnSmall}
-                        title="Join as a silent observer"
-                      >
-                        Join quietly
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-
-        <div style={footNote}>
-          Internal use only. This dashboard may contain student information.
-        </div>
-      </section>
-
-      {/* Users: tutors + students */}
+      {/* TABS */}
       <section
         style={{
           width: "100%",
           maxWidth: "1280px",
-          margin: "0 auto 24px",
-          display: "grid",
-          gap: 16,
-          gridTemplateColumns: "repeat(auto-fit, minmax(min(520px,100%),1fr))",
+          margin: "0 auto",
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
         }}
       >
-        {/* Tutors */}
-        <div style={tableCard}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-            <div style={sectionTitle}>All Tutors</div>
-            <input
-              value={tutorQuery}
-              onChange={(e) => setTutorQuery(e.target.value)}
-              placeholder="Search tutors by name or email…"
-              style={searchInput}
-            />
-          </div>
-
-          <div style={miniHeaderGrid}>
-            <div>Name / Email</div>
-            <div>Status</div>
-            <div>Last Active</div>
-            <div>Room</div>
-          </div>
-
-          <div>
-            {filteredTutors.length === 0 ? (
-              <div style={emptyRow}>No tutors found.</div>
-            ) : (
-              filteredTutors.map((u) => (
-                <button
-                  key={u.uid}
-                  onClick={() => setSelectedUser(u)}
-                  style={miniRowBtn}
-                  title="View profile"
-                >
-                  <div style={{ display: "flex", flexDirection: "column", textAlign: "left" }}>
-                    <div style={{ fontWeight: 600 }}>
-                      {u.displayName || "—"}
-                    </div>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>{u.email || u.uid}</div>
-                  </div>
-                  <div style={{ fontSize: 12 }}>{u.status || "—"}</div>
-                  <div style={{ fontSize: 12, opacity: 0.85 }}>{formatTime(u.lastActiveAt)}</div>
-                  <div style={{ fontSize: 12 }}>{u.roomId || "—"}</div>
-                </button>
-              ))
-            )}
-          </div>
-        </div>
-
-        {/* Students */}
-        <div style={tableCard}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-            <div style={sectionTitle}>All Students</div>
-            <input
-              value={studentQuery}
-              onChange={(e) => setStudentQuery(e.target.value)}
-              placeholder="Search students by name or email…"
-              style={searchInput}
-            />
-          </div>
-
-          <div style={miniHeaderGrid}>
-            <div>Name / Email</div>
-            <div>Status</div>
-            <div>Last Active</div>
-            <div>Room</div>
-          </div>
-
-          <div>
-            {filteredStudents.length === 0 ? (
-              <div style={emptyRow}>No students found.</div>
-            ) : (
-              filteredStudents.map((u) => (
-                <button
-                  key={u.uid}
-                  onClick={() => setSelectedUser(u)}
-                  style={miniRowBtn}
-                  title="View profile"
-                >
-                  <div style={{ display: "flex", flexDirection: "column", textAlign: "left" }}>
-                    <div style={{ fontWeight: 600 }}>
-                      {u.displayName || "—"}
-                    </div>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>{u.email || u.uid}</div>
-                  </div>
-                  <div style={{ fontSize: 12 }}>{u.status || "—"}</div>
-                  <div style={{ fontSize: 12, opacity: 0.85 }}>{formatTime(u.lastActiveAt)}</div>
-                  <div style={{ fontSize: 12 }}>{u.roomId || "—"}</div>
-                </button>
-              ))
-            )}
-          </div>
-        </div>
-      </section>
-
-      {/* PROFILE MODAL */}
-      {selectedUser && (
+        {/* tab bar */}
         <div
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setSelectedUser(null)}
           style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.55)",
             display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-            padding: 16,
+            gap: 8,
+            borderBottom: "1px solid rgba(255,255,255,0.15)",
+            paddingBottom: 8,
           }}
         >
+          {[
+            { id: "sessions", label: "Active Sessions" },
+            { id: "tutors", label: "Tutors" },
+            { id: "students", label: "Students" },
+          ].map((t) => {
+            const active = activeTab === (t.id as any);
+            return (
+              <button
+                key={t.id}
+                onClick={() => setActiveTab(t.id as any)}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: 8,
+                  background: active ? "#3a6" : "#2a2a2a",
+                  border: active ? "1px solid #6ecf9a" : "1px solid #444",
+                  color: "#fff",
+                  fontSize: 13,
+                  lineHeight: 1.2,
+                  cursor: "pointer",
+                }}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* tab content */}
+        {activeTab === "sessions" && (
           <div
-            onClick={(e) => e.stopPropagation()}
             style={{
-              width: "min(560px, 96vw)",
-              background:
-                "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.06) 0%, rgba(16,16,16,0.9) 70%)",
-              border: "1px solid rgba(255,255,255,0.15)",
+              width: "100%",
               borderRadius: 12,
-              color: "#fff",
-              padding: "16px 18px",
-              boxShadow: "0 40px 120px rgba(0,0,0,0.7)",
-              display: "flex",
-              flexDirection: "column",
-              gap: 12,
+              border: "1px solid rgba(255,255,255,0.15)",
+              background:
+                "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.03) 0%, rgba(15,15,15,0.6) 70%)",
+              boxShadow:
+                "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
+              overflowX: "auto",
             }}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-              <div style={{ fontSize: 16, fontWeight: 700 }}>
-                {selectedUser.displayName || "Profile"}
-              </div>
-              <button onClick={() => setSelectedUser(null)} style={ghostBtnSmall}>
-                Close
-              </button>
-            </div>
-
+            {/* header */}
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "minmax(140px,1fr) minmax(180px,2fr)",
-                gap: 10,
-                fontSize: 13,
-                lineHeight: 1.5,
+                gridTemplateColumns:
+                  "minmax(180px,1.2fr) minmax(180px,1fr) minmax(160px,0.8fr) minmax(100px,auto)",
+                gap: "12px",
+                padding: "12px 16px",
+                fontSize: 12,
+                color: "rgba(255,255,255,0.6)",
+                borderBottom: "1px solid rgba(255,255,255,0.12)",
               }}
             >
-              <div style={{ opacity: 0.7 }}>UID</div>
-              <div style={{ wordBreak: "break-all" }}>{selectedUser.uid}</div>
-
-              <div style={{ opacity: 0.7 }}>Role</div>
-              <div>{selectedUser.role}</div>
-
-              <div style={{ opacity: 0.7 }}>Email</div>
-              <div>{selectedUser.email || "—"}</div>
-
-              <div style={{ opacity: 0.7 }}>Status</div>
-              <div>{selectedUser.status || "—"}</div>
-
-              <div style={{ opacity: 0.7 }}>Last Active</div>
-              <div>{formatTime(selectedUser.lastActiveAt)}</div>
-
-              <div style={{ opacity: 0.7 }}>Room</div>
-              <div>{selectedUser.roomId || "—"}</div>
-
-              <div style={{ opacity: 0.7 }}>Created</div>
-              <div>{formatTime(selectedUser.createdAt)}</div>
+              <div>Room / Tutor</div>
+              <div>Students</div>
+              <div>Started</div>
+              <div>Action</div>
             </div>
 
-            {/* Raw JSON (collapsed look) */}
-            <details style={{ marginTop: 6 }}>
-              <summary style={{ cursor: "pointer", opacity: 0.9 }}>Show raw document</summary>
-              <pre
-                style={{
-                  marginTop: 8,
-                  maxHeight: 260,
-                  overflow: "auto",
-                  background: "rgba(255,255,255,0.05)",
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  borderRadius: 8,
-                  padding: 10,
-                  fontSize: 12,
-                }}
-              >
-                {JSON.stringify(selectedUser._raw || {}, null, 2)}
-              </pre>
-            </details>
+            {/* rows */}
+            <div style={{ fontSize: 13, color: "#fff" }}>
+              {liveSessions.length === 0 ? (
+                <div style={{ padding: 16, color: "rgba(255,255,255,0.6)" }}>
+                  No live sessions right now.
+                </div>
+              ) : (
+                liveSessions.map((s) => {
+                  const studentList = s.students?.length
+                    ? s.students.map((x) => x.name || x.id).join(", ")
+                    : "—";
+                  return (
+                    <div
+                      key={`${s.roomId}-${s.updatedAt ?? ""}`}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns:
+                          "minmax(180px,1.2fr) minmax(180px,1fr) minmax(160px,0.8fr) minmax(100px,auto)",
+                        gap: "12px",
+                        padding: "12px 16px",
+                        borderBottom: "1px solid rgba(255,255,255,0.06)",
+                        alignItems: "center",
+                      }}
+                    >
+                      {/* room/tutor */}
+                      <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                        <div
+                          title={s.roomId}
+                          style={{
+                            fontWeight: 500,
+                            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                            maxWidth: "100%",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {s.roomId}
+                        </div>
+                        <div style={{ color: "rgba(255,255,255,0.8)", fontSize: 12 }}>
+                          {s.tutorName || "Tutor"}{" "}
+                          <span style={{ opacity: 0.6, fontWeight: 400 }}>
+                            ({ellipsis(s.tutorEmail, 28)})
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 11, marginTop: 2, color: "#6ecf9a" }}>Active</div>
+                      </div>
 
-            <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-              {selectedUser.roomId && (
-                <button
-                  onClick={() => joinQuietly(selectedUser.roomId!)}
-                  style={ghostBtn}
-                  title="Join this user's room quietly (if live)"
-                >
-                  Join their room
-                </button>
-              )}
-              {selectedUser.email && (
-                <button
-                  onClick={() => {
-                    navigator.clipboard.writeText(selectedUser.email!);
-                  }}
-                  style={ghostBtn}
-                >
-                  Copy email
-                </button>
+                      {/* students */}
+                      <div
+                        style={{
+                          fontSize: 12,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          minWidth: 0,
+                        }}
+                        title={studentList}
+                      >
+                        {studentList}
+                      </div>
+
+                      {/* started */}
+                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.85)" }}>
+                        {formatTime(s.startedAt)}
+                      </div>
+
+                      {/* action */}
+                      <div style={{ display: "flex", justifyContent: "flex-start" }}>
+                        <button
+                          onClick={() => joinQuietly(s.roomId)}
+                          style={ghostButton}
+                          title="Join as a silent observer"
+                        >
+                          Join quietly
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>
-        </div>
-      )}
+        )}
+
+        {activeTab === "tutors" && (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr",
+              gap: 12,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <input
+                value={tutorQuery}
+                onChange={(e) => setTutorQuery(e.target.value)}
+                placeholder="Search tutors by name or email…"
+                style={searchInput}
+              />
+            </div>
+
+            <div style={tableShell}>
+              <div style={tableHeader}>
+                <div>Name / Email</div>
+                <div>Status</div>
+                <div>Last Active</div>
+                <div>Room</div>
+              </div>
+
+              <div style={{ fontSize: 13, color: "#fff" }}>
+                {tutorsShown.length === 0 ? (
+                  <div style={{ padding: 16, color: "rgba(255,255,255,0.6)" }}>No tutors.</div>
+                ) : (
+                  tutorsShown.map((u) => (
+                    <button
+                      key={u.uid}
+                      onClick={() => {
+                        setProfileUser(u);
+                        setProfileOpen(true);
+                      }}
+                      style={tableRowButton}
+                    >
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+                        <div style={{ fontWeight: 600 }}>{u.displayName || "—"}</div>
+                        <div style={{ fontSize: 12, opacity: 0.85 }}>{u.email || "—"}</div>
+                      </div>
+
+                      <div style={{ fontSize: 12 }}>{u.status || "—"}</div>
+
+                      <div style={{ fontSize: 12, opacity: 0.9 }}>{formatTime(u.lastActiveAt)}</div>
+
+                      <div
+                        style={{
+                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                          fontSize: 12,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          minWidth: 0,
+                        }}
+                        title={u.roomId}
+                      >
+                        {u.roomId ? u.roomId : "—"}
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "students" && (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr",
+              gap: 12,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <input
+                value={studentQuery}
+                onChange={(e) => setStudentQuery(e.target.value)}
+                placeholder="Search students by name or email…"
+                style={searchInput}
+              />
+            </div>
+
+            <div style={tableShell}>
+              <div style={tableHeader}>
+                <div>Name / Email</div>
+                <div>Status</div>
+                <div>Last Active</div>
+                <div>Room</div>
+              </div>
+
+              <div style={{ fontSize: 13, color: "#fff" }}>
+                {studentsShown.length === 0 ? (
+                  <div style={{ padding: 16, color: "rgba(255,255,255,0.6)" }}>No students.</div>
+                ) : (
+                  studentsShown.map((u) => (
+                    <button
+                      key={u.uid}
+                      onClick={() => {
+                        setProfileUser(u);
+                        setProfileOpen(true);
+                      }}
+                      style={tableRowButton}
+                    >
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+                        <div style={{ fontWeight: 600 }}>{u.displayName || "—"}</div>
+                        <div style={{ fontSize: 12, opacity: 0.85 }}>{u.email || "—"}</div>
+                      </div>
+
+                      <div style={{ fontSize: 12 }}>{u.status || "—"}</div>
+
+                      <div style={{ fontSize: 12, opacity: 0.9 }}>{formatTime(u.lastActiveAt)}</div>
+
+                      <div
+                        style={{
+                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                          fontSize: 12,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          minWidth: 0,
+                        }}
+                        title={u.roomId}
+                      >
+                        {u.roomId ? u.roomId : "—"}
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
 
       <footer
         style={{
@@ -757,150 +769,171 @@ export default function AdminPage() {
       >
         © {new Date().getFullYear()} Apex Tutoring · Admin View
       </footer>
+
+      {/* PROFILE MODAL (opaque card, dimmed backdrop) */}
+      {profileOpen && profileUser && (
+        <>
+          <div
+            onClick={() => setProfileOpen(false)}
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.65)",
+              zIndex: 1000,
+            }}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            style={{
+              position: "fixed",
+              left: "50%",
+              top: "50%",
+              transform: "translate(-50%, -50%)",
+              width: "min(560px, 92vw)",
+              background: "#161616",
+              color: "#fff",
+              borderRadius: 12,
+              border: "1px solid rgba(255,255,255,0.2)",
+              boxShadow: "0 30px 120px rgba(0,0,0,0.9)",
+              zIndex: 1001,
+              padding: 16,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: 8,
+              }}
+            >
+              <div style={{ fontWeight: 700 }}>{profileUser.displayName || "Profile"}</div>
+              <button onClick={() => setProfileOpen(false)} style={ghostButton}>
+                Close
+              </button>
+            </div>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "120px 1fr",
+                rowGap: 8,
+                columnGap: 12,
+                fontSize: 13,
+              }}
+            >
+              <div style={{ opacity: 0.6 }}>UID</div>
+              <div
+                style={{
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+                title={profileUser.uid}
+              >
+                {profileUser.uid}
+              </div>
+
+              <div style={{ opacity: 0.6 }}>Role</div>
+              <div>{profileUser.role}</div>
+
+              <div style={{ opacity: 0.6 }}>Email</div>
+              <div>{profileUser.email || "—"}</div>
+
+              <div style={{ opacity: 0.6 }}>Status</div>
+              <div>{profileUser.status || "—"}</div>
+
+              <div style={{ opacity: 0.6 }}>Last Active</div>
+              <div>{formatTime(profileUser.lastActiveAt)}</div>
+
+              <div style={{ opacity: 0.6 }}>Room</div>
+              <div
+                style={{
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+                title={profileUser.roomId}
+              >
+                {profileUser.roomId || "—"}
+              </div>
+
+              <div style={{ opacity: 0.6 }}>Created</div>
+              <div>{formatTime(profileUser.createdAt)}</div>
+            </div>
+
+            <div style={{ marginTop: 12, display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button
+                onClick={() => profileUser?.email && navigator.clipboard.writeText(profileUser.email)}
+                style={ghostButton}
+              >
+                Copy email
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </main>
   );
 }
 
-/* ---------- styles ---------- */
-const ghostBtn: React.CSSProperties = {
-  padding: "6px 10px",
+/* --- tiny styles --- */
+const ghostButton: React.CSSProperties = {
+  padding: "8px 12px",
   borderRadius: 8,
   background: "#2a2a2a",
   border: "1px solid #444",
   color: "#fff",
   fontSize: 13,
   lineHeight: 1.2,
-  minWidth: 80,
   cursor: "pointer",
+  minWidth: 80,
+  textAlign: "center",
 };
 
-const ghostBtnSmall: React.CSSProperties = {
-  ...ghostBtn,
-  minWidth: 90,
-  fontSize: 12,
-};
-
-const cardStyle = (bg: string): React.CSSProperties => ({
-  background: bg,
-  borderRadius: 12,
-  border: "1px solid rgba(255,255,255,0.15)",
-  boxShadow:
-    "0 30px 80px rgba(0,0,0,0.9), 0 2px 4px rgba(255,255,255,0.08) inset",
+const searchInput: React.CSSProperties = {
+  background: "#1a1a1a",
+  border: "1px solid #444",
   color: "#fff",
-  padding: "16px 20px",
-  fontSize: 13,
-  lineHeight: 1.4,
-  display: "flex",
-  flexDirection: "column",
-  gap: 8,
-  minHeight: 140,
-});
-
-const cardTitle: React.CSSProperties = {
-  fontSize: 14,
-  fontWeight: 600,
-  marginBottom: 4,
-  color: "#fff",
-  lineHeight: 1.3,
+  padding: "8px 10px",
+  borderRadius: 8,
+  minWidth: 260,
+  outline: "none",
 };
 
-const sectionTitle: React.CSSProperties = {
-  fontSize: 14,
-  fontWeight: 600,
-  color: "#fff",
-  lineHeight: 1.3,
-  marginBottom: 12,
-};
-
-const tableWrap: React.CSSProperties = {
+const tableShell: React.CSSProperties = {
   width: "100%",
   borderRadius: 12,
   border: "1px solid rgba(255,255,255,0.15)",
   background:
     "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.03) 0%, rgba(15,15,15,0.6) 70%)",
-  boxShadow:
-    "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
+  boxShadow: "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
   overflowX: "auto",
 };
 
-const tableHeaderGrid: React.CSSProperties = {
+const tableHeader: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns:
-    "minmax(140px,1fr) minmax(140px,1fr) minmax(160px,1fr) minmax(80px,auto)",
+  gridTemplateColumns: "minmax(220px,1.4fr) minmax(120px,0.8fr) minmax(160px,0.8fr) minmax(160px,0.8fr)",
   gap: "12px",
   padding: "12px 16px",
   fontSize: 12,
-  lineHeight: 1.3,
   color: "rgba(255,255,255,0.6)",
   borderBottom: "1px solid rgba(255,255,255,0.12)",
 };
 
-const tableRowGrid: React.CSSProperties = {
+const tableRowButton: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns:
-    "minmax(140px,1fr) minmax(140px,1fr) minmax(160px,1fr) minmax(80px,auto)",
+  gridTemplateColumns: "minmax(220px,1.4fr) minmax(120px,0.8fr) minmax(160px,0.8fr) minmax(160px,0.8fr)",
   gap: "12px",
   padding: "12px 16px",
-  borderBottom: "1px solid rgba(255,255,255,0.06)",
-};
-
-const footNote: React.CSSProperties = {
-  marginTop: 16,
-  fontSize: 11,
-  lineHeight: 1.4,
-  color: "rgba(255,255,255,0.5)",
-  textAlign: "center",
-};
-
-const tableCard: React.CSSProperties = {
-  borderRadius: 12,
-  border: "1px solid rgba(255,255,255,0.15)",
-  background:
-    "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.03) 0%, rgba(15,15,15,0.6) 70%)",
-  boxShadow:
-    "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
-  padding: 16,
-};
-
-const miniHeaderGrid: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(180px,2fr) minmax(100px,1fr) minmax(120px,1fr) minmax(80px,1fr)",
-  gap: 12,
-  padding: "10px 12px",
-  fontSize: 12,
-  color: "rgba(255,255,255,0.6)",
-  borderTop: "1px solid rgba(255,255,255,0.12)",
-  borderBottom: "1px solid rgba(255,255,255,0.06)",
-  marginTop: 8,
-};
-
-const miniRowBtn: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(180px,2fr) minmax(100px,1fr) minmax(120px,1fr) minmax(80px,1fr)",
-  gap: 12,
-  padding: "10px 12px",
   width: "100%",
+  textAlign: "left" as const,
   background: "transparent",
+  color: "#fff",
   border: "none",
-  color: "#fff",
-  textAlign: "left",
-  cursor: "pointer",
   borderBottom: "1px solid rgba(255,255,255,0.06)",
-};
-
-const emptyRow: React.CSSProperties = {
-  padding: 12,
-  color: "rgba(255,255,255,0.6)",
-  fontSize: 13,
-};
-
-const searchInput: React.CSSProperties = {
-  padding: "8px 10px",
-  borderRadius: 8,
-  border: "1px solid rgba(255,255,255,0.25)",
-  background: "rgba(0,0,0,0.25)",
-  color: "#fff",
-  outline: "none",
-  minWidth: 220,
-  fontSize: 13,
+  cursor: "pointer",
 };
