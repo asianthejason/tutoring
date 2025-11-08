@@ -183,7 +183,7 @@ export default function RoomPage() {
 
   // ---------- WHITEBOARD STATE ----------
   const [boards, setBoards] = useState<Record<string, Stroke[]>>({});
-  the boardsRef = useRef<Record<string, Stroke[]>>({});
+  const boardsRef = useRef<Record<string, Stroke[]>>({});
 
   const [viewBoardFor, setViewBoardFor] = useState<string>("");
   const viewBoardForRef = useRef<string>("");
