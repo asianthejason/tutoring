@@ -53,12 +53,11 @@ export default function AdminPage() {
   // auth / role state
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userUid, setUserUid] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<Role | null>(null);
 
   // tabs
-  const [activeTab, setActiveTab] = useState<"sessions" | "tutors" | "students">(
-    "sessions"
-  );
+  const [activeTab, setActiveTab] = useState<"sessions" | "tutors" | "students">("sessions");
 
   // live sessions
   const [liveSessions, setLiveSessions] = useState<SessionRow[]>([]);
@@ -78,6 +77,12 @@ export default function AdminPage() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileUser, setProfileUser] = useState<UserRow | null>(null);
 
+  // deletion UI state
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteSuccess, setDeleteSuccess] = useState(false);
+
   // load auth + role, block non-admin
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser: FirebaseUser | null) => {
@@ -87,6 +92,7 @@ export default function AdminPage() {
       }
 
       setUserEmail(fbUser.email ?? null);
+      setUserUid(fbUser.uid);
 
       try {
         const snap = await getDoc(fsDoc(db, "users", fbUser.uid));
@@ -105,7 +111,7 @@ export default function AdminPage() {
       setCheckingAuth(false);
     });
     return unsub;
-  }, [router]);
+  }, [router, db]);
 
   // subscribe to active sessions (with fallback)
   useEffect(() => {
@@ -211,8 +217,7 @@ export default function AdminPage() {
                 email: v.email,
                 role: (v.role as Role) ?? "student",
                 status: v.status,
-                lastActiveAt:
-                  typeof v.lastActiveAt === "number" ? (v.lastActiveAt as number) : undefined,
+                lastActiveAt: typeof v.lastActiveAt === "number" ? v.lastActiveAt : undefined,
                 roomId: typeof v.roomId === "string" ? v.roomId : undefined,
                 createdAt: typeof v.createdAt === "number" ? v.createdAt : undefined,
               });
@@ -223,11 +228,7 @@ export default function AdminPage() {
             console.warn(`[users ${role}] indexed query failed`, err);
             // fallback (no orderBy)
             try {
-              const q2 = query(
-                collection(db, "users"),
-                where("role", "==", role),
-                limit(300)
-              );
+              const q2 = query(collection(db, "users"), where("role", "==", role), limit(300));
               start(q2, true);
             } catch (err2) {
               console.error(`[users ${role}] fallback query failed`, err2);
@@ -273,11 +274,7 @@ export default function AdminPage() {
 
   function joinQuietly(roomId: string) {
     const observerName = `Observer-${roomId}`;
-    router.push(
-      `/room?roomId=${encodeURIComponent(roomId)}&name=${encodeURIComponent(
-        observerName
-      )}`
-    );
+    router.push(`/room?roomId=${encodeURIComponent(roomId)}&name=${encodeURIComponent(observerName)}`);
   }
 
   // helpers
@@ -301,6 +298,40 @@ export default function AdminPage() {
     return s.slice(0, n - 1) + "…";
   }
 
+  // delete account (calls backend API)
+  async function deleteAccount(uid: string) {
+    setDeleteError(null);
+    setDeleteSuccess(false);
+    setDeleting(true);
+    try {
+      const idToken = await auth.currentUser?.getIdToken();
+      const res = await fetch("/api/admin/delete-account", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+        },
+        body: JSON.stringify({ uid }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error || `Delete failed (${res.status})`);
+      }
+      setDeleteSuccess(true);
+      // Close modal after a brief moment and clear state
+      setTimeout(() => {
+        setProfileOpen(false);
+        setProfileUser(null);
+        setDeleteConfirmText("");
+        setDeleteSuccess(false);
+      }, 900);
+    } catch (e: any) {
+      setDeleteError(e?.message || "Delete failed");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   const bgPage = "#0f0f0f";
   const cardBg =
     "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.06) 0%, rgba(20,20,20,0.7) 60%)";
@@ -311,17 +342,18 @@ export default function AdminPage() {
   const tq = tutorQuery.trim().toLowerCase();
   const sq = studentQuery.trim().toLowerCase();
   const tutorsShown = tutors.filter((u) =>
-    !tq
-      ? true
-      : (u.displayName || "").toLowerCase().includes(tq) ||
-        (u.email || "").toLowerCase().includes(tq)
+    !tq ? true : (u.displayName || "").toLowerCase().includes(tq) || (u.email || "").toLowerCase().includes(tq)
   );
   const studentsShown = students.filter((u) =>
-    !sq
-      ? true
-      : (u.displayName || "").toLowerCase().includes(sq) ||
-        (u.email || "").toLowerCase().includes(sq)
+    !sq ? true : (u.displayName || "").toLowerCase().includes(sq) || (u.email || "").toLowerCase().includes(sq)
   );
+
+  const canDeleteSelected =
+    !!profileUser &&
+    !!profileUser.uid &&
+    deleteConfirmText.trim() === (profileUser.email || profileUser.uid) &&
+    !deleting &&
+    profileUser.uid !== userUid; // don't allow self-delete from the UI
 
   return (
     <main
@@ -351,25 +383,18 @@ export default function AdminPage() {
           justifyContent: "space-between",
           flexWrap: "wrap",
           borderRadius: 12,
-          background:
-            "linear-gradient(to right, rgba(255,255,255,0.07), rgba(255,255,255,0.03))",
+          background: "linear-gradient(to right, rgba(255,255,255,0.07), rgba(255,255,255,0.03))",
           border: "1px solid rgba(255,255,255,0.15)",
-          boxShadow:
-            "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
+          boxShadow: "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
         }}
       >
         <div style={{ color: "#fff", display: "flex", flexDirection: "column", lineHeight: 1.2 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>
-            Apex Tutoring
-          </div>
+          <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>Apex Tutoring</div>
           <div style={{ fontSize: 11, opacity: 0.7 }}>Admin Dashboard</div>
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button
-            onClick={() => router.push("/")}
-            style={ghostButton}
-          >
+          <button onClick={() => router.push("/")} style={ghostButton}>
             Home
           </button>
           <button onClick={handleSignOut} style={ghostButton}>
@@ -394,8 +419,7 @@ export default function AdminPage() {
             background: cardBg,
             borderRadius: 12,
             border: "1px solid rgba(255,255,255,0.15)",
-            boxShadow:
-              "0 30px 80px rgba(0,0,0,0.9), 0 2px 4px rgba(255,255,255,0.08) inset",
+            boxShadow: "0 30px 80px rgba(0,0,0,0.9), 0 2px 4px rgba(255,255,255,0.08) inset",
             color: "#fff",
             padding: "16px 20px",
             fontSize: 13,
@@ -408,8 +432,14 @@ export default function AdminPage() {
         >
           <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Admin Account</div>
           <div style={{ opacity: 0.9 }}>
-            <div><span style={{ opacity: 0.6 }}>Email: </span><span>{userEmail || "…"}</span></div>
-            <div><span style={{ opacity: 0.6 }}>Role: </span><span>{userRole || "…"}</span></div>
+            <div>
+              <span style={{ opacity: 0.6 }}>Email: </span>
+              <span>{userEmail || "…"}</span>
+            </div>
+            <div>
+              <span style={{ opacity: 0.6 }}>Role: </span>
+              <span>{userRole || "…"}</span>
+            </div>
             <div>
               <span style={{ opacity: 0.6 }}>Status: </span>
               <span style={{ color: userRole === "admin" ? "#6ecf9a" : "rgba(255,255,255,0.6)", fontWeight: 500 }}>
@@ -427,8 +457,7 @@ export default function AdminPage() {
             background: cardBg,
             borderRadius: 12,
             border: "1px solid rgba(255,255,255,0.15)",
-            boxShadow:
-              "0 30px 80px rgba(0,0,0,0.9), 0 2px 4px rgba(255,255,255,0.08) inset",
+            boxShadow: "0 30px 80px rgba(0,0,0,0.9), 0 2px 4px rgba(255,255,255,0.08) inset",
             color: "#fff",
             padding: "16px 20px",
             fontSize: 13,
@@ -501,7 +530,7 @@ export default function AdminPage() {
           })}
         </div>
 
-        {/* tab content */}
+        {/* SESSIONS */}
         {activeTab === "sessions" && (
           <div
             style={{
@@ -510,17 +539,14 @@ export default function AdminPage() {
               border: "1px solid rgba(255,255,255,0.15)",
               background:
                 "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.03) 0%, rgba(15,15,15,0.6) 70%)",
-              boxShadow:
-                "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
+              boxShadow: "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
               overflowX: "auto",
             }}
           >
-            {/* header */}
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns:
-                  "minmax(180px,1.2fr) minmax(180px,1fr) minmax(160px,0.8fr) minmax(100px,auto)",
+                gridTemplateColumns: "minmax(180px,1.2fr) minmax(180px,1fr) minmax(160px,0.8fr) minmax(100px,auto)",
                 gap: "12px",
                 padding: "12px 16px",
                 fontSize: 12,
@@ -534,17 +560,12 @@ export default function AdminPage() {
               <div>Action</div>
             </div>
 
-            {/* rows */}
             <div style={{ fontSize: 13, color: "#fff" }}>
               {liveSessions.length === 0 ? (
-                <div style={{ padding: 16, color: "rgba(255,255,255,0.6)" }}>
-                  No live sessions right now.
-                </div>
+                <div style={{ padding: 16, color: "rgba(255,255,255,0.6)" }}>No live sessions right now.</div>
               ) : (
                 liveSessions.map((s) => {
-                  const studentList = s.students?.length
-                    ? s.students.map((x) => x.name || x.id).join(", ")
-                    : "—";
+                  const studentList = s.students?.length ? s.students.map((x) => x.name || x.id).join(", ") : "—";
                   return (
                     <div
                       key={`${s.roomId}-${s.updatedAt ?? ""}`}
@@ -558,7 +579,6 @@ export default function AdminPage() {
                         alignItems: "center",
                       }}
                     >
-                      {/* room/tutor */}
                       <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
                         <div
                           title={s.roomId}
@@ -575,14 +595,11 @@ export default function AdminPage() {
                         </div>
                         <div style={{ color: "rgba(255,255,255,0.8)", fontSize: 12 }}>
                           {s.tutorName || "Tutor"}{" "}
-                          <span style={{ opacity: 0.6, fontWeight: 400 }}>
-                            ({ellipsis(s.tutorEmail, 28)})
-                          </span>
+                          <span style={{ opacity: 0.6, fontWeight: 400 }}>({ellipsis(s.tutorEmail, 28)})</span>
                         </div>
                         <div style={{ fontSize: 11, marginTop: 2, color: "#6ecf9a" }}>Active</div>
                       </div>
 
-                      {/* students */}
                       <div
                         style={{
                           fontSize: 12,
@@ -596,18 +613,10 @@ export default function AdminPage() {
                         {studentList}
                       </div>
 
-                      {/* started */}
-                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.85)" }}>
-                        {formatTime(s.startedAt)}
-                      </div>
+                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.85)" }}>{formatTime(s.startedAt)}</div>
 
-                      {/* action */}
                       <div style={{ display: "flex", justifyContent: "flex-start" }}>
-                        <button
-                          onClick={() => joinQuietly(s.roomId)}
-                          style={ghostButton}
-                          title="Join as a silent observer"
-                        >
+                        <button onClick={() => joinQuietly(s.roomId)} style={ghostButton} title="Join as a silent observer">
                           Join quietly
                         </button>
                       </div>
@@ -619,14 +628,9 @@ export default function AdminPage() {
           </div>
         )}
 
+        {/* TUTORS */}
         {activeTab === "tutors" && (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr",
-              gap: 12,
-            }}
-          >
+          <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
               <input
                 value={tutorQuery}
@@ -653,6 +657,9 @@ export default function AdminPage() {
                       key={u.uid}
                       onClick={() => {
                         setProfileUser(u);
+                        setDeleteConfirmText("");
+                        setDeleteError(null);
+                        setDeleteSuccess(false);
                         setProfileOpen(true);
                       }}
                       style={tableRowButton}
@@ -687,14 +694,9 @@ export default function AdminPage() {
           </div>
         )}
 
+        {/* STUDENTS */}
         {activeTab === "students" && (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr",
-              gap: 12,
-            }}
-          >
+          <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
               <input
                 value={studentQuery}
@@ -721,6 +723,9 @@ export default function AdminPage() {
                       key={u.uid}
                       onClick={() => {
                         setProfileUser(u);
+                        setDeleteConfirmText("");
+                        setDeleteError(null);
+                        setDeleteSuccess(false);
                         setProfileOpen(true);
                       }}
                       style={tableRowButton}
@@ -790,7 +795,7 @@ export default function AdminPage() {
               left: "50%",
               top: "50%",
               transform: "translate(-50%, -50%)",
-              width: "min(560px, 92vw)",
+              width: "min(620px, 92vw)",
               background: "#161616",
               color: "#fff",
               borderRadius: 12,
@@ -873,6 +878,65 @@ export default function AdminPage() {
                 Copy email
               </button>
             </div>
+
+            {/* DANGER ZONE */}
+            <div
+              style={{
+                marginTop: 16,
+                padding: 12,
+                borderRadius: 10,
+                border: "1px solid rgba(255,0,0,0.35)",
+                background: "rgba(255,0,0,0.06)",
+              }}
+            >
+              <div style={{ fontWeight: 700, color: "#ff8b8b", marginBottom: 6 }}>Danger Zone</div>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", lineHeight: 1.5 }}>
+                Deleting an account permanently removes the user from <b>Firebase Auth</b> and deletes their
+                <b> users/</b> document. This action cannot be undone.
+              </div>
+
+              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
+                <input
+                  placeholder={`Type "${profileUser.email || profileUser.uid}" to confirm`}
+                  value={deleteConfirmText}
+                  onChange={(e) => setDeleteConfirmText(e.target.value)}
+                  style={{
+                    ...searchInput,
+                    width: "100%",
+                    minWidth: 0,
+                    borderColor: "rgba(255,0,0,0.35)",
+                  }}
+                  disabled={deleting || deleteSuccess}
+                />
+                <button
+                  onClick={() => profileUser && deleteAccount(profileUser.uid)}
+                  disabled={!canDeleteSelected}
+                  style={{
+                    ...dangerButton,
+                    opacity: canDeleteSelected ? 1 : 0.6,
+                    cursor: canDeleteSelected ? "pointer" : "default",
+                  }}
+                  title={
+                    profileUser?.uid === userUid
+                      ? "You cannot delete your own admin account here."
+                      : "Delete this account"
+                  }
+                >
+                  {deleting ? "Deleting…" : deleteSuccess ? "Deleted" : "Delete account"}
+                </button>
+              </div>
+
+              {deleteError && (
+                <div style={{ marginTop: 8, fontSize: 12, color: "#ff9f9f" }}>
+                  Error: {deleteError}
+                </div>
+              )}
+              {profileUser?.uid === userUid && (
+                <div style={{ marginTop: 8, fontSize: 12, color: "rgba(255,255,255,0.75)" }}>
+                  To prevent lockout, self-delete is disabled.
+                </div>
+              )}
+            </div>
           </div>
         </>
       )}
@@ -891,6 +955,18 @@ const ghostButton: React.CSSProperties = {
   lineHeight: 1.2,
   cursor: "pointer",
   minWidth: 80,
+  textAlign: "center",
+};
+
+const dangerButton: React.CSSProperties = {
+  padding: "10px 14px",
+  borderRadius: 8,
+  background: "#8b1e1e",
+  border: "1px solid #ff8b8b",
+  color: "#fff",
+  fontSize: 13,
+  lineHeight: 1.2,
+  minWidth: 140,
   textAlign: "center",
 };
 
@@ -916,7 +992,8 @@ const tableShell: React.CSSProperties = {
 
 const tableHeader: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(220px,1.4fr) minmax(120px,0.8fr) minmax(160px,0.8fr) minmax(160px,0.8fr)",
+  gridTemplateColumns:
+    "minmax(220px,1.4fr) minmax(120px,0.8fr) minmax(160px,0.8fr) minmax(160px,0.8fr)",
   gap: "12px",
   padding: "12px 16px",
   fontSize: 12,
@@ -926,7 +1003,8 @@ const tableHeader: React.CSSProperties = {
 
 const tableRowButton: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(220px,1.4fr) minmax(120px,0.8fr) minmax(160px,0.8fr) minmax(160px,0.8fr)",
+  gridTemplateColumns:
+    "minmax(220px,1.4fr) minmax(120px,0.8fr) minmax(160px,0.8fr) minmax(160px,0.8fr)",
   gap: "12px",
   padding: "12px 16px",
   width: "100%",
