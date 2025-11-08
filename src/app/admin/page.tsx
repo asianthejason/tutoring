@@ -1,7 +1,7 @@
 // src/app/admin/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import {
@@ -18,6 +18,7 @@ import {
   where,
   getDoc,
   doc as fsDoc,
+  Query,
   DocumentData,
 } from "firebase/firestore";
 
@@ -45,6 +46,7 @@ export default function AdminPage() {
 
   // live sessions
   const [liveSessions, setLiveSessions] = useState<SessionRow[]>([]);
+  const unsubRef = useRef<null | (() => void)>(null);
 
   // load auth + role, block non-admin
   useEffect(() => {
@@ -76,51 +78,92 @@ export default function AdminPage() {
     return unsub;
   }, [router]);
 
-  // subscribe to *active* sessions
+  // subscribe to sessions; prefer indexed query, fallback to client-side filter
   useEffect(() => {
     if (checkingAuth || userRole !== "admin") return;
 
-    // active==true + order by updatedAt desc
-    // Firestore may prompt you to create a composite index the first time.
-    const qRef = query(
-      collection(db, "sessions"),
-      where("active", "==", true),
-      orderBy("updatedAt", "desc"),
-      limit(50)
-    );
-
-    const unsub = onSnapshot(
-      qRef,
-      (snap) => {
-        const rows: SessionRow[] = [];
-        snap.forEach((d) => {
-          const data = d.data() as DocumentData;
-          rows.push({
-            roomId: (data.roomId as string) || d.id,
-            active: !!data.active,
-            tutorUid: data.tutorUid,
-            tutorName: data.tutorName,
-            tutorEmail: data.tutorEmail,
-            students: Array.isArray(data.students) ? data.students : [],
-            studentsCount:
-              typeof data.studentsCount === "number"
-                ? data.studentsCount
-                : Array.isArray(data.students)
-                ? data.students.length
-                : 0,
-            startedAt: data.startedAt,
-            updatedAt: data.updatedAt,
-          });
-        });
-        setLiveSessions(rows);
-      },
-      (err) => {
-        console.error("[admin sessions onSnapshot]", err);
-        setLiveSessions([]);
+    function startListener(qry: Query<DocumentData>, isFallback: boolean) {
+      if (unsubRef.current) {
+        unsubRef.current();
+        unsubRef.current = null;
       }
-    );
+      unsubRef.current = onSnapshot(
+        qry,
+        (snap) => {
+          const rows: SessionRow[] = [];
+          snap.forEach((d) => {
+            const data = d.data() as DocumentData;
+            const row: SessionRow = {
+              roomId: (data.roomId as string) || d.id,
+              active: !!data.active,
+              tutorUid: data.tutorUid,
+              tutorName: data.tutorName,
+              tutorEmail: data.tutorEmail,
+              students: Array.isArray(data.students) ? data.students : [],
+              studentsCount:
+                typeof data.studentsCount === "number"
+                  ? data.studentsCount
+                  : Array.isArray(data.students)
+                  ? data.students.length
+                  : 0,
+              startedAt: typeof data.startedAt === "number" ? data.startedAt : undefined,
+              updatedAt: typeof data.updatedAt === "number" ? data.updatedAt : undefined,
+            };
+            rows.push(row);
+          });
 
-    return unsub;
+          // If we're on the fallback (no where clause), filter to active here.
+          const finalRows = isFallback ? rows.filter((r) => r.active) : rows;
+
+          setLiveSessions(finalRows);
+        },
+        (err) => {
+          // If the "indexed" query fails (likely missing composite index),
+          // fall back to a query that needs no index and filter on the client.
+          if (!isFallback) {
+            try {
+              const fallbackQ = query(
+                collection(db, "sessions"),
+                orderBy("updatedAt", "desc"),
+                limit(50)
+              );
+              startListener(fallbackQ, true);
+              return;
+            } catch {
+              // ignore and show nothing
+            }
+          }
+          console.error("[admin sessions onSnapshot]", err);
+          setLiveSessions([]);
+        }
+      );
+    }
+
+    // Try the indexed query first:
+    try {
+      const indexedQ = query(
+        collection(db, "sessions"),
+        where("active", "==", true),
+        orderBy("updatedAt", "desc"),
+        limit(50)
+      );
+      startListener(indexedQ, false);
+    } catch {
+      // If constructing the query itself throws (rare), immediately fallback.
+      const fallbackQ = query(
+        collection(db, "sessions"),
+        orderBy("updatedAt", "desc"),
+        limit(50)
+      );
+      startListener(fallbackQ, true);
+    }
+
+    return () => {
+      if (unsubRef.current) {
+        unsubRef.current();
+        unsubRef.current = null;
+      }
+    };
   }, [checkingAuth, userRole]);
 
   async function handleSignOut() {
@@ -129,6 +172,7 @@ export default function AdminPage() {
   }
 
   function joinQuietly(roomId: string) {
+    // Admins join /room with mic/cam auto-muted in observer mode (handled by room page).
     const observerName = `Observer-${roomId}`;
     router.push(
       `/room?roomId=${encodeURIComponent(roomId)}&name=${encodeURIComponent(
