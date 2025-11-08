@@ -70,7 +70,7 @@ export default function RoomPage() {
   const [authed, setAuthed] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [lockedRole, setLockedRole] = useState<Role | null>(null);
-  const [profileName, setProfileName] = useState<string>(""); // <- display name used everywhere
+  const [profileName, setProfileName] = useState<string>(""); // display name used everywhere
 
   const [sessionRoomId, setSessionRoomId] = useState<string>("");
 
@@ -653,7 +653,7 @@ export default function RoomPage() {
     }
 
     let room: Room | null = null;
-    let hb: any = null;
+    let hb: any = null; // heartbeat interval id
     let byeHandler: (() => void) | null = null;
 
     (async () => {
@@ -662,7 +662,7 @@ export default function RoomPage() {
 
         const bodyPayload: any = {
           role: lockedRole,
-          name: profileName || (lockedRole === "tutor" ? "Tutor" : "Student"), // <- use profile displayName in token
+          name: profileName || (lockedRole === "tutor" ? "Tutor" : "Student"),
           roomId: sessionRoomId,
         };
 
@@ -725,6 +725,27 @@ export default function RoomPage() {
         else if (lockedRole === "tutor") setStatus("Tutor connected. Use Hear/Speak. Click a feed to view its whiteboard.");
         else setStatus("Connected as Student. Click feeds to view boards.");
 
+        // ---------- NEW: presence heartbeat for ALL roles ----------
+        const uid = auth.currentUser?.uid || null;
+
+        const touchPresence = async () => {
+          if (!uid) return;
+          try {
+            await updateDoc(doc(db, "users", uid), { lastActiveAt: Date.now() });
+          } catch {}
+        };
+
+        // prime + keep-alive
+        await touchPresence();
+        hb = setInterval(touchPresence, 15_000);
+
+        // also bump on occupancy and lifecycle changes
+        roomInstance.on(RoomEvent.ParticipantConnected, touchPresence);
+        roomInstance.on(RoomEvent.ParticipantDisconnected, touchPresence);
+        roomInstance.on(RoomEvent.Connected, touchPresence);
+        roomInstance.once(RoomEvent.Disconnected, touchPresence);
+        // ---------- end presence heartbeat ----------
+
         if (lockedRole === "student") {
           hearMapRef.current[identity] = false;
           speakMapRef.current[identity] = false;
@@ -737,12 +758,12 @@ export default function RoomPage() {
           setCanHearTutor({});
           setCanSpeakToTutor({});
 
-          const uid = auth.currentUser?.uid || null;
+          const tutorUid = auth.currentUser?.uid || null;
 
           const writeFromOccupancy = async () => {
-            if (!uid) return;
+            if (!tutorUid) return;
             const hasStudent = Array.from(roomInstance.remoteParticipants.values()).some((p) => isStudentId(p.identity));
-            await setTutorStatus(uid, hasStudent ? "busy" : "waiting");
+            await setTutorStatus(tutorUid, hasStudent ? "busy" : "waiting");
           };
 
           await writeFromOccupancy();
@@ -750,12 +771,7 @@ export default function RoomPage() {
           roomInstance.on(RoomEvent.ParticipantDisconnected, writeFromOccupancy);
           roomInstance.on(RoomEvent.Connected, writeFromOccupancy);
 
-          hb = setInterval(() => {
-            if (!uid) return;
-            updateDoc(doc(db, "users", uid), { lastActiveAt: Date.now() }).catch(() => {});
-          }, 15000);
-
-          // --- Admin Dashboard session tracking (unchanged) ---
+          // --- Admin Dashboard session tracking ---
           const sessionRef = doc(db, "sessions", sessionRoomId);
           const rosterSnapshot = () =>
             Array.from(roomInstance.remoteParticipants.values())
@@ -768,13 +784,14 @@ export default function RoomPage() {
               const tutorName = profileName || (meEmail ? meEmail.split("@")[0] : "Tutor");
               const prev = await getDoc(sessionRef);
               const keepStartedAt =
-                (prev.exists() && typeof prev.data()?.startedAt === "number" ? (prev.data()?.startedAt as number) : null) ??
-                null;
+                (prev.exists() && typeof prev.data()?.startedAt === "number"
+                  ? (prev.data()?.startedAt as number)
+                  : null) ?? null;
               const studentsNow = rosterSnapshot();
               const payload: SessionDoc = {
                 roomId: sessionRoomId,
                 active: true,
-                tutorUid: uid || "",
+                tutorUid: tutorUid || "",
                 tutorName,
                 tutorEmail: meEmail,
                 students: studentsNow,
@@ -811,13 +828,13 @@ export default function RoomPage() {
           roomInstance.on(RoomEvent.Connected, writeFromOccupancyToSession);
 
           byeHandler = () => {
-            if (uid) setTutorStatus(uid, "offline").catch(() => {});
+            if (tutorUid) setTutorStatus(tutorUid, "offline").catch(() => {});
             markSessionInactive().catch(() => {});
           };
           window.addEventListener("beforeunload", byeHandler);
           roomInstance.once(RoomEvent.Disconnected, () => {
             markSessionInactive().catch(() => {});
-            if (uid) setTutorStatus(uid, "offline").catch(() => {});
+            if (tutorUid) setTutorStatus(tutorUid, "offline").catch(() => {});
             if (byeHandler) window.removeEventListener("beforeunload", byeHandler);
           });
         }
