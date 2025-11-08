@@ -15,7 +15,7 @@ import { useRouter } from "next/navigation";
 
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc, updateDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, updateDoc, onSnapshot } from "firebase/firestore";
 
 type Role = "tutor" | "student" | "admin";
 
@@ -76,8 +76,6 @@ export default function RoomPage() {
   const [lockedRole, setLockedRole] = useState<Role | null>(null);
 
   // which LiveKit room are we joining?
-  // tutors: from their own user doc
-  // students/admin: ?roomId= from URL
   const [sessionRoomId, setSessionRoomId] = useState<string>("");
 
   // Query params
@@ -165,6 +163,30 @@ export default function RoomPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wbContainerRef = useRef<HTMLDivElement>(null);
 
+  // ---------- NAV STATUS PILL (tutor) ----------
+  const [navStatus, setNavStatus] = useState<"offline" | "waiting" | "busy" | null>(null);
+
+  function statusLabel(s: "offline" | "waiting" | "busy") {
+    if (s === "waiting") return "Waiting";
+    if (s === "busy") return "Busy";
+    return "Offline";
+  }
+  function statusPillStyle(s: "offline" | "waiting" | "busy"): React.CSSProperties {
+    const base: React.CSSProperties = {
+      padding: "6px 10px",
+      borderRadius: 999,
+      fontSize: 12,
+      lineHeight: 1,
+      fontWeight: 600,
+      border: "1px solid",
+      userSelect: "none",
+      alignSelf: "center",
+    };
+    if (s === "busy") return { ...base, color: "#fff", background: "#b22", borderColor: "#e88" };
+    if (s === "waiting") return { ...base, color: "#231", background: "#f6d58b", borderColor: "#f2c04b" };
+    return { ...base, color: "#ddd", background: "#2a2a2a", borderColor: "#555" };
+  }
+
   // keep ref synced with state
   useEffect(() => {
     viewBoardForRef.current = viewBoardFor;
@@ -209,6 +231,22 @@ export default function RoomPage() {
     }
   }, [sessionRoomId]);
 
+  // ---------- Live pill subscription (tutor) ----------
+  useEffect(() => {
+    if (!authed || lockedRole !== "tutor") {
+      setNavStatus(null);
+      return;
+    }
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+
+    const unsub = onSnapshot(doc(db, "users", uid), (snap) => {
+      const s = (snap.data()?.status as "offline" | "waiting" | "busy" | undefined) ?? null;
+      setNavStatus(s);
+    });
+    return unsub;
+  }, [authed, lockedRole]);
+
   // ---------- BOARD PERMISSION LOGIC ----------
   function canCurrentUserEditBoard(): boolean {
     const me = myIdRef.current;
@@ -216,7 +254,7 @@ export default function RoomPage() {
     if (!me || !target || !lockedRole) return false;
 
     if (lockedRole === "admin") return false; // observers: read-only
-    if (lockedRole === "tutor") return true;   // tutors can draw anywhere
+    if (lockedRole === "tutor") return true; // tutors can draw anywhere
     if (lockedRole === "student") return me === target; // students on their board only
     return false;
   }
@@ -888,7 +926,7 @@ export default function RoomPage() {
           setCanHearTutor({});
           setCanSpeakToTutor({});
 
-          // ---- NEW: status pill writer is wired RIGHT AFTER CONNECT ----
+          // ---- Status writer wired after connect ----
           const uid = auth.currentUser?.uid || null;
 
           const writeFromOccupancy = async () => {
@@ -899,7 +937,7 @@ export default function RoomPage() {
             await setTutorStatus(uid, hasStudent ? "busy" : "waiting");
           };
 
-          // prime immediately (so "Offline" becomes "Waiting" while alone)
+          // prime immediately
           await writeFromOccupancy();
 
           // update when occupancy changes
@@ -1262,7 +1300,7 @@ export default function RoomPage() {
         ? "Observer"
         : "Participant";
 
-      const isMe = t.pid === meId;
+      const isMe = t.pid === myIdRef.current;
       if (isMe) roleText += " (You)";
 
       const roleEl = document.createElement("div");
@@ -1281,7 +1319,7 @@ export default function RoomPage() {
       const amStudent = lockedRole === "student";
 
       const isRemoteStudentTile = amTutor && !t.isLocal && isStudentId(t.pid);
-      const isMeStudentTile = amStudent && t.pid === meId && isStudentId(t.pid);
+      const isMeStudentTile = amStudent && t.pid === myIdRef.current && isStudentId(t.pid);
 
       // tutor Hear/Speak buttons for each remote student
       if (isRemoteStudentTile && !amAdmin) {
@@ -1343,8 +1381,8 @@ export default function RoomPage() {
         indicatorRow.style.flexWrap = "wrap";
         indicatorRow.style.alignItems = "center";
 
-        const hearAllowed = !!hearMapRef.current[meId];
-        const speakAllowed = !!speakMapRef.current[meId];
+        const hearAllowed = !!hearMapRef.current[myIdRef.current];
+        const speakAllowed = !!speakMapRef.current[myIdRef.current];
 
         function mkPill(labelText: string, allowed: boolean) {
           const pill = document.createElement("div");
@@ -1555,6 +1593,9 @@ export default function RoomPage() {
 
         {/* right actions (Home first) */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {lockedRole === "tutor" && navStatus && (
+            <div style={statusPillStyle(navStatus)}>{statusLabel(navStatus)}</div>
+          )}
           <button style={ghostButtonStyle} onClick={() => router.push("/")}>
             Home
           </button>
