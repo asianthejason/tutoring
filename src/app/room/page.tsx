@@ -15,7 +15,7 @@ import { useRouter } from "next/navigation";
 
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, updateDoc, onSnapshot } from "firebase/firestore";
 
 type Role = "tutor" | "student" | "admin";
 
@@ -49,6 +49,22 @@ function isTutorId(id: string | undefined | null) {
 function isObserverId(id: string | undefined | null) {
   if (!id) return false;
   return id.toLowerCase().startsWith("admin");
+}
+
+// ---------- tiny status helper (kept local to this file) ----------
+async function setTutorStatus(
+  uid: string,
+  status: "offline" | "waiting" | "busy"
+) {
+  try {
+    await setDoc(
+      doc(db, "users", uid),
+      { status, statusUpdatedAt: Date.now(), lastActiveAt: Date.now() },
+      { merge: true }
+    );
+  } catch {
+    // best-effort; ignore write errors so UI doesn't break
+  }
 }
 
 export default function RoomPage() {
@@ -147,6 +163,30 @@ export default function RoomPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wbContainerRef = useRef<HTMLDivElement>(null);
 
+  // ---------- NAV STATUS PILL (tutor) ----------
+  const [navStatus, setNavStatus] = useState<"offline" | "waiting" | "busy" | null>(null);
+
+  function statusLabel(s: "offline" | "waiting" | "busy") {
+    if (s === "waiting") return "Waiting";
+    if (s === "busy") return "Busy";
+    return "Offline";
+  }
+  function statusPillStyle(s: "offline" | "waiting" | "busy"): React.CSSProperties {
+    const base: React.CSSProperties = {
+      padding: "6px 10px",
+      borderRadius: 999,
+      fontSize: 12,
+      lineHeight: 1,
+      fontWeight: 600,
+      border: "1px solid",
+      userSelect: "none",
+      alignSelf: "center",
+    };
+    if (s === "busy") return { ...base, color: "#fff", background: "#b22", borderColor: "#e88" };
+    if (s === "waiting") return { ...base, color: "#231", background: "#f6d58b", borderColor: "#f2c04b" };
+    return { ...base, color: "#ddd", background: "#2a2a2a", borderColor: "#555" };
+  }
+
   // keep ref synced with state
   useEffect(() => {
     viewBoardForRef.current = viewBoardFor;
@@ -190,6 +230,22 @@ export default function RoomPage() {
       if (qpRoom) setSessionRoomId(qpRoom);
     }
   }, [sessionRoomId]);
+
+  // ---------- Live pill subscription (tutor) ----------
+  useEffect(() => {
+    if (!authed || lockedRole !== "tutor") {
+      setNavStatus(null);
+      return;
+    }
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+
+    const unsub = onSnapshot(doc(db, "users", uid), (snap) => {
+      const s = (snap.data()?.status as "offline" | "waiting" | "busy" | undefined) ?? null;
+      setNavStatus(s);
+    });
+    return unsub;
+  }, [authed, lockedRole]);
 
   // ---------- BOARD PERMISSION LOGIC ----------
   function canCurrentUserEditBoard(): boolean {
@@ -644,7 +700,6 @@ export default function RoomPage() {
     }
   }
 
-  // ✅ MISSING BEFORE: broadcast perm updates over data channel
   async function broadcastPermUpdate(studentId: string, hear: boolean, speak: boolean) {
     const room = roomRef.current;
     if (!room) return;
@@ -658,9 +713,7 @@ export default function RoomPage() {
 
     const msg = { type: "perm", studentId, hear, speak };
     const data = new TextEncoder().encode(JSON.stringify(msg));
-    try {
-      await room.localParticipant.publishData(data, { reliable: true });
-    } catch {}
+    await room.localParticipant.publishData(data, { reliable: true });
 
     if (lockedRole === "tutor") {
       reapplyTutorForStudent(room, studentId);
@@ -774,6 +827,8 @@ export default function RoomPage() {
     }
 
     let room: Room | null = null;
+    let hb: any = null;
+    let byeHandler: (() => void) | null = null;
 
     (async () => {
       try {
@@ -870,7 +925,39 @@ export default function RoomPage() {
           speakMapRef.current = {};
           setCanHearTutor({});
           setCanSpeakToTutor({});
+
+          // ---- Status writer wired after connect ----
+          const uid = auth.currentUser?.uid || null;
+
+          const writeFromOccupancy = async () => {
+            if (!uid) return;
+            const hasStudent = Array.from(roomInstance.remoteParticipants.values()).some((p) =>
+              isStudentId(p.identity)
+            );
+            await setTutorStatus(uid, hasStudent ? "busy" : "waiting");
+          };
+
+          // prime immediately
+          await writeFromOccupancy();
+
+          // update when occupancy changes
+          roomInstance.on(RoomEvent.ParticipantConnected, writeFromOccupancy);
+          roomInstance.on(RoomEvent.ParticipantDisconnected, writeFromOccupancy);
+          roomInstance.on(RoomEvent.Connected, writeFromOccupancy);
+
+          // lightweight heartbeat so lists stay fresh
+          hb = setInterval(() => {
+            if (!uid) return;
+            updateDoc(doc(db, "users", uid), { lastActiveAt: Date.now() }).catch(() => {});
+          }, 15000);
+
+          // mark offline on tab close
+          byeHandler = () => {
+            if (uid) setTutorStatus(uid, "offline").catch(() => {});
+          };
+          window.addEventListener("beforeunload", byeHandler);
         }
+        // ------------------------------------------
 
         wireEvents(roomInstance);
         refreshTilesAndRoster(roomInstance);
@@ -892,6 +979,10 @@ export default function RoomPage() {
     })();
 
     return () => {
+      try {
+        if (byeHandler) window.removeEventListener("beforeunload", byeHandler);
+        if (hb) clearInterval(hb);
+      } catch {}
       room?.disconnect();
     };
   }, [authed, lockedRole, sessionRoomId, desiredName, resizeCanvas]);
@@ -1502,6 +1593,9 @@ export default function RoomPage() {
 
         {/* right actions (Home first) */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {lockedRole === "tutor" && navStatus && (
+            <div style={statusPillStyle(navStatus)}>{statusLabel(navStatus)}</div>
+          )}
           <button style={ghostButtonStyle} onClick={() => router.push("/")}>
             Home
           </button>
