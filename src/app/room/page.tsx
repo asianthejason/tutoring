@@ -15,7 +15,7 @@ import { useRouter } from "next/navigation";
 
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc, updateDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, updateDoc, onSnapshot } from "firebase/firestore";
 
 type Role = "tutor" | "student" | "admin";
 
@@ -67,6 +67,36 @@ async function setTutorStatus(
   }
 }
 
+// ---------- status chip UI ----------
+function StatusChip({ state }: { state: "waiting" | "busy" | "offline" | null }) {
+  const m =
+    state === "waiting"
+      ? { bg: "#163b24", border: "#3a6", text: "#6ecf9a", label: "Waiting" }
+      : state === "busy"
+      ? { bg: "#3b2f16", border: "#d4a23c", text: "#ffd277", label: "Busy" }
+      : { bg: "#442424", border: "#a66", text: "#ff8b8b", label: "Offline" };
+
+  return (
+    <div
+      style={{
+        backgroundColor: m.bg,
+        border: `1px solid ${m.border}`,
+        color: m.text,
+        fontSize: 12,
+        lineHeight: 1.2,
+        padding: "6px 10px",
+        borderRadius: 8,
+        minWidth: 70,
+        textAlign: "center",
+        fontWeight: 500,
+      }}
+      title="Live status from your profile"
+    >
+      {m.label}
+    </div>
+  );
+}
+
 export default function RoomPage() {
   const router = useRouter();
 
@@ -89,6 +119,9 @@ export default function RoomPage() {
 
   const [status, setStatus] = useState("Joining…");
   const [error, setError] = useState<string | null>(null);
+
+  // tutor header pill status
+  const [tutorStatus, setTutorStatusState] = useState<"waiting" | "busy" | "offline" | null>(null);
 
   const [myIdentity, setMyIdentity] = useState<string>("");
   const myIdRef = useRef<string>("");
@@ -150,7 +183,7 @@ export default function RoomPage() {
 
   // ---------- WHITEBOARD STATE ----------
   const [boards, setBoards] = useState<Record<string, Stroke[]>>({});
-  const boardsRef = useRef<Record<string, Stroke[]>>({});
+  the boardsRef = useRef<Record<string, Stroke[]>>({});
 
   const [viewBoardFor, setViewBoardFor] = useState<string>("");
   const viewBoardForRef = useRef<string>("");
@@ -201,6 +234,24 @@ export default function RoomPage() {
     return unsub;
   }, [router]);
 
+  // Subscribe to live status for tutors so we can show the pill in the header
+  useEffect(() => {
+    if (lockedRole !== "tutor") {
+      setTutorStatusState(null);
+      return;
+    }
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+
+    const uref = doc(db, "users", uid);
+    const unsub = onSnapshot(uref, (s) => {
+      const raw = (s.data()?.status as any) || "offline";
+      setTutorStatusState(raw === "waiting" || raw === "busy" ? raw : "offline");
+    });
+
+    return () => unsub();
+  }, [lockedRole]);
+
   // Safety net: if state is still empty, try to hydrate from URL once more.
   useEffect(() => {
     if (!sessionRoomId) {
@@ -216,7 +267,7 @@ export default function RoomPage() {
     if (!me || !target || !lockedRole) return false;
 
     if (lockedRole === "admin") return false; // observers: read-only
-    if (lockedRole === "tutor") return true;   // tutors can draw anywhere
+    if (lockedRole === "tutor") return true; // tutors can draw anywhere
     if (lockedRole === "student") return me === target; // students on their board only
     return false;
   }
@@ -936,7 +987,9 @@ export default function RoomPage() {
     computeAndWrite();
 
     // listen for occupancy changes
-    const onAny = () => { computeAndWrite(); };
+    const onAny = () => {
+      computeAndWrite();
+    };
     room.on(RoomEvent.ParticipantConnected, onAny);
     room.on(RoomEvent.ParticipantDisconnected, onAny);
     room.on(RoomEvent.Connected, onAny);
@@ -948,7 +1001,9 @@ export default function RoomPage() {
     }, 15000);
 
     // mark offline on tab close
-    const bye = () => { if (uid) setTutorStatus(uid, "offline").catch(() => {}); };
+    const bye = () => {
+      if (uid) setTutorStatus(uid, "offline").catch(() => {});
+    };
     window.addEventListener("beforeunload", bye);
 
     return () => {
@@ -1538,7 +1593,8 @@ export default function RoomPage() {
           display: "flex",
           flexWrap: "wrap",
           justifyContent: "space-between",
-          alignItems: "stretch",
+          alignItems: "center",
+          gap: 12,
           borderRadius: 12,
           background: "linear-gradient(180deg, rgba(255,255,255,0.07) 0%, rgba(15,15,15,0.0) 100%)",
           border: "1px solid rgba(255,255,255,0.15)",
@@ -1565,6 +1621,9 @@ export default function RoomPage() {
           </div>
           <div style={{ fontSize: 11, opacity: 0.7 }}>Tutoring Room ({roleLabel})</div>
         </div>
+
+        {/* center: live status pill for tutors */}
+        {lockedRole === "tutor" && <StatusChip state={tutorStatus} />}
 
         {/* right actions (Home first) */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
