@@ -32,6 +32,19 @@ type TokenResp = {
 type StrokePoint = { x: number; y: number };
 type Stroke = { color: string; size: number; points: StrokePoint[] };
 
+// --- Admin session doc type (for /sessions collection) ---
+type SessionDoc = {
+  roomId: string;
+  active: boolean;
+  tutorUid: string;
+  tutorName?: string;
+  tutorEmail?: string;
+  students: { id: string; name: string }[];
+  studentsCount: number;
+  startedAt: number;
+  updatedAt: number;
+};
+
 // ---------- helpers ----------
 function qp(name: string, fallback?: string) {
   if (typeof window === "undefined") return fallback;
@@ -951,11 +964,103 @@ export default function RoomPage() {
             updateDoc(doc(db, "users", uid), { lastActiveAt: Date.now() }).catch(() => {});
           }, 15000);
 
-          // mark offline on tab close
+          // ---------- NEW: Admin Dashboard Session Tracking ----------
+          // Keep a live sessions/{roomId} doc for admins to view/join quietly.
+          const sessionRef = doc(db, "sessions", sessionRoomId);
+
+          const rosterSnapshot = () => {
+            const arr = Array.from(roomInstance.remoteParticipants.values());
+            return arr
+              .filter((p) => isStudentId(p.identity))
+              .map((p) => ({
+                id: p.identity || "",
+                name: p.name || "Student",
+              }));
+          };
+
+          const primeSession = async () => {
+            try {
+              const meEmail = auth.currentUser?.email || undefined;
+              const tutorName =
+                (desiredName && desiredName.trim()) ||
+                (meEmail ? meEmail.split("@")[0] : "Tutor");
+
+              const prev = await getDoc(sessionRef);
+              const keepStartedAt =
+                (prev.exists() && typeof prev.data()?.startedAt === "number"
+                  ? (prev.data()?.startedAt as number)
+                  : null) ?? null;
+
+              const studentsNow = rosterSnapshot();
+
+              const payload: SessionDoc = {
+                roomId: sessionRoomId,
+                active: true,
+                tutorUid: uid || "",
+                tutorName,
+                tutorEmail: meEmail,
+                students: studentsNow,
+                studentsCount: studentsNow.length,
+                startedAt: keepStartedAt ?? Date.now(),
+                updatedAt: Date.now(),
+              };
+
+              await setDoc(sessionRef, payload, { merge: true });
+            } catch {
+              // best-effort
+            }
+          };
+
+          const writeFromOccupancyToSession = async () => {
+            try {
+              const studentsNow = rosterSnapshot();
+              await setDoc(
+                sessionRef,
+                {
+                  active: true,
+                  students: studentsNow,
+                  studentsCount: studentsNow.length,
+                  updatedAt: Date.now(),
+                },
+                { merge: true }
+              );
+            } catch {
+              // ignore
+            }
+          };
+
+          const markSessionInactive = async () => {
+            try {
+              await setDoc(
+                sessionRef,
+                { active: false, students: [], studentsCount: 0, updatedAt: Date.now() },
+                { merge: true }
+              );
+            } catch {
+              // ignore
+            }
+          };
+
+          // prime + wire events
+          await primeSession();
+          roomInstance.on(RoomEvent.ParticipantConnected, writeFromOccupancyToSession);
+          roomInstance.on(RoomEvent.ParticipantDisconnected, writeFromOccupancyToSession);
+          roomInstance.on(RoomEvent.Connected, writeFromOccupancyToSession);
+
+          // mark inactive on tab close
           byeHandler = () => {
             if (uid) setTutorStatus(uid, "offline").catch(() => {});
+            markSessionInactive().catch(() => {});
           };
           window.addEventListener("beforeunload", byeHandler);
+
+          // also when LiveKit disconnects
+          roomInstance.once(RoomEvent.Disconnected, () => {
+            markSessionInactive().catch(() => {});
+            if (uid) setTutorStatus(uid, "offline").catch(() => {});
+            if (byeHandler) window.removeEventListener("beforeunload", byeHandler);
+          });
+          // ---------- end session tracking ----------
         }
         // ------------------------------------------
 

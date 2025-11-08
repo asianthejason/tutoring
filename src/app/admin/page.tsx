@@ -1,3 +1,4 @@
+// src/app/admin/page.tsx
 "use client";
 
 import { useEffect, useState } from "react";
@@ -14,19 +15,24 @@ import {
   query,
   orderBy,
   limit,
+  where,
+  getDoc,
+  doc as fsDoc,
   DocumentData,
 } from "firebase/firestore";
 
 type Role = "tutor" | "student" | "admin";
 
-type SessionDoc = {
-  active?: boolean;
-  tutorId?: string;
+type SessionRow = {
+  roomId: string;
+  active: boolean;
+  tutorUid?: string;
   tutorName?: string;
   tutorEmail?: string;
-  studentIds?: string[];
-  studentEmails?: Record<string, string>;
+  students: { id: string; name: string }[];
+  studentsCount: number;
   startedAt?: number;
+  updatedAt?: number;
 };
 
 export default function AdminPage() {
@@ -37,79 +43,80 @@ export default function AdminPage() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<Role | null>(null);
 
-  // session list from Firestore
-  const [sessions, setSessions] = useState<
-    { roomId: string; data: SessionDoc }[]
-  >([]);
+  // live sessions
+  const [liveSessions, setLiveSessions] = useState<SessionRow[]>([]);
 
   // load auth + role, block non-admin
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser: FirebaseUser | null) => {
       if (!fbUser) {
-        // not logged in
         router.replace("/auth?from=/admin");
         return;
       }
 
       setUserEmail(fbUser.email ?? null);
 
-      // get role from Firestore
-      const token = await fbUser.getIdTokenResult().catch(() => null);
-      // We don't actually trust custom claims here. We're using your existing users/{uid} doc pattern in /page.
-      // To stay consistent and not duplicate logic, we’ll just fetch once using the same logic:
-      const { getDoc, doc } = await import("firebase/firestore");
-      const userSnap = await getDoc(doc(db, "users", fbUser.uid));
-      const role = (userSnap.data()?.role || "student") as Role;
-      setUserRole(role);
+      // check role from users/{uid}
+      try {
+        const snap = await getDoc(fsDoc(db, "users", fbUser.uid));
+        const role = (snap.data()?.role || "student") as Role;
+        setUserRole(role);
 
-      // redirect away if not admin
-      if (role !== "admin") {
+        if (role !== "admin") {
+          router.replace("/");
+          return;
+        }
+      } catch {
         router.replace("/");
         return;
       }
 
       setCheckingAuth(false);
     });
-
     return unsub;
   }, [router]);
 
-  // subscribe to Firestore sessions for live data
+  // subscribe to *active* sessions
   useEffect(() => {
-    if (checkingAuth) return;
-    if (userRole !== "admin") return;
+    if (checkingAuth || userRole !== "admin") return;
 
-    // We listen to all sessions.
-    // You can add where("active","==",true) later if you only want live rooms.
+    // active==true + order by updatedAt desc
+    // Firestore may prompt you to create a composite index the first time.
     const qRef = query(
       collection(db, "sessions"),
-      orderBy("startedAt", "desc"),
-      limit(25)
+      where("active", "==", true),
+      orderBy("updatedAt", "desc"),
+      limit(50)
     );
 
     const unsub = onSnapshot(
       qRef,
       (snap) => {
-        const items: { roomId: string; data: SessionDoc }[] = [];
-        snap.forEach((docSnap) => {
-          const d = docSnap.data() as DocumentData;
-          items.push({
-            roomId: docSnap.id,
-            data: {
-              active: d.active,
-              tutorId: d.tutorId,
-              tutorName: d.tutorName,
-              tutorEmail: d.tutorEmail,
-              studentIds: d.studentIds,
-              studentEmails: d.studentEmails,
-              startedAt: d.startedAt,
-            },
+        const rows: SessionRow[] = [];
+        snap.forEach((d) => {
+          const data = d.data() as DocumentData;
+          rows.push({
+            roomId: (data.roomId as string) || d.id,
+            active: !!data.active,
+            tutorUid: data.tutorUid,
+            tutorName: data.tutorName,
+            tutorEmail: data.tutorEmail,
+            students: Array.isArray(data.students) ? data.students : [],
+            studentsCount:
+              typeof data.studentsCount === "number"
+                ? data.studentsCount
+                : Array.isArray(data.students)
+                ? data.students.length
+                : 0,
+            startedAt: data.startedAt,
+            updatedAt: data.updatedAt,
           });
         });
-        setSessions(items);
+        setLiveSessions(rows);
       },
       (err) => {
-        console.error("[admin sessions onSnapshot error]", err);
+        console.error("[admin sessions onSnapshot]", err);
+        setLiveSessions([]);
       }
     );
 
@@ -122,19 +129,17 @@ export default function AdminPage() {
   }
 
   function joinQuietly(roomId: string) {
-    // We’ll send the admin to /room with override flags.
-    // name is what will show inside the session.
     const observerName = `Observer-${roomId}`;
     router.push(
-      `/room?roomId=${encodeURIComponent(
-        roomId
-      )}&adminOverride=true&name=${encodeURIComponent(observerName)}`
+      `/room?roomId=${encodeURIComponent(roomId)}&name=${encodeURIComponent(
+        observerName
+      )}`
     );
   }
 
   // ------ UI helpers ------
   function formatTime(ts?: number) {
-    if (!ts) return "-";
+    if (!ts) return "—";
     try {
       const d = new Date(ts);
       return d.toLocaleString(undefined, {
@@ -144,13 +149,15 @@ export default function AdminPage() {
         minute: "2-digit",
       });
     } catch {
-      return "-";
+      return "—";
     }
   }
 
   const bgPage = "#0f0f0f";
   const cardBg =
     "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.06) 0%, rgba(20,20,20,0.7) 60%)";
+
+  if (checkingAuth) return null;
 
   return (
     <main
@@ -410,7 +417,7 @@ export default function AdminPage() {
             marginBottom: 12,
           }}
         >
-          Active / Recent Sessions
+          Active Sessions
         </div>
 
         <div
@@ -430,7 +437,7 @@ export default function AdminPage() {
             style={{
               display: "grid",
               gridTemplateColumns:
-                "minmax(140px,1fr) minmax(120px,1fr) minmax(160px,1fr) minmax(80px,auto)",
+                "minmax(140px,1fr) minmax(140px,1fr) minmax(160px,1fr) minmax(80px,auto)",
               gap: "12px",
               padding: "12px 16px",
               fontSize: 12,
@@ -447,7 +454,7 @@ export default function AdminPage() {
 
           {/* table rows */}
           <div style={{ fontSize: 13, lineHeight: 1.4, color: "#fff" }}>
-            {sessions.length === 0 ? (
+            {liveSessions.length === 0 ? (
               <div
                 style={{
                   padding: "16px",
@@ -455,82 +462,44 @@ export default function AdminPage() {
                   color: "rgba(255,255,255,0.6)",
                 }}
               >
-                No sessions found.
+                No live sessions right now.
               </div>
             ) : (
-              sessions.map(({ roomId, data }) => {
-                const {
-                  tutorName,
-                  tutorEmail,
-                  studentIds,
-                  startedAt,
-                  active,
-                } = data;
-
+              liveSessions.map((s) => {
                 const studentList =
-                  studentIds && studentIds.length > 0
-                    ? studentIds.join(", ")
+                  s.students?.length
+                    ? s.students.map((x) => x.name || x.id).join(", ")
                     : "—";
-
                 return (
                   <div
-                    key={roomId}
+                    key={`${s.roomId}-${s.updatedAt ?? ""}`}
                     style={{
                       display: "grid",
                       gridTemplateColumns:
-                        "minmax(140px,1fr) minmax(120px,1fr) minmax(160px,1fr) minmax(80px,auto)",
+                        "minmax(140px,1fr) minmax(140px,1fr) minmax(160px,1fr) minmax(80px,auto)",
                       gap: "12px",
                       padding: "12px 16px",
-                      borderBottom:
-                        "1px solid rgba(255,255,255,0.06)",
+                      borderBottom: "1px solid rgba(255,255,255,0.06)",
                     }}
                   >
                     {/* Room / Tutor */}
-                    <div
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        minWidth: 0,
-                      }}
-                    >
-                      <div style={{ fontWeight: 500, color: "#fff" }}>
-                        {roomId || "—"}
-                      </div>
-                      <div
-                        style={{
-                          color: "rgba(255,255,255,0.8)",
-                          fontSize: 12,
-                          lineHeight: 1.4,
-                        }}
-                      >
-                        {tutorName || "Tutor"}{" "}
-                        <span
-                          style={{
-                            opacity: 0.6,
-                            fontWeight: 400,
-                          }}
-                        >
-                          ({tutorEmail || "—"})
+                    <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                      <div style={{ fontWeight: 500 }}>{s.roomId || "—"}</div>
+                      <div style={{ color: "rgba(255,255,255,0.8)", fontSize: 12 }}>
+                        {s.tutorName || "Tutor"}{" "}
+                        <span style={{ opacity: 0.6, fontWeight: 400 }}>
+                          ({s.tutorEmail || "—"})
                         </span>
                       </div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          lineHeight: 1.3,
-                          marginTop: 2,
-                          color: active ? "#6ecf9a" : "#888",
-                        }}
-                      >
-                        {active ? "Active" : "Ended"}
+                      <div style={{ fontSize: 11, marginTop: 2, color: "#6ecf9a" }}>
+                        Active
                       </div>
                     </div>
 
                     {/* Students */}
                     <div
                       style={{
-                        color: "#fff",
                         fontSize: 12,
-                        lineHeight: 1.4,
                         whiteSpace: "pre-wrap",
                         wordBreak: "break-word",
                       }}
@@ -539,25 +508,14 @@ export default function AdminPage() {
                     </div>
 
                     {/* Started */}
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: "rgba(255,255,255,0.8)",
-                        lineHeight: 1.4,
-                      }}
-                    >
-                      {formatTime(startedAt)}
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.85)" }}>
+                      {formatTime(s.startedAt)}
                     </div>
 
                     {/* Action */}
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "flex-start",
-                      }}
-                    >
+                    <div style={{ display: "flex", alignItems: "flex-start" }}>
                       <button
-                        onClick={() => joinQuietly(roomId)}
+                        onClick={() => joinQuietly(s.roomId)}
                         style={{
                           padding: "6px 10px",
                           borderRadius: 8,
