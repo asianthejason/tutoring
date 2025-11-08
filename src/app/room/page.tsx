@@ -15,7 +15,7 @@ import { useRouter } from "next/navigation";
 
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc } from "firebase/firestore"; // <-- add setDoc
+import { doc, getDoc, setDoc, updateDoc } from "firebase/firestore";
 
 type Role = "tutor" | "student" | "admin";
 
@@ -59,7 +59,7 @@ async function setTutorStatus(
   try {
     await setDoc(
       doc(db, "users", uid),
-      { status, statusUpdatedAt: Date.now() },
+      { status, statusUpdatedAt: Date.now(), lastActiveAt: Date.now() },
       { merge: true }
     );
   } catch {
@@ -912,47 +912,53 @@ export default function RoomPage() {
     };
   }, [authed, lockedRole, sessionRoomId, desiredName, resizeCanvas]);
 
-  // ---------- NEW: Automatic tutor status from room occupancy ----------
+  // ---------- Tutor presence & status from occupancy + heartbeat ----------
   useEffect(() => {
     if (lockedRole !== "tutor") return;
     const room = roomRef.current;
     if (!room) return;
 
-    let uid: string | null = null;
+    let uid: string | null = auth.currentUser?.uid ?? null;
     const unsubAuth = onAuthStateChanged(auth, (u) => {
       uid = u?.uid ?? null;
     });
 
-    const update = async () => {
+    // compute waiting/busy from remote participants (any student present?)
+    const computeAndWrite = async () => {
       if (!uid) return;
-      // student connected if any remote participant identity starts with "student"
       const hasStudent = Array.from(room.remoteParticipants.values()).some((p) =>
         isStudentId(p.identity)
       );
       await setTutorStatus(uid, hasStudent ? "busy" : "waiting");
     };
 
-    // attach listeners
-    room.on("participantConnected", update);
-    room.on("participantDisconnected", update);
-    room.on("connected", update);
+    // initial write
+    computeAndWrite();
 
-    // prime immediately
-    update();
+    // listen for occupancy changes
+    const onAny = () => { computeAndWrite(); };
+    room.on(RoomEvent.ParticipantConnected, onAny);
+    room.on(RoomEvent.ParticipantDisconnected, onAny);
+    room.on(RoomEvent.Connected, onAny);
+
+    // heartbeat to keep lastActiveAt fresh for student/tutors listings
+    const hb = setInterval(() => {
+      if (!uid) return;
+      updateDoc(doc(db, "users", uid), { lastActiveAt: Date.now() }).catch(() => {});
+    }, 15000);
 
     // mark offline on tab close
-    const bye = async () => {
-      if (uid) await setTutorStatus(uid, "offline");
-    };
+    const bye = () => { if (uid) setTutorStatus(uid, "offline").catch(() => {}); };
     window.addEventListener("beforeunload", bye);
 
     return () => {
-      room.off("participantConnected", update);
-      room.off("participantDisconnected", update);
-      room.off("connected", update);
+      room.off(RoomEvent.ParticipantConnected, onAny);
+      room.off(RoomEvent.ParticipantDisconnected, onAny);
+      room.off(RoomEvent.Connected, onAny);
+      clearInterval(hb);
       window.removeEventListener("beforeunload", bye);
       unsubAuth();
-      if (uid) setTutorStatus(uid, "offline"); // best-effort offline on unmount
+      if (uid) setTutorStatus(uid, "offline").catch(() => {});
     };
   }, [lockedRole]);
 
@@ -1729,7 +1735,7 @@ export default function RoomPage() {
                 Viewing: {viewBoardFor || "—"}
               </span>
               <span style={{ color: "rgba(255,255,255,0.6)", fontSize: 11, lineHeight: 1.2 }}>
-                {editable ? "You can draw" : "Read only"}
+                {canCurrentUserEditBoard() ? "You can draw" : "Read only"}
               </span>
             </div>
 
@@ -1746,12 +1752,12 @@ export default function RoomPage() {
               }}
             >
               {/* Palette */}
-              <div style={{ display: "flex", alignItems: "center", gap: 6, opacity: editable ? 1 : 0.4 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, opacity: canCurrentUserEditBoard() ? 1 : 0.4 }}>
                 {["#ffffff", "#ffe066", "#ff6b6b", "#4dabf7", "#51cf66"].map((col) => (
                   <div
                     key={col}
                     onClick={() => {
-                      if (!editable) return;
+                      if (!canCurrentUserEditBoard()) return;
                       setTool("pen");
                       setStrokeColor(col);
                     }}
@@ -1762,7 +1768,7 @@ export default function RoomPage() {
                       backgroundColor: col,
                       border:
                         strokeColor === col && tool === "pen" ? "2px solid #6ecf9a" : "2px solid #444",
-                      cursor: editable ? "pointer" : "default",
+                      cursor: canCurrentUserEditBoard() ? "pointer" : "default",
                     }}
                     title={`Color ${col}`}
                   />
@@ -1770,21 +1776,21 @@ export default function RoomPage() {
               </div>
 
               {/* Tool buttons */}
-              <div style={{ display: "flex", gap: 6, opacity: editable ? 1 : 0.4 }}>
+              <div style={{ display: "flex", gap: 6, opacity: canCurrentUserEditBoard() ? 1 : 0.4 }}>
                 <button
                   onClick={() => {
-                    if (!editable) return;
+                    if (!canCurrentUserEditBoard()) return;
                     setTool("pen");
                   }}
                   style={{
                     padding: "6px 10px",
                     borderRadius: 8,
-                    background: tool === "pen" && editable ? "#3a6" : "#2a2a2a",
-                    border: tool === "pen" && editable ? "1px solid #6ecf9a" : "1px solid #444",
+                    background: tool === "pen" && canCurrentUserEditBoard() ? "#3a6" : "#2a2a2a",
+                    border: tool === "pen" && canCurrentUserEditBoard() ? "1px solid #6ecf9a" : "1px solid #444",
                     color: "#fff",
                     fontSize: 12,
                     lineHeight: 1.2,
-                    cursor: editable ? "pointer" : "default",
+                    cursor: canCurrentUserEditBoard() ? "pointer" : "default",
                     minWidth: 60,
                   }}
                 >
@@ -1793,18 +1799,18 @@ export default function RoomPage() {
 
                 <button
                   onClick={() => {
-                    if (!editable) return;
+                    if (!canCurrentUserEditBoard()) return;
                     setTool("eraser");
                   }}
                   style={{
                     padding: "6px 10px",
                     borderRadius: 8,
-                    background: tool === "eraser" && editable ? "#3a6" : "#2a2a2a",
-                    border: tool === "eraser" && editable ? "1px solid #6ecf9a" : "1px solid #444",
+                    background: tool === "eraser" && canCurrentUserEditBoard() ? "#3a6" : "#2a2a2a",
+                    border: tool === "eraser" && canCurrentUserEditBoard() ? "1px solid #6ecf9a" : "1px solid #444",
                     color: "#fff",
                     fontSize: 12,
                     lineHeight: 1.2,
-                    cursor: editable ? "pointer" : "default",
+                    cursor: canCurrentUserEditBoard() ? "pointer" : "default",
                     minWidth: 60,
                   }}
                 >
@@ -1819,7 +1825,7 @@ export default function RoomPage() {
                   alignItems: "center",
                   gap: 6,
                   color: "#fff",
-                  opacity: editable ? 1 : 0.4,
+                  opacity: canCurrentUserEditBoard() ? 1 : 0.4,
                 }}
                 title="Brush size"
               >
@@ -1831,11 +1837,11 @@ export default function RoomPage() {
                   step={1}
                   value={strokeSize}
                   onChange={(e) => {
-                    if (!editable) return;
+                    if (!canCurrentUserEditBoard()) return;
                     const v = parseInt(e.target.value, 10);
                     setStrokeSize(v);
                   }}
-                  style={{ width: 80, cursor: editable ? "pointer" : "default" }}
+                  style={{ width: 80, cursor: canCurrentUserEditBoard() ? "pointer" : "default" }}
                 />
                 <span style={{ minWidth: 24, textAlign: "right", fontSize: 11, opacity: 0.8 }}>{strokeSize}</span>
               </div>
@@ -1843,18 +1849,18 @@ export default function RoomPage() {
               {/* Clear All */}
               <button
                 onClick={async () => {
-                  if (!editable) return;
+                  if (!canCurrentUserEditBoard()) return;
                   await clearViewedBoard();
                 }}
                 style={{
                   padding: "6px 10px",
                   borderRadius: 8,
-                  background: editable ? "#a33" : "#2a2a2a",
-                  border: editable ? "1px solid #ff8b8b" : "1px solid #444",
+                  background: canCurrentUserEditBoard() ? "#a33" : "#2a2a2a",
+                  border: canCurrentUserEditBoard() ? "1px solid #ff8b8b" : "1px solid #444",
                   color: "#fff",
                   fontSize: 12,
                   lineHeight: 1.2,
-                  cursor: editable ? "pointer" : "default",
+                  cursor: canCurrentUserEditBoard() ? "pointer" : "default",
                   minWidth: 70,
                 }}
               >
@@ -1883,7 +1889,7 @@ export default function RoomPage() {
                 width: "100%",
                 height: "100%",
                 touchAction: "none",
-                cursor: editable ? (tool === "eraser" ? "cell" : "crosshair") : "default",
+                cursor: canCurrentUserEditBoard() ? (tool === "eraser" ? "cell" : "crosshair") : "default",
               }}
               onPointerDown={startDraw}
               onPointerMove={moveDraw}
