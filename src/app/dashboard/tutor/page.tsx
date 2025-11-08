@@ -4,11 +4,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
-import {
-  onAuthStateChanged,
-  signOut,
-  User as FirebaseUser,
-} from "firebase/auth";
+import { onAuthStateChanged, signOut, User as FirebaseUser } from "firebase/auth";
 import {
   doc,
   getDoc,
@@ -32,13 +28,6 @@ type Booking = {
   roomId?: string;
 };
 
-type QueueStudent = {
-  studentId: string;
-  studentName: string;
-  studentEmail: string;
-  joinedAt: number;
-};
-
 export default function TutorDashboardPage() {
   const router = useRouter();
 
@@ -51,8 +40,7 @@ export default function TutorDashboardPage() {
   const [roomId, setRoomId] = useState<string>("");
   const [status, setStatus] = useState<string>("offline"); // "waiting" | "busy" | "offline"
 
-  // queue + sessions
-  const [queue, setQueue] = useState<QueueStudent[]>([]);
+  // sessions
   const [bookings, setBookings] = useState<Booking[]>([]);
 
   // --- Auth gate / load basic tutor data ---
@@ -84,9 +72,7 @@ export default function TutorDashboardPage() {
       }
 
       setRole("tutor");
-      setDisplayName(
-        data.displayName || (fbUser.email || "").split("@")[0] || "Tutor"
-      );
+      setDisplayName(data.displayName || (fbUser.email || "").split("@")[0] || "Tutor");
       setRoomId(data.roomId || "");
       setStatus(data.status || "offline");
 
@@ -111,62 +97,20 @@ export default function TutorDashboardPage() {
     if (!uid) return;
 
     // update immediately
-    updateDoc(doc(db, "users", uid), {
-      lastActiveAt: Date.now(),
-    }).catch(() => {});
+    updateDoc(doc(db, "users", uid), { lastActiveAt: Date.now() }).catch(() => {});
 
     const intervalId = setInterval(() => {
-      updateDoc(doc(db, "users", uid), {
-        lastActiveAt: Date.now(),
-      }).catch(() => {});
+      updateDoc(doc(db, "users", uid), { lastActiveAt: Date.now() }).catch(() => {});
     }, 15000); // every 15s
 
-    return () => {
-      clearInterval(intervalId);
-    };
-  }, [uid]);
-
-  // --- Subscribe to my queue (students waiting for homework help) ---
-  useEffect(() => {
-    if (!uid) return;
-
-    const qRef = collection(db, "queues", uid, "waitlist");
-
-    const unsub = onSnapshot(
-      qRef,
-      (snap) => {
-        const arr: QueueStudent[] = [];
-        snap.forEach((docSnap) => {
-          const d = docSnap.data() as DocumentData;
-          arr.push({
-            studentId: d.studentId,
-            studentName: d.studentName,
-            studentEmail: d.studentEmail,
-            joinedAt: d.joinedAt,
-          });
-        });
-
-        // sort oldest first
-        arr.sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
-        setQueue(arr);
-      },
-      (err) => {
-        console.error("[queue onSnapshot error]", err);
-      }
-    );
-
-    return unsub;
+    return () => clearInterval(intervalId);
   }, [uid]);
 
   // --- Subscribe to upcoming 1-on-1 bookings for me ---
   useEffect(() => {
     if (!uid) return;
 
-    const qRef = query(
-      collection(db, "bookings"),
-      where("tutorId", "==", uid),
-      limit(10)
-    );
+    const qRef = query(collection(db, "bookings"), where("tutorId", "==", uid), limit(10));
 
     const unsub = onSnapshot(
       qRef,
@@ -219,26 +163,11 @@ export default function TutorDashboardPage() {
   function statusColors(s: string) {
     switch (s) {
       case "waiting":
-        return {
-          bg: "#1f3b24",
-          border: "#3a6",
-          text: "#6ecf9a",
-          label: "Waiting",
-        };
+        return { bg: "#1f3b24", border: "#3a6", text: "#6ecf9a", label: "Waiting" };
       case "busy":
-        return {
-          bg: "#3b2f16",
-          border: "#d4a23c",
-          text: "#ffd277",
-          label: "Busy (helping)",
-        };
+        return { bg: "#3b2f16", border: "#d4a23c", text: "#ffd277", label: "Busy (helping)" };
       default:
-        return {
-          bg: "#442424",
-          border: "#a66",
-          text: "#ff8b8b",
-          label: "Offline",
-        };
+        return { bg: "#442424", border: "#a66", text: "#ff8b8b", label: "Offline" };
     }
   }
 
@@ -266,7 +195,6 @@ export default function TutorDashboardPage() {
   }
 
   const statusUI = statusColors(status || "offline");
-  const queueCount = queue.length;
 
   return (
     <main
@@ -296,11 +224,9 @@ export default function TutorDashboardPage() {
           justifyContent: "space-between",
           alignItems: "stretch",
           borderRadius: 12,
-          background:
-            "linear-gradient(180deg, rgba(255,255,255,0.07) 0%, rgba(15,15,15,0.0) 100%)",
+          background: "linear-gradient(180deg, rgba(255,255,255,0.07) 0%, rgba(15,15,15,0.0) 100%)",
           border: "1px solid rgba(255,255,255,0.15)",
-          boxShadow:
-            "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
+          boxShadow: "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
         }}
       >
         <div
@@ -311,15 +237,7 @@ export default function TutorDashboardPage() {
             lineHeight: 1.2,
           }}
         >
-          <div
-            style={{
-              fontSize: 16,
-              fontWeight: 600,
-              letterSpacing: "-0.03em",
-            }}
-          >
-            Apex Tutoring
-          </div>
+          <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>Apex Tutoring</div>
           <div style={{ fontSize: 11, opacity: 0.7 }}>Tutor Dashboard</div>
         </div>
 
@@ -336,10 +254,7 @@ export default function TutorDashboardPage() {
           >
             Enter My Room
           </button>
-          <button
-            style={ghostButtonStyle}
-            onClick={() => router.push("/profile")}
-          >
+          <button style={ghostButtonStyle} onClick={() => router.push("/profile")}>
             Profile
           </button>
           <button style={ghostButtonStyle} onClick={handleSignOut}>
@@ -361,14 +276,13 @@ export default function TutorDashboardPage() {
           padding: "0 24px",
         }}
       >
-        {/* LEFT: Homework Help / Status */}
+        {/* LEFT: Status card */}
         <div
           style={{
             background:
               "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.06) 0%, rgba(20,20,20,0.7) 60%)",
             border: "1px solid rgba(255,255,255,0.12)",
-            boxShadow:
-              "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
+            boxShadow: "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
             borderRadius: 16,
             padding: "16px 20px",
             display: "flex",
@@ -379,15 +293,7 @@ export default function TutorDashboardPage() {
         >
           {/* tutor info */}
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <div
-              style={{
-                fontSize: 15,
-                fontWeight: 600,
-                lineHeight: 1.3,
-              }}
-            >
-              {displayName || "Tutor"}
-            </div>
+            <div style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.3 }}>{displayName || "Tutor"}</div>
             <div
               style={{
                 fontSize: 12,
@@ -398,30 +304,14 @@ export default function TutorDashboardPage() {
             >
               {userEmail}
             </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: "rgba(255,255,255,0.5)",
-                lineHeight: 1.4,
-              }}
-            >
-              Room ID:{" "}
-              <span style={{ color: "#fff" }}>
-                {roomId || "(no room assigned)"}
-              </span>
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", lineHeight: 1.4 }}>
+              Room ID: <span style={{ color: "#fff" }}>{roomId || "(no room assigned)"}</span>
             </div>
           </div>
 
-          {/* status pill + queue (read-only) */}
+          {/* status pill */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
-            <div
-              style={{
-                display: "inline-flex",
-                flexDirection: "column",
-                gap: 4,
-                minWidth: 120,
-              }}
-            >
+            <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, minWidth: 120 }}>
               <div
                 style={{
                   borderRadius: 8,
@@ -437,34 +327,13 @@ export default function TutorDashboardPage() {
               >
                 {statusUI.label}
               </div>
-              <div
-                style={{
-                  fontSize: 11,
-                  lineHeight: 1.4,
-                  color: "rgba(255,255,255,0.6)",
-                  textAlign: "center",
-                }}
-              >
-                {queue.length === 0
-                  ? "No one waiting"
-                  : `${queue.length} waiting in queue`}
-              </div>
             </div>
-
-            {/* (Removed) manual status controls — status is automatic now */}
           </div>
 
-          <div
-            style={{
-              fontSize: 11,
-              lineHeight: 1.4,
-              color: "rgba(255,255,255,0.5)",
-            }}
-          >
-            Status is automatic: <b>Waiting</b> (you’re in your room with no
-            student), <b>Busy</b> (in your room with a student), and{" "}
-            <b>Offline</b> (not in your room or logged out). Open{" "}
-            <span style={{ color: "#9cf" }}>Enter My Room</span> to go live.
+          <div style={{ fontSize: 11, lineHeight: 1.4, color: "rgba(255,255,255,0.5)" }}>
+            Status is automatic: <b>Waiting</b> (you’re in your room with no student),
+            <b> Busy</b> (in your room with a student), and <b>Offline</b> (not in your room or
+            logged out). Open <span style={{ color: "#9cf" }}>Enter My Room</span> to go live.
           </div>
         </div>
 
@@ -474,8 +343,7 @@ export default function TutorDashboardPage() {
             background:
               "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.06) 0%, rgba(20,20,20,0.7) 60%)",
             border: "1px solid rgba(255,255,255,0.12)",
-            boxShadow:
-              "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
+            boxShadow: "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
             borderRadius: 16,
             padding: "16px 20px",
             minHeight: 220,
@@ -506,21 +374,14 @@ export default function TutorDashboardPage() {
           </div>
 
           {bookings.length === 0 ? (
-            <div
-              style={{
-                padding: "12px 0",
-                fontSize: 13,
-                color: "rgba(255,255,255,0.6)",
-              }}
-            >
+            <div style={{ padding: "12px 0", fontSize: 13, color: "rgba(255,255,255,0.6)" }}>
               No sessions scheduled yet.
             </div>
           ) : (
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns:
-                  "minmax(140px,1fr) minmax(120px,1fr) minmax(100px,auto)",
+                gridTemplateColumns: "minmax(140px,1fr) minmax(120px,1fr) minmax(100px,auto)",
                 gap: "12px",
                 fontSize: 13,
                 lineHeight: 1.4,
@@ -564,39 +425,19 @@ export default function TutorDashboardPage() {
 
                 return (
                   <>
-                    <div
-                      style={{
-                        fontWeight: 500,
-                        color: "#fff",
-                        wordBreak: "break-word",
-                      }}
-                    >
+                    <div style={{ fontWeight: 500, color: "#fff", wordBreak: "break-word" }}>
                       {b.studentName || "Student"}
-                      <div
-                        style={{
-                          fontSize: 11,
-                          lineHeight: 1.3,
-                          color: "rgba(255,255,255,0.6)",
-                        }}
-                      >
+                      <div style={{ fontSize: 11, lineHeight: 1.3, color: "rgba(255,255,255,0.6)" }}>
                         {b.studentEmail || "-"}
                       </div>
                     </div>
 
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: "rgba(255,255,255,0.8)",
-                      }}
-                    >
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>
                       {formatTime(b.startTime)} ({b.durationMin || 60} min)
                     </div>
 
                     <div>
-                      <button
-                        style={primaryCtaStyleSmall}
-                        onClick={joinHandler}
-                      >
+                      <button style={primaryCtaStyleSmall} onClick={joinHandler}>
                         Join Session
                       </button>
                     </div>
@@ -622,20 +463,12 @@ export default function TutorDashboardPage() {
           textAlign: "center",
         }}
       >
-        <div
-          style={{
-            color: "rgba(255,255,255,0.8)",
-            fontWeight: 500,
-            marginBottom: 6,
-          }}
-        >
-          You’re visible to students when you’re in your room as{" "}
-          <b>Waiting</b> or <b>Busy</b>.
+        <div style={{ color: "rgba(255,255,255,0.8)", fontWeight: 500, marginBottom: 6 }}>
+          You’re visible to students when you’re in your room as <b>Waiting</b> or <b>Busy</b>.
         </div>
 
         <div style={{ marginBottom: 12 }}>
-          Open <b>Enter My Room</b> to go live. Leave the room (or log out) to
-          be <b>Offline</b>.
+          Open <b>Enter My Room</b> to go live. Leave the room (or log out) to be <b>Offline</b>.
         </div>
 
         <div
