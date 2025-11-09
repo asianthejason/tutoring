@@ -18,20 +18,20 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 
-// ---------- Stripe (optional, for student card payments) ----------
-import dynamic from "next/dynamic";
-const StripeElements = dynamic(
-  async () => {
-    const stripe = await import("@stripe/react-stripe-js");
-    return stripe.Elements;
-  },
-  { ssr: false, loading: () => null }
-);
-const CardElement = dynamic(
-  async () => (await import("@stripe/react-stripe-js")).CardElement,
-  { ssr: false, loading: () => null }
-);
-import { loadStripe } from "@stripe/stripe-js";
+// ─────────────────────────────────────────────────────────────
+// Stripe: kept OPTIONAL so builds never fail.
+// Card option is disabled until you actually install Stripe.
+// To enable later:
+//   pnpm add @stripe/react-stripe-js @stripe/stripe-js
+//   – replace the shim below with real imports & UI (noted inline).
+// ─────────────────────────────────────────────────────────────
+const STRIPE_ENABLED = false; // flip AFTER installing Stripe packages
+
+// Shims so this file compiles without Stripe:
+const StripeElements: React.FC<{ children: React.ReactNode }> = ({ children }) => <>{children}</>;
+const CardElement: React.FC<{ options?: any }> = () => null;
+
+// ─────────────────────────────────────────────────────────────
 
 type Role = "student" | "tutor" | "admin";
 type DayKey = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
@@ -43,28 +43,25 @@ type UserDoc = {
   email: string;
   role: Role;
   displayName?: string;
+
+  // shared extras
   firstName?: string;
   lastName?: string;
-  timezone?: string;
-  availability?: Availability; // tutors
-  gradeLevel?: string; // students
-  intro?: string; // tutors
   birthday?: string; // yyyy-mm-dd
   country?: string;
-  paypalEmail?: string; // tutors
-  // student balance (in minutes)
-  balanceMinutes?: number;
+
+  // tutor-only
+  timezone?: string;
+  availability?: Availability;
+  tutorIntro?: string;
+  paypalEmail?: string;
+
+  // student-only
+  gradeLevel?: string;
+
+  // accounting (read-only display here)
+  minutesBalance?: number; // remaining minutes
 };
-
-type PaymentOption = { id: string; hours: number; priceUSD: number };
-
-const STUDENT_PACKS: PaymentOption[] = [
-  { id: "h1",  hours: 1,  priceUSD: 55 },
-  { id: "h5",  hours: 5,  priceUSD: 159 },
-  { id: "h10", hours: 10, priceUSD: 500 },
-  { id: "h20", hours: 20, priceUSD: 900 },
-  { id: "h40", hours: 40, priceUSD: 1600 },
-];
 
 const DAYS: { key: DayKey; label: string }[] = [
   { key: "mon", label: "Mon" },
@@ -80,45 +77,21 @@ function emptyAvailability(): Availability {
   return { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] };
 }
 
-const TZ_FALLBACK = [
-  "America/Edmonton","America/Vancouver","America/Denver","America/Chicago",
-  "America/New_York","UTC","Europe/London","Europe/Paris","Asia/Hong_Kong",
-  "Asia/Shanghai","Asia/Tokyo","Australia/Sydney"
+// purchase options (USD) — fixed 5h = $265
+const PACKS = [
+  { hours: 1, price: 55 },
+  { hours: 5, price: 265 },
+  { hours: 10, price: 500 },
+  { hours: 20, price: 900 },
+  { hours: 40, price: 1600 },
 ];
-function getTimezones(): string[] {
-  try {
-    // @ts-ignore
-    const list: string[] = Intl.supportedValuesOf?.("timeZone") || TZ_FALLBACK;
-    return list.slice().sort((a,b)=>a.localeCompare(b));
-  } catch {
-    return TZ_FALLBACK;
-  }
-}
 
-const ALL_COUNTRIES = [
-  "Afghanistan","Albania","Algeria","Andorra","Angola","Antigua and Barbuda","Argentina","Armenia","Australia","Austria",
-  "Azerbaijan","Bahamas","Bahrain","Bangladesh","Barbados","Belarus","Belgium","Belize","Benin","Bhutan","Bolivia",
-  "Bosnia and Herzegovina","Botswana","Brazil","Brunei","Bulgaria","Burkina Faso","Burundi","Cabo Verde","Cambodia",
-  "Cameroon","Canada","Central African Republic","Chad","Chile","China","Colombia","Comoros","Congo (Congo-Brazzaville)",
-  "Costa Rica","Côte d’Ivoire","Croatia","Cuba","Cyprus","Czechia","Democratic Republic of the Congo","Denmark","Djibouti",
-  "Dominica","Dominican Republic","Ecuador","Egypt","El Salvador","Equatorial Guinea","Eritrea","Estonia","Eswatini",
-  "Ethiopia","Fiji","Finland","France","Gabon","Gambia","Georgia","Germany","Ghana","Greece","Grenada","Guatemala",
-  "Guinea","Guinea-Bissau","Guyana","Haiti","Honduras","Hungary","Iceland","India","Indonesia","Iran","Iraq","Ireland",
-  "Israel","Italy","Jamaica","Japan","Jordan","Kazakhstan","Kenya","Kiribati","Kuwait","Kyrgyzstan","Laos","Latvia",
-  "Lebanon","Lesotho","Liberia","Libya","Liechtenstein","Lithuania","Luxembourg","Madagascar","Malawi","Malaysia",
-  "Maldives","Mali","Malta","Marshall Islands","Mauritania","Mauritius","Mexico","Micronesia","Moldova","Monaco",
-  "Mongolia","Montenegro","Morocco","Mozambique","Myanmar","Namibia","Nauru","Nepal","Netherlands","New Zealand",
-  "Nicaragua","Niger","Nigeria","North Korea","North Macedonia","Norway","Oman","Pakistan","Palau","Panama",
-  "Papua New Guinea","Paraguay","Peru","Philippines","Poland","Portugal","Qatar","Romania","Russia","Rwanda",
-  "Saint Kitts and Nevis","Saint Lucia","Saint Vincent and the Grenadines","Samoa","San Marino","Sao Tome and Principe",
-  "Saudi Arabia","Senegal","Serbia","Seychelles","Sierra Leone","Singapore","Slovakia","Slovenia","Solomon Islands",
-  "Somalia","South Africa","South Korea","South Sudan","Spain","Sri Lanka","Sudan","Suriname","Sweden","Switzerland",
-  "Syria","Taiwan","Tajikistan","Tanzania","Thailand","Timor-Leste","Togo","Tonga","Trinidad and Tobago","Tunisia",
-  "Turkey","Turkmenistan","Tuvalu","Uganda","Ukraine","United Arab Emirates","United Kingdom","United States","Uruguay",
-  "Uzbekistan","Vanuatu","Vatican City","Venezuela","Vietnam","Yemen","Zambia","Zimbabwe",
-  "Hong Kong","Macau","Puerto Rico","Greenland","Aruba","Bermuda","Cayman Islands","Curacao","Faroe Islands",
-  "Gibraltar","Guernsey","Isle of Man","Jersey","Kosovo","New Caledonia","Northern Mariana Islands","Reunion",
-  "French Polynesia","Guadeloupe","Martinique","Mayotte"
+const COUNTRIES = [
+  "Canada","United States","Mexico","United Kingdom","Ireland","Germany","France","Spain","Italy","Portugal","Netherlands","Belgium","Switzerland","Austria","Sweden","Norway","Denmark","Finland","Poland","Czechia","Slovakia","Hungary","Romania","Bulgaria","Greece","Turkey","Israel","United Arab Emirates","Saudi Arabia","Qatar","India","Pakistan","Bangladesh","Sri Lanka","Nepal","China","Japan","South Korea","Taiwan","Hong Kong","Singapore","Malaysia","Thailand","Vietnam","Philippines","Indonesia","Australia","New Zealand","Brazil","Argentina","Chile","Colombia","Peru","South Africa","Nigeria","Kenya","Egypt","Morocco"
+].sort((a,b)=>a.localeCompare(b));
+
+const TIMEZONES = [
+  "UTC","America/Edmonton","America/Vancouver","America/Los_Angeles","America/Denver","America/Chicago","America/New_York","America/Toronto","Europe/London","Europe/Paris","Europe/Berlin","Europe/Amsterdam","Europe/Madrid","Europe/Rome","Europe/Zurich","Asia/Dubai","Asia/Kolkata","Asia/Singapore","Asia/Hong_Kong","Asia/Tokyo","Asia/Seoul","Australia/Sydney","Pacific/Auckland"
 ];
 
 export default function ProfileSettingsPage() {
@@ -130,62 +103,48 @@ export default function ProfileSettingsPage() {
   const [role, setRole] = useState<Role | null>(null);
 
   // common
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [birthday, setBirthday] = useState<string>("");
+  const [country, setCountry] = useState<string>("");
+
+  // timezone + live clock (for tutors & students display)
   const [timezone, setTimezone] = useState<string>("");
-  const [tzOptions] = useState<string[]>(getTimezones());
+  const [tzNow, setTzNow] = useState<string>("");
 
-  // live clock
-  const [, setTick] = useState(0);
-  useEffect(() => { const id = setInterval(() => setTick((t)=>t+1), 30000); return () => clearInterval(id); }, []);
-  const currentTimeInTZ = useMemo(() => {
-    try {
-      return new Date().toLocaleTimeString(undefined, {
-        timeZone: timezone || "UTC",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-    } catch { return ""; }
-  }, [timezone]);
+  // student
+  const [gradeLevel, setGradeLevel] = useState<string>("");
 
-  // tutor extras
-  const [firstName, setFirstName] = useState<string>("");
-  const [lastName, setLastName]   = useState<string>("");
-  const [birthday, setBirthday]   = useState<string>("");
-  const [country, setCountry]     = useState<string>("");
-  const [intro, setIntro]         = useState<string>("");
-  const [paypalEmail, setPaypalEmail] = useState<string>("");
-
+  // tutor
+  const [tutorIntro, setTutorIntro] = useState("");
+  const [paypalEmail, setPaypalEmail] = useState("");
   const [availability, setAvailability] = useState<Availability>(emptyAvailability());
 
-  // student fields
-  const [gradeLevel, setGradeLevel] = useState<string>("");
-  const [studentFirst, setStudentFirst] = useState("");
-  const [studentLast, setStudentLast]   = useState("");
-  const [studentBirthday, setStudentBirthday] = useState("");
-  const [studentCountry, setStudentCountry]   = useState("");
-  const [balanceMinutes, setBalanceMinutes]   = useState<number>(0);
-
-  // payments state (student)
-  const [selectedPack, setSelectedPack] = useState<string>("h1");
-  const [payMethod, setPayMethod] = useState<"paypal"|"card">("paypal");
-  const stripePromise = useMemo(
-    () => (process.env.NEXT_PUBLIC_STRIPE_PK ? loadStripe(process.env.NEXT_PUBLIC_STRIPE_PK) : null),
-    []
-  );
+  // balance (read-only here; you’ll top this up after successful payments)
+  const [minutesBalance, setMinutesBalance] = useState<number>(0);
 
   // password
-  const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
   const [pwMessage, setPwMessage] = useState<string>("");
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
 
+  // purchase UI
+  const [selectedPack, setSelectedPack] = useState(PACKS[2]); // default 10h
+  const [payMethod, setPayMethod] = useState<"paypal"|"card">(STRIPE_ENABLED ? "card" : "paypal");
+  const [cardholderName, setCardholderName] = useState("");
+
   // Load auth + user doc
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
-      if (!user) { router.replace("/auth"); return; }
+      if (!user) {
+        router.replace("/auth");
+        return;
+      }
       setUid(user.uid);
       setEmail(user.email ?? "");
 
@@ -195,27 +154,21 @@ export default function ProfileSettingsPage() {
       const r: Role = (data?.role as Role) || "student";
       setRole(r);
 
-      const initialDisplay = data?.displayName || (user.email?.split("@")[0] ?? "");
-      setDisplayName(initialDisplay);
+      setFirstName(data?.firstName || "");
+      setLastName(data?.lastName || "");
+      setDisplayName(data?.displayName || (user.email?.split("@")[0] ?? ""));
+      setBirthday(data?.birthday || "");
+      setCountry(data?.country || "");
       setTimezone(data?.timezone || guessTimezone());
+      setMinutesBalance(typeof data?.minutesBalance === "number" ? data!.minutesBalance! : 0);
 
       if (r === "student") {
         setGradeLevel(data?.gradeLevel || "");
-        setStudentFirst(data?.firstName || "");
-        setStudentLast(data?.lastName || "");
-        setStudentBirthday(data?.birthday || "");
-        setStudentCountry(data?.country || "");
-        setBalanceMinutes(typeof data?.balanceMinutes === "number" ? data!.balanceMinutes! : 0);
       }
-
       if (r === "tutor") {
-        setAvailability({ ...emptyAvailability(), ...(data?.availability || {}) });
-        setFirstName(data?.firstName || "");
-        setLastName(data?.lastName || "");
-        setBirthday(data?.birthday || "");
-        setCountry(data?.country || "");
-        setIntro(data?.intro || "");
+        setTutorIntro(data?.tutorIntro || "");
         setPaypalEmail(data?.paypalEmail || "");
+        setAvailability({ ...emptyAvailability(), ...(data?.availability || {}) });
       }
 
       setLoading(false);
@@ -223,45 +176,51 @@ export default function ProfileSettingsPage() {
     return unsub;
   }, [router]);
 
+  // timezone clock
+  useEffect(() => {
+    function refresh() {
+      try {
+        const fmt = new Intl.DateTimeFormat([], {
+          timeZone: timezone || guessTimezone(),
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        setTzNow(fmt.format(new Date()));
+      } catch {
+        setTzNow("");
+      }
+    }
+    refresh();
+    const id = setInterval(refresh, 30_000);
+    return () => clearInterval(id);
+  }, [timezone]);
+
   function guessTimezone() {
-    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; }
-    catch { return "UTC"; }
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    } catch {
+      return "UTC";
+    }
   }
 
-  // ----- Save common (both roles) -----
+  // ───────────────── save helpers ─────────────────
   async function saveCommon() {
     if (!uid) return;
     setSaving(true);
     setSaveMsg("");
 
     const payload: Partial<UserDoc> = {
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
       displayName: displayName.trim() || email.split("@")[0],
-      timezone: timezone || guessTimezone(),
-      ...(role === "tutor"
-        ? {
-            firstName: firstName.trim() || undefined,
-            lastName: lastName.trim() || undefined,
-            birthday: birthday || "",
-            country: country || "",
-            intro: intro.trim() || "",
-            paypalEmail: paypalEmail.trim() || "",
-          }
-        : role === "student"
-        ? {
-            firstName: studentFirst.trim() || undefined,
-            lastName: studentLast.trim() || undefined,
-            birthday: studentBirthday || "",
-            country: studentCountry || "",
-          }
-        : {}),
+      birthday: birthday || "",
+      country: country || "",
+      // write a heartbeat field for auditing
       // @ts-ignore
       profileUpdatedAt: serverTimestamp(),
     };
 
     try {
-      await updateDoc(doc(db, "users", uid), payload as any);
-      setSaveMsg("Saved ✓");
-    } catch {
       await setDoc(doc(db, "users", uid), payload as any, { merge: true });
       setSaveMsg("Saved ✓");
     } finally {
@@ -270,22 +229,14 @@ export default function ProfileSettingsPage() {
     }
   }
 
-  // ----- Student-only save (grade) -----
-  async function saveStudentOnly() {
+  async function saveStudent() {
     if (!uid) return;
     setSaving(true);
     setSaveMsg("");
     try {
-      await updateDoc(doc(db, "users", uid), {
-        gradeLevel: gradeLevel || "",
-        // @ts-ignore
-        profileUpdatedAt: serverTimestamp(),
-      });
-      setSaveMsg("Saved ✓");
-    } catch {
       await setDoc(
         doc(db, "users", uid),
-        { gradeLevel: gradeLevel || "", profileUpdatedAt: serverTimestamp() as any },
+        { gradeLevel: gradeLevel || "", timezone: timezone || guessTimezone(), profileUpdatedAt: serverTimestamp() as any },
         { merge: true }
       );
       setSaveMsg("Saved ✓");
@@ -295,32 +246,11 @@ export default function ProfileSettingsPage() {
     }
   }
 
-  // ----- Tutor-only save (availability) -----
-  function isRangeValid(r: TimeRange) { return r.start < r.end; }
-
-  async function saveTutorAvailability() {
-    if (!uid) return;
-    for (const d of DAYS) {
-      for (const r of availability[d.key]) {
-        if (!isRangeValid(r)) { setSaveMsg(`Invalid time range on ${d.label}`); return; }
-      }
-    }
-    setSaving(true); setSaveMsg("");
-    try {
-      await updateDoc(doc(db, "users", uid), {
-        availability,
-        // @ts-ignore
-        profileUpdatedAt: serverTimestamp(),
-      });
-      setSaveMsg("Saved ✓");
-    } catch {
-      await setDoc(doc(db, "users", uid), { availability, profileUpdatedAt: serverTimestamp() as any }, { merge: true });
-      setSaveMsg("Saved ✓");
-    } finally { setSaving(false); setTimeout(() => setSaveMsg(""), 1500); }
-  }
-
   function addTimeRange(day: DayKey) {
-    setAvailability((prev) => ({ ...prev, [day]: [...prev[day], { start: "16:00", end: "17:00" }] }));
+    setAvailability((prev) => ({
+      ...prev,
+      [day]: [...prev[day], { start: "16:00", end: "17:00" }],
+    }));
   }
   function updateRange(day: DayKey, idx: number, field: "start" | "end", value: string) {
     setAvailability((prev) => {
@@ -336,97 +266,102 @@ export default function ProfileSettingsPage() {
       return copy;
     });
   }
+  function isRangeValid(r: TimeRange) { return r.start < r.end; }
 
-  // ----- Change password (now requires current first) -----
+  async function saveTutor() {
+    if (!uid) return;
+
+    for (const d of DAYS) {
+      for (const r of availability[d.key]) {
+        if (!isRangeValid(r)) {
+          setSaveMsg(`Invalid time range on ${d.label}`);
+          return;
+        }
+      }
+    }
+
+    setSaving(true);
+    setSaveMsg("");
+    try {
+      await setDoc(
+        doc(db, "users", uid),
+        {
+          timezone: timezone || guessTimezone(),
+          tutorIntro: tutorIntro || "",
+          paypalEmail: paypalEmail.trim() || "",
+          availability,
+          profileUpdatedAt: serverTimestamp() as any,
+        },
+        { merge: true }
+      );
+      setSaveMsg("Saved ✓");
+    } finally {
+      setSaving(false);
+      setTimeout(() => setSaveMsg(""), 1500);
+    }
+  }
+
   async function handleChangePassword() {
     setPwMessage("");
     const user = auth.currentUser;
     if (!user) return;
 
-    if (!currentPassword) { setPwMessage("Please enter your current password."); return; }
-    if (!newPassword || newPassword.length < 6) { setPwMessage("Please enter a new password (at least 6 characters)."); return; }
+    if (!currentPassword) {
+      setPwMessage("Current password is required.");
+      return;
+    }
+    if (!newPassword || newPassword.length < 6) {
+      setPwMessage("New password must be at least 6 characters.");
+      return;
+    }
 
+    // must re-auth every time (explicit flow)
     try {
       const cred = EmailAuthProvider.credential(email, currentPassword);
       await reauthenticateWithCredential(user, cred);
       await updatePassword(user, newPassword);
       setPwMessage("Password updated ✓");
-      setNewPassword(""); setCurrentPassword("");
-    } catch (err: any) {
-      setPwMessage(err?.message || "Could not update password.");
+      setNewPassword("");
+      setCurrentPassword("");
+    } catch (e: any) {
+      setPwMessage(e?.message || "Could not update password.");
     }
   }
 
-  // ----- Payments (student) -----
-  function packById(id: string) { return STUDENT_PACKS.find(p => p.id === id)!; }
-  const selected = packById(selectedPack);
-  const perHour = useMemo(() => (selected ? (selected.priceUSD / selected.hours) : 0), [selected]);
+  // ───────────────── payment actions ─────────────────
+  const perHour = (p: {hours:number; price:number}) => (p.price / p.hours);
 
-  async function handlePayPalCheckout() {
+  async function payNow() {
     if (!uid) return;
-    try {
-      const res = await fetch("/api/payments/paypal/create-order", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId: uid,
-          packId: selected.id,
-          hours: selected.hours,
-          amountUSD: selected.priceUSD,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "PayPal create order failed");
-      // Redirect to PayPal approval URL (your API should return it)
-      if (data?.approvalUrl) window.location.href = data.approvalUrl;
-    } catch (e) {
-      alert((e as any)?.message || "Could not start PayPal checkout.");
-    }
-  }
 
-  async function handleStripePay() {
-    if (!uid) return;
-    if (!process.env.NEXT_PUBLIC_STRIPE_PK) {
-      alert("Stripe publishable key not set (NEXT_PUBLIC_STRIPE_PK).");
+    if (payMethod === "paypal") {
+      // Redirect to your PayPal order creator (stub – implement on your API)
+      const q = new URLSearchParams({ hours: String(selectedPack.hours), price: String(selectedPack.price) });
+      window.location.href = `/api/payments/paypal/create-order?${q.toString()}`;
       return;
     }
-    try {
-      const res = await fetch("/api/payments/stripe/create-payment-intent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId: uid,
-          packId: selected.id,
-          hours: selected.hours,
-          amountUSD: selected.priceUSD,
-          currency: "usd",
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to create payment intent");
 
-      // We leave confirmation to the Stripe form submit (see button handler below).
-      // This function only ensures the PI exists.
-      return data.clientSecret as string;
-    } catch (e) {
-      alert((e as any)?.message || "Could not start card payment.");
+    if (payMethod === "card" && STRIPE_ENABLED) {
+      if (!cardholderName.trim()) {
+        alert("Please enter the cardholder name.");
+        return;
+      }
+      // Here you'd use Stripe Elements + your /api/payments/stripe/create-payment-intent
+      alert("Stripe card flow goes here once enabled.");
+      return;
     }
   }
 
-  // Header buttons
+  // ───────────────── UI ─────────────────
+
   const headerRight = useMemo(
     () => (
       <div style={{ display: "flex", gap: 8 }}>
-        <button style={ghostButton} onClick={() => router.push("/")} title="Home">
-          ← Home
-        </button>
+        <button style={ghostButton} onClick={() => router.push("/")} title="Home">← Home</button>
         <button
           style={ghostButton}
           onClick={() =>
-            router.push(
-              role === "tutor" ? "/dashboard/tutor" :
-              role === "admin" ? "/admin" : "/dashboard/student"
-            )
+            router.push(role === "tutor" ? "/dashboard/tutor" : role === "admin" ? "/admin" : "/dashboard/student")
           }
           title="Dashboard"
         >
@@ -448,24 +383,19 @@ export default function ProfileSettingsPage() {
     );
   }
 
-  const balanceH = Math.floor((balanceMinutes || 0) / 60);
-  const balanceM = (balanceMinutes || 0) % 60;
+  const hoursText = `${Math.floor((minutesBalance || 0)/60)}h ${(minutesBalance || 0)%60}m`;
 
   return (
     <main style={pageShell}>
-      {/* make date icon visible on dark */}
-      <style jsx global>{`
-        input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); }
-      `}</style>
-
+      {/* Header */}
       <header style={headerBar}>
         <Brand />
         {headerRight}
       </header>
 
-      {/* ------- GRID: Three columns where needed ------- */}
+      {/* Body */}
       <section style={bodyGrid}>
-        {/* LEFT COLUMN */}
+        {/* Left column */}
         <Card>
           <CardTitle>Profile</CardTitle>
 
@@ -473,106 +403,66 @@ export default function ProfileSettingsPage() {
             <input disabled value={email} style={input} />
           </Field>
 
-          {/* Names (tutor or student) */}
-          {(role === "tutor") && (
-            <div style={twoCol}>
-              <Field label="First name">
-                <input value={firstName} onChange={(e)=>setFirstName(e.target.value)} style={input} placeholder="Jane"/>
-              </Field>
-              <Field label="Last name">
-                <input value={lastName} onChange={(e)=>setLastName(e.target.value)} style={input} placeholder="Doe"/>
-              </Field>
-            </div>
-          )}
-
-          {(role === "student") && (
-            <div style={twoCol}>
-              <Field label="First name">
-                <input value={studentFirst} onChange={(e)=>setStudentFirst(e.target.value)} style={input} placeholder="Jane"/>
-              </Field>
-              <Field label="Last name">
-                <input value={studentLast} onChange={(e)=>setStudentLast(e.target.value)} style={input} placeholder="Doe"/>
-              </Field>
-            </div>
-          )}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <Field label="First name">
+              <input value={firstName} onChange={(e) => setFirstName(e.target.value)} style={input} placeholder="Jane" />
+            </Field>
+            <Field label="Last name">
+              <input value={lastName} onChange={(e) => setLastName(e.target.value)} style={input} placeholder="Doe" />
+            </Field>
+          </div>
 
           <Field label="Display name">
-            <input value={displayName} onChange={(e)=>setDisplayName(e.target.value)} style={input} placeholder="Your name"/>
+            <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} style={input} placeholder="Your name" />
           </Field>
 
-          {/* Student: Grade level ABOVE birthday */}
           {role === "student" && (
-            <Field label="Grade level">
-              <select value={gradeLevel} onChange={(e)=>setGradeLevel(e.target.value)} style={select}>
-                <option value="">Select…</option>
-                {["Grade 4","Grade 5","Grade 6","Grade 7","Grade 8","Grade 9","Grade 10","Grade 11","Grade 12","IB / AP"]
-                  .map(g => <option key={g} value={g}>{g}</option>)}
-              </select>
-            </Field>
+            <>
+              <Field label="Grade level">
+                <select value={gradeLevel} onChange={(e) => setGradeLevel(e.target.value)} style={select}>
+                  <option value="">Select…</option>
+                  {["Grade 4","Grade 5","Grade 6","Grade 7","Grade 8","Grade 9","Grade 10","Grade 11","Grade 12","IB / AP"].map((g) => (
+                    <option key={g} value={g}>{g}</option>
+                  ))}
+                </select>
+              </Field>
+            </>
           )}
 
-          {/* Birthday / Country */}
-          {(role === "tutor") ? (
-            <>
-              <Field label="Birthday">
-                <input type="date" value={birthday} onChange={(e)=>setBirthday(e.target.value)} style={input}/>
-              </Field>
-              <Field label="Country of residence">
-                <select value={country} onChange={(e)=>setCountry(e.target.value)} style={select}>
-                  <option value="">Select a country…</option>
-                  {ALL_COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </Field>
-            </>
-          ) : role === "student" ? (
-            <>
-              <Field label="Birthday">
-                <input type="date" value={studentBirthday} onChange={(e)=>setStudentBirthday(e.target.value)} style={input}/>
-              </Field>
-              <Field label="Country of residence">
-                <select value={studentCountry} onChange={(e)=>setStudentCountry(e.target.value)} style={select}>
-                  <option value="">Select a country…</option>
-                  {ALL_COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </Field>
-            </>
-          ) : null}
-
-          {/* Timezone with current time */}
-          <label style={{ display: "grid", gap: 6 }}>
-            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>
-              Timezone{" "}
-              <span style={{ color: "#a5b0a9" }}>
-                (Current time: <strong style={{ color: "#fff" }}>{currentTimeInTZ}</strong>)
-              </span>
+          <Field label="Birthday">
+            <div style={{ position: "relative" }}>
+              <input type="date" value={birthday} onChange={(e) => setBirthday(e.target.value)} style={{ ...input, paddingRight: 32 }} />
+              {/* white calendar icon effect via outline only */}
+              <div style={{ position: "absolute", right: 10, top: 10, width: 16, height: 16, border: "2px solid #fff", borderRadius: 3, opacity: 0.9 }} />
             </div>
-            <select value={timezone} onChange={(e)=>setTimezone(e.target.value)} style={select}>
-              {(!timezone || !tzOptions.includes(timezone)) && (
-                <option value="">{timezone || "Select a timezone…"}</option>
-              )}
-              {tzOptions.map(tz => <option key={tz} value={tz}>{tz}</option>)}
-            </select>
-          </label>
+          </Field>
 
-          {/* Tutor-only: PayPal email + Intro */}
+          <Field label="Country of residence">
+            <select value={country} onChange={(e) => setCountry(e.target.value)} style={select}>
+              <option value="">Select a country…</option>
+              {COUNTRIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </Field>
+
+          <Field label={`Timezone (Current time: ${tzNow || "—"})`}>
+            <select value={timezone} onChange={(e) => setTimezone(e.target.value)} style={select}>
+              {TIMEZONES.map((z) => <option key={z} value={z}>{z}</option>)}
+            </select>
+          </Field>
+
           {role === "tutor" && (
             <>
               <Field label="PayPal email (for payouts)">
-                <input
-                  type="email"
-                  value={paypalEmail}
-                  onChange={(e)=>setPaypalEmail(e.target.value)}
-                  style={input}
-                  placeholder="your-paypal-email@example.com"
-                />
+                <input value={paypalEmail} onChange={(e) => setPaypalEmail(e.target.value)} style={input} placeholder="your-paypal-email@example.com" />
               </Field>
+
+              <div style={{ marginTop: 6, fontWeight: 600, color: "#fff" }}>Tutor Details</div>
               <Field label="Tutor introduction">
                 <textarea
-                  value={intro}
-                  onChange={(e)=>setIntro(e.target.value)}
-                  style={textarea}
+                  value={tutorIntro}
+                  onChange={(e) => setTutorIntro(e.target.value)}
                   placeholder="Write a short introduction students will see (teaching style, subjects, achievements, etc.)"
-                  rows={5}
+                  style={{ ...input, minHeight: 120, resize: "vertical" }}
                 />
               </Field>
             </>
@@ -581,202 +471,140 @@ export default function ProfileSettingsPage() {
           <div style={row}>
             <button onClick={saveCommon} style={primaryBtn} disabled={saving}>Save Profile</button>
             {role === "student" && (
-              <button onClick={saveStudentOnly} style={ghostButton} disabled={saving}>Save Student Info</button>
+              <button onClick={saveStudent} style={{ ...primaryBtn, background: "#2b7", borderColor: "#6ecf9a" }} disabled={saving}>
+                Save Student Info
+              </button>
             )}
             {saveMsg && <div style={muted}>{saveMsg}</div>}
           </div>
         </Card>
 
-        {/* MIDDLE COLUMN */}
-        {role === "tutor" ? (
-          <Card>
-            <CardTitle>Tutor Availability</CardTitle>
-            <div style={{ fontSize: 12, color: "#bbb", marginTop: -6 }}>
-              Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or
-              more ranges per day (24-hour format).
-            </div>
-            <div style={availGrid}>
-              {DAYS.map(({ key, label }) => (
-                <div key={key} style={availCol}>
-                  <div style={{ fontSize: 12, color: "#fff", marginBottom: 8 }}>{label}</div>
-                  {(availability[key] ?? []).map((r, i) => (
-                    <div key={i} style={rangeRow}>
-                      <input type="time" value={r.start} onChange={(e)=>updateRange(key,i,"start",e.target.value)} style={timeInput}/>
-                      <span style={{ color: "#888", textAlign: "center" }}>–</span>
-                      <input type="time" value={r.end} onChange={(e)=>updateRange(key,i,"end",e.target.value)} style={timeInput}/>
-                      <button onClick={()=>removeRange(key,i)} style={smallGhostBtn}>Remove</button>
-                    </div>
-                  ))}
-                  <button onClick={()=>addTimeRange(key)} style={smallAddBtn}>+ Add time</button>
-                </div>
-              ))}
-            </div>
-            <div style={row}>
-              <button onClick={saveTutorAvailability} style={primaryBtn} disabled={saving}>
-                Save Tutor Details & Availability
-              </button>
-              {saveMsg && <div style={muted}>{saveMsg}</div>}
-            </div>
-          </Card>
-        ) : (
-          // Student: Change Password moved here
-          <Card>
-            <CardTitle>Change Password</CardTitle>
-            <Field label="Current password">
-              <input
-                type="password"
-                value={currentPassword}
-                onChange={(e)=>setCurrentPassword(e.target.value)}
-                style={input}
-                placeholder="Enter your current password"
-              />
-            </Field>
-            <Field label="New password">
-              <input
-                type="password"
-                value={newPassword}
-                onChange={(e)=>setNewPassword(e.target.value)}
-                style={input}
-                placeholder="At least 6 characters"
-              />
-            </Field>
-            <div style={row}>
-              <button onClick={handleChangePassword} style={primaryBtn}>Update Password</button>
-              {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
-            </div>
-          </Card>
-        )}
+        {/* Middle column */}
+        <Card>
+          <CardTitle>Change Password</CardTitle>
+          <Field label="Current password">
+            <input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} style={input} placeholder="Enter your current password" />
+          </Field>
+          <Field label="New password">
+            <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} style={input} placeholder="At least 6 characters" />
+          </Field>
+          <div style={row}>
+            <button onClick={handleChangePassword} style={primaryBtn}>Update Password</button>
+            {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
+          </div>
+        </Card>
 
-        {/* RIGHT COLUMN */}
-        {role === "tutor" ? (
-          <Card>
-            <CardTitle>Change Password</CardTitle>
-            <Field label="Current password">
-              <input
-                type="password"
-                value={currentPassword}
-                onChange={(e)=>setCurrentPassword(e.target.value)}
-                style={input}
-                placeholder="Enter your current password"
-              />
-            </Field>
-            <Field label="New password">
-              <input
-                type="password"
-                value={newPassword}
-                onChange={(e)=>setNewPassword(e.target.value)}
-                style={input}
-                placeholder="At least 6 characters"
-              />
-            </Field>
-            <div style={row}>
-              <button onClick={handleChangePassword} style={primaryBtn}>Update Password</button>
-              {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
-            </div>
-          </Card>
-        ) : (
+        {/* Right column */}
+        {role === "student" ? (
           <Card>
             <CardTitle>Hours & Payments</CardTitle>
-
-            <div style={{ fontSize: 13, color: "#cfead9" }}>
-              Current balance: <strong style={{ color: "#fff" }}>{balanceH}h {balanceM}m</strong>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)", marginBottom: 8 }}>
+              Current balance: <strong>{hoursText}</strong>
             </div>
 
-            <div style={packsGrid}>
-              {STUDENT_PACKS.map(p => {
-                const active = selectedPack === p.id;
-                const per = p.priceUSD / p.hours;
+            {/* Packs */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+              {PACKS.map((p) => {
+                const selected = selectedPack.hours === p.hours;
                 return (
                   <button
-                    key={p.id}
-                    onClick={()=>setSelectedPack(p.id)}
+                    key={p.hours}
+                    onClick={() => setSelectedPack(p)}
                     style={{
-                      ...packCard,
-                      border: active ? "2px solid #6ecf9a" : "1px solid rgba(255,255,255,0.15)",
-                      boxShadow: active ? "0 0 0 3px rgba(110,207,154,0.2)" : packCard.boxShadow,
+                      textAlign: "left",
+                      padding: 12,
+                      borderRadius: 12,
+                      border: selected ? "2px solid #6ecf9a" : "1px solid rgba(255,255,255,0.15)",
+                      background: "rgba(0,0,0,0.25)",
+                      color: "#fff",
+                      cursor: "pointer",
                     }}
                   >
-                    <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>{p.hours} hour{p.hours>1?"s":""}</div>
-                    <div style={{ fontSize: 13, color: "#cfead9" }}>${p.priceUSD.toLocaleString()} USD</div>
-                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)" }}>
-                      ${per.toFixed(2)}/hr
-                    </div>
+                    <div style={{ fontWeight: 700 }}>{p.hours} {p.hours === 1 ? "hour" : "hours"}</div>
+                    <div style={{ opacity: 0.9 }}>${p.price} USD</div>
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>${perHour(p).toFixed(2)}/hr</div>
                   </button>
                 );
               })}
             </div>
 
-            <div style={{ marginTop: 8, fontSize: 12, color: "#a5b0a9" }}>
-              Selected: <strong style={{ color: "#fff" }}>{selected.hours}h</strong> for{" "}
-              <strong style={{ color: "#fff" }}>${selected.priceUSD.toLocaleString()} USD</strong>
-              {" "}({`$${perHour.toFixed(2)}/hr`})
+            <div style={{ marginTop: 10, fontSize: 12, color: "rgba(255,255,255,0.85)" }}>
+              Selected: <strong>{selectedPack.hours}h</strong> for <strong>${selectedPack.price} USD</strong> (${perHour(selectedPack).toFixed(2)}/hr)
             </div>
 
-            <div style={{ marginTop: 12 }}>
-              <div style={{ fontSize: 13, color: "#fff", marginBottom: 6 }}>Payment method</div>
-              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                <label style={radioWrap}>
+            {/* Method */}
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)", marginBottom: 6 }}>Payment method</div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <label style={pill(payMethod === "paypal")}><input type="radio" checked={payMethod === "paypal"} onChange={() => setPayMethod("paypal")} />&nbsp; PayPal</label>
+                <label style={pill(payMethod === "card", STRIPE_ENABLED)} title={STRIPE_ENABLED ? "" : "Enable Stripe to accept cards"}>
                   <input
                     type="radio"
-                    name="paymethod"
-                    checked={payMethod === "paypal"}
-                    onChange={()=>setPayMethod("paypal")}
-                  />
-                  <span>PayPal</span>
-                </label>
-                <label style={radioWrap}>
-                  <input
-                    type="radio"
-                    name="paymethod"
                     checked={payMethod === "card"}
-                    onChange={()=>setPayMethod("card")}
+                    onChange={() => STRIPE_ENABLED && setPayMethod("card")}
+                    disabled={!STRIPE_ENABLED}
                   />
-                  <span>Credit / Debit card</span>
+                  &nbsp; Credit / Debit card
                 </label>
               </div>
             </div>
 
-            {/* Card form appears only when 'card' chosen */}
-            {payMethod === "card" && (
-              <div style={{ marginTop: 8 }}>
-                {process.env.NEXT_PUBLIC_STRIPE_PK ? (
-                  <StripeElements stripe={stripePromise!}>
-                    <div style={{ padding: "10px 12px", border: "1px solid #444", borderRadius: 8, background: "#111" }}>
-                      <CardElement options={{ hidePostalCode: false }} />
-                    </div>
-                  </StripeElements>
-                ) : (
-                  <div style={{ ...muted, fontSize: 12 }}>
-                    To accept cards, set <code>NEXT_PUBLIC_STRIPE_PK</code> and implement the
-                    <code> /api/payments/stripe/create-payment-intent</code> endpoint.
+            {/* Card form (only when Stripe is enabled) */}
+            {payMethod === "card" && STRIPE_ENABLED && (
+              <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+                <Field label="Cardholder name">
+                  <input value={cardholderName} onChange={(e)=>setCardholderName(e.target.value)} style={input} placeholder="Name on card" />
+                </Field>
+                <div>
+                  {/* Replace shims with real Elements/CardElement once Stripe is installed. */}
+                  <StripeElements>{/* <Elements stripe={stripePromise}> */}</StripeElements>
+                  <div style={{ ...input, padding: 12 }}>
+                    <CardElement options={{ style: { base: { color: "#fff", "::placeholder": { color: "#bbb" } } } }} />
                   </div>
-                )}
+                </div>
               </div>
             )}
 
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              {payMethod === "paypal" ? (
-                <button onClick={handlePayPalCheckout} style={primaryBtn}>
-                  Pay with PayPal
-                </button>
-              ) : (
-                <button
-                  onClick={async () => {
-                    const clientSecret = await handleStripePay();
-                    if (!clientSecret) return;
-                    // In a full integration, confirm card payment here using Stripe.js
-                    // (We keep this minimal to avoid adding more code; your checkout page can handle confirmation.)
-                    alert("Payment Intent created. Finish confirmation in your Stripe handler.");
-                  }}
-                  style={primaryBtn}
-                >
-                  Pay ${selected.priceUSD.toLocaleString()} USD
-                </button>
+            <div style={{ marginTop: 14 }}>
+              <button onClick={payNow} style={{ ...primaryBtn, width: "100%" }}>
+                Pay ${selectedPack.price} USD
+              </button>
+              <div style={{ ...muted, marginTop: 8 }}>
+                After a successful payment, the purchased minutes will be added to your balance automatically.
+              </div>
+              {!STRIPE_ENABLED && payMethod === "card" && (
+                <div style={{ color: "#ffb3b3", fontSize: 12, marginTop: 8 }}>
+                  Card payments are currently disabled. Keep PayPal selected, or enable Stripe in the code as noted.
+                </div>
               )}
             </div>
-
-            <div style={{ ...muted, marginTop: 8 }}>
-              After a successful payment, the purchased minutes will be added to your balance automatically.
+          </Card>
+        ) : (
+          // Tutor right column: availability editor
+          <Card>
+            <CardTitle>Tutor Availability</CardTitle>
+            <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
+              Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or more ranges per day (24-hour format).
+            </div>
+            <div style={availGrid}>
+              {DAYS.map(({ key, label }) => (
+                <div key={key} style={availCol}>
+                  <div style={{ fontSize: 12, color: "#fff", marginBottom: 6 }}>{label}</div>
+                  {(availability[key] ?? []).map((r, i) => (
+                    <div key={i} style={rangeRow}>
+                      <input type="time" value={r.start} onChange={(e) => updateRange(key, i, "start", e.target.value)} style={timeInput} />
+                      <span style={{ color: "#888" }}>–</span>
+                      <input type="time" value={r.end} onChange={(e) => updateRange(key, i, "end", e.target.value)} style={timeInput} />
+                      <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>Remove</button>
+                    </div>
+                  ))}
+                  <button onClick={() => addTimeRange(key)} style={smallAddBtn}>+ Add time</button>
+                </div>
+              ))}
+            </div>
+            <div style={row}>
+              <button onClick={saveTutor} style={primaryBtn} disabled={saving}>Save Tutor Details & Availability</button>
+              {saveMsg && <div style={muted}>{saveMsg}</div>}
             </div>
           </Card>
         )}
@@ -880,26 +708,13 @@ const input: React.CSSProperties = {
   fontSize: 14,
   lineHeight: 1.4,
   outline: "none",
+  width: "100%",
+  boxSizing: "border-box",
 };
 
-const textarea: React.CSSProperties = {
-  ...input,
-  resize: "vertical",
-  minHeight: 110,
-};
+const select: React.CSSProperties = { ...input, appearance: "none" as const };
 
-const select: React.CSSProperties = {
-  ...input,
-  appearance: "none",
-};
-
-const twoCol: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))",
-  gap: 10,
-};
-
-const row: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
+const row: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" };
 
 const primaryBtn: React.CSSProperties = {
   padding: "10px 14px",
@@ -922,61 +737,56 @@ const ghostButton: React.CSSProperties = {
   lineHeight: 1.2,
   cursor: "pointer",
   minWidth: 80,
-  textAlign: "center",
+  textAlign: "center" as const,
 };
 
 const muted: React.CSSProperties = { color: "#a5b0a9", fontSize: 12 };
 
-/* Availability */
 const availGrid: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-  gap: 12,
-  marginTop: 8,
+  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+  gap: 10,
 };
+
 const availCol: React.CSSProperties = {
   background: "rgba(0,0,0,0.25)",
   border: "1px solid rgba(255,255,255,0.08)",
   borderRadius: 8,
   padding: 10,
-  display: "flex",
-  flexDirection: "column",
-  gap: 8,
 };
+
 const rangeRow: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(90px,1fr) 18px minmax(90px,1fr) auto",
-  alignItems: "center",
-  columnGap: 8,
-};
-const timeInput: React.CSSProperties = { ...input, padding: "8px 10px", width: "100%" };
-const smallAddBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12, width: "fit-content" };
-const smallGhostBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12, width: "fit-content" };
-
-/* Packs */
-const packsGrid: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-  gap: 10,
-  marginTop: 8,
-};
-const packCard: React.CSSProperties = {
-  padding: 12,
-  borderRadius: 10,
-  background: "rgba(0,0,0,0.25)",
-  border: "1px solid rgba(255,255,255,0.15)",
-  color: "#fff",
-  textAlign: "left" as const,
-  cursor: "pointer",
-  boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
-} as const;
-
-const radioWrap: React.CSSProperties = {
-  display: "inline-flex",
+  display: "flex",
   alignItems: "center",
   gap: 6,
-  background: "rgba(0,0,0,0.25)",
-  border: "1px solid rgba(255,255,255,0.15)",
-  padding: "6px 10px",
-  borderRadius: 8,
+  marginBottom: 6,
 };
+
+const timeInput: React.CSSProperties = {
+  ...input,
+  padding: "8px 10px",
+};
+
+const smallAddBtn: React.CSSProperties = {
+  ...ghostButton,
+  padding: "6px 8px",
+  fontSize: 12,
+};
+
+const smallGhostBtn: React.CSSProperties = {
+  ...ghostButton,
+  padding: "6px 8px",
+  fontSize: 12,
+};
+
+function pill(active: boolean, enabled: boolean = true): React.CSSProperties {
+  return {
+    padding: "8px 10px",
+    borderRadius: 10,
+    border: active ? "1px solid #6ecf9a" : "1px solid #444",
+    background: enabled ? (active ? "rgba(46, 178, 107, 0.25)" : "#2a2a2a") : "#1b1b1b",
+    color: enabled ? "#fff" : "rgba(255,255,255,0.5)",
+    cursor: enabled ? "pointer" : "not-allowed",
+    userSelect: "none",
+  };
+}
