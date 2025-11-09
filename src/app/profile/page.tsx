@@ -34,7 +34,7 @@ type UserDoc = {
   availability?: Availability; // tutors
   gradeLevel?: string;         // students
   intro?: string;              // tutors
-  birthday?: string;           // tutors, ISO yyyy-mm-dd
+  birthday?: string;           // yyyy-mm-dd
   country?: string;            // tutors
 };
 
@@ -67,13 +67,32 @@ function getTimezones(): string[] {
   }
 }
 
-// compact country list + datalist; free-type also allowed
-const COUNTRIES = [
-  "Canada","United States","Mexico","United Kingdom","France","Germany","Italy","Spain",
-  "Netherlands","Sweden","Norway","Denmark","Finland","Poland","Czechia","Ireland",
-  "Australia","New Zealand","Japan","South Korea","China","Hong Kong","Taiwan","Singapore",
-  "India","Pakistan","Bangladesh","Philippines","Vietnam","Thailand","Malaysia",
-  "United Arab Emirates","Saudi Arabia","Turkey","Israel","South Africa","Brazil","Argentina",
+// ISO 3166-ish country list (UN members + a few common territories)
+const ALL_COUNTRIES = [
+  "Afghanistan","Albania","Algeria","Andorra","Angola","Antigua and Barbuda","Argentina","Armenia","Australia","Austria",
+  "Azerbaijan","Bahamas","Bahrain","Bangladesh","Barbados","Belarus","Belgium","Belize","Benin","Bhutan","Bolivia",
+  "Bosnia and Herzegovina","Botswana","Brazil","Brunei","Bulgaria","Burkina Faso","Burundi","Cabo Verde","Cambodia",
+  "Cameroon","Canada","Central African Republic","Chad","Chile","China","Colombia","Comoros","Congo (Congo-Brazzaville)",
+  "Costa Rica","Côte d’Ivoire","Croatia","Cuba","Cyprus","Czechia","Democratic Republic of the Congo","Denmark","Djibouti",
+  "Dominica","Dominican Republic","Ecuador","Egypt","El Salvador","Equatorial Guinea","Eritrea","Estonia","Eswatini",
+  "Ethiopia","Fiji","Finland","France","Gabon","Gambia","Georgia","Germany","Ghana","Greece","Grenada","Guatemala",
+  "Guinea","Guinea-Bissau","Guyana","Haiti","Honduras","Hungary","Iceland","India","Indonesia","Iran","Iraq","Ireland",
+  "Israel","Italy","Jamaica","Japan","Jordan","Kazakhstan","Kenya","Kiribati","Kuwait","Kyrgyzstan","Laos","Latvia",
+  "Lebanon","Lesotho","Liberia","Libya","Liechtenstein","Lithuania","Luxembourg","Madagascar","Malawi","Malaysia",
+  "Maldives","Mali","Malta","Marshall Islands","Mauritania","Mauritius","Mexico","Micronesia","Moldova","Monaco",
+  "Mongolia","Montenegro","Morocco","Mozambique","Myanmar","Namibia","Nauru","Nepal","Netherlands","New Zealand",
+  "Nicaragua","Niger","Nigeria","North Korea","North Macedonia","Norway","Oman","Pakistan","Palau","Panama",
+  "Papua New Guinea","Paraguay","Peru","Philippines","Poland","Portugal","Qatar","Romania","Russia","Rwanda",
+  "Saint Kitts and Nevis","Saint Lucia","Saint Vincent and the Grenadines","Samoa","San Marino","Sao Tome and Principe",
+  "Saudi Arabia","Senegal","Serbia","Seychelles","Sierra Leone","Singapore","Slovakia","Slovenia","Solomon Islands",
+  "Somalia","South Africa","South Korea","South Sudan","Spain","Sri Lanka","Sudan","Suriname","Sweden","Switzerland",
+  "Syria","Taiwan","Tajikistan","Tanzania","Thailand","Timor-Leste","Togo","Tonga","Trinidad and Tobago","Tunisia",
+  "Turkey","Turkmenistan","Tuvalu","Uganda","Ukraine","United Arab Emirates","United Kingdom","United States","Uruguay",
+  "Uzbekistan","Vanuatu","Vatican City","Venezuela","Vietnam","Yemen","Zambia","Zimbabwe",
+  // Common territories / regions often used by users
+  "Hong Kong","Macau","Puerto Rico","Greenland","Aruba","Bermuda","Cayman Islands","Curacao","Faroe Islands",
+  "Gibraltar","Guernsey","Isle of Man","Jersey","Kosovo","New Caledonia","Northern Mariana Islands","Reunion",
+  "French Polynesia","Guadeloupe","Martinique","Mayotte"
 ];
 
 export default function ProfileSettingsPage() {
@@ -92,7 +111,7 @@ export default function ProfileSettingsPage() {
   // live clock tick (updates current time text)
   const [, setTick] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 30000); // 30s refresh
+    const id = setInterval(() => setTick((t) => t + 1), 30000); // refresh every 30s
     return () => clearInterval(id);
   }, []);
   const currentTimeInTZ = useMemo(() => {
@@ -113,9 +132,10 @@ export default function ProfileSettingsPage() {
   // tutor-only extras
   const [firstName, setFirstName] = useState<string>("");
   const [lastName, setLastName] = useState<string>("");
-  const [intro, setIntro] = useState<string>("");         // NEW
-  const [birthday, setBirthday] = useState<string>("");   // NEW (yyyy-mm-dd)
-  const [country, setCountry] = useState<string>("");     // NEW
+  const [intro, setIntro] = useState<string>("");
+  const [birthday, setBirthday] = useState<string>("");
+  const [country, setCountry] = useState<string>("");
+
   const [availability, setAvailability] = useState<Availability>(emptyAvailability());
 
   // password
@@ -186,6 +206,9 @@ export default function ProfileSettingsPage() {
         ? {
             firstName: firstName.trim() || undefined,
             lastName: lastName.trim() || undefined,
+            intro: intro.trim() || "",
+            birthday: birthday || "",
+            country: country.trim() || "",
           }
         : {}),
       // @ts-ignore
@@ -273,11 +296,6 @@ export default function ProfileSettingsPage() {
       await updateDoc(doc(db, "users", uid), {
         availability,
         timezone: timezone || guessTimezone(),
-        firstName: firstName.trim() || undefined,
-        lastName: lastName.trim() || undefined,
-        intro: intro.trim() || "",
-        birthday: birthday || "",
-        country: country.trim() || "",
         // @ts-ignore
         profileUpdatedAt: serverTimestamp(),
       });
@@ -285,16 +303,7 @@ export default function ProfileSettingsPage() {
     } catch {
       await setDoc(
         doc(db, "users", uid),
-        {
-          availability,
-          timezone: timezone || guessTimezone(),
-          firstName: firstName.trim() || undefined,
-          lastName: lastName.trim() || undefined,
-          intro: intro.trim() || "",
-          birthday: birthday || "",
-          country: country.trim() || "",
-          profileUpdatedAt: serverTimestamp() as any,
-        },
+        { availability, timezone: timezone || guessTimezone(), profileUpdatedAt: serverTimestamp() as any },
         { merge: true }
       );
       setSaveMsg("Saved ✓");
@@ -380,6 +389,13 @@ export default function ProfileSettingsPage() {
 
   return (
     <main style={pageShell}>
+      {/* make date icon white for dark UI */}
+      <style jsx global>{`
+        input[type="date"]::-webkit-calendar-picker-indicator {
+          filter: invert(1);
+        }
+      `}</style>
+
       {/* Header */}
       <header style={headerBar}>
         <Brand />
@@ -388,7 +404,7 @@ export default function ProfileSettingsPage() {
 
       {/* Body */}
       <section style={bodyGrid}>
-        {/* Profile card (everyone) */}
+        {/* Profile + Tutor details on the LEFT */}
         <Card>
           <CardTitle>Profile</CardTitle>
 
@@ -396,7 +412,6 @@ export default function ProfileSettingsPage() {
             <input disabled value={email} style={input} />
           </Field>
 
-          {/* Tutor-only names */}
           {role === "tutor" && (
             <div style={twoCol}>
               <Field label="First name">
@@ -450,6 +465,48 @@ export default function ProfileSettingsPage() {
             </select>
           </label>
 
+          {role === "tutor" && (
+            <>
+              <CardTitle>Tutor Details</CardTitle>
+
+              <Field label="Tutor introduction">
+                <textarea
+                  value={intro}
+                  onChange={(e) => setIntro(e.target.value)}
+                  style={textarea}
+                  placeholder="Write a short introduction students will see (teaching style, subjects, achievements, etc.)"
+                  rows={5}
+                />
+              </Field>
+
+              <div style={twoCol}>
+                <Field label="Birthday">
+                  <input
+                    type="date"
+                    value={birthday}
+                    onChange={(e) => setBirthday(e.target.value)}
+                    style={input}
+                  />
+                </Field>
+
+                <Field label="Country of residence">
+                  <select
+                    value={country}
+                    onChange={(e) => setCountry(e.target.value)}
+                    style={select}
+                  >
+                    <option value="">Select a country…</option>
+                    {ALL_COUNTRIES.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              </div>
+            </>
+          )}
+
           <div style={row}>
             <button onClick={saveCommon} style={primaryBtn} disabled={saving}>
               Save Profile
@@ -486,99 +543,55 @@ export default function ProfileSettingsPage() {
           </Card>
         )}
 
-        {/* Tutor section */}
+        {/* Availability on the RIGHT */}
         {role === "tutor" && (
-          <>
-            <Card>
-              <CardTitle>Tutor Details</CardTitle>
+          <Card>
+            <CardTitle>Tutor Availability</CardTitle>
+            <div style={{ fontSize: 12, color: "#bbb", marginTop: -6 }}>
+              Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or
+              more ranges per day (24-hour format).
+            </div>
 
-              <Field label="Tutor introduction">
-                <textarea
-                  value={intro}
-                  onChange={(e) => setIntro(e.target.value)}
-                  style={textarea}
-                  placeholder="Write a short introduction students will see (teaching style, subjects, achievements, etc.)"
-                  rows={5}
-                />
-              </Field>
+            <div style={availGrid}>
+              {DAYS.map(({ key, label }) => (
+                <div key={key} style={availCol}>
+                  <div style={{ fontSize: 12, color: "#fff", marginBottom: 8 }}>{label}</div>
 
-              <div style={twoCol}>
-                <Field label="Birthday">
-                  <input
-                    type="date"
-                    value={birthday}
-                    onChange={(e) => setBirthday(e.target.value)}
-                    style={input}
-                  />
-                </Field>
+                  {(availability[key] ?? []).map((r, i) => (
+                    <div key={i} style={rangeRow}>
+                      <input
+                        type="time"
+                        value={r.start}
+                        onChange={(e) => updateRange(key, i, "start", e.target.value)}
+                        style={timeInput}
+                      />
+                      <span style={{ color: "#888", textAlign: "center" }}>–</span>
+                      <input
+                        type="time"
+                        value={r.end}
+                        onChange={(e) => updateRange(key, i, "end", e.target.value)}
+                        style={timeInput}
+                      />
+                      <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>
+                        Remove
+                      </button>
+                    </div>
+                  ))}
 
-                <label style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>Country of residence</div>
-                  <input
-                    value={country}
-                    onChange={(e) => setCountry(e.target.value)}
-                    list="country-list"
-                    style={input}
-                    placeholder="e.g., Canada"
-                  />
-                  <datalist id="country-list">
-                    {COUNTRIES.map((c) => (
-                      <option key={c} value={c} />
-                    ))}
-                  </datalist>
-                </label>
-              </div>
-            </Card>
+                  <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
+                    + Add time
+                  </button>
+                </div>
+              ))}
+            </div>
 
-            <Card>
-              <CardTitle>Tutor Availability</CardTitle>
-              <div style={{ fontSize: 12, color: "#bbb", marginTop: -6 }}>
-                Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or
-                more ranges per day (24-hour format).
-              </div>
-
-              {/* Availability columns */}
-              <div style={availGrid}>
-                {DAYS.map(({ key, label }) => (
-                  <div key={key} style={availCol}>
-                    <div style={{ fontSize: 12, color: "#fff", marginBottom: 8 }}>{label}</div>
-
-                    {(availability[key] ?? []).map((r, i) => (
-                      <div key={i} style={rangeRow}>
-                        <input
-                          type="time"
-                          value={r.start}
-                          onChange={(e) => updateRange(key, i, "start", e.target.value)}
-                          style={timeInput}
-                        />
-                        <span style={{ color: "#888", textAlign: "center" }}>–</span>
-                        <input
-                          type="time"
-                          value={r.end}
-                          onChange={(e) => updateRange(key, i, "end", e.target.value)}
-                          style={timeInput}
-                        />
-                        <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-
-                    <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
-                      + Add time
-                    </button>
-                  </div>
-                ))}
-              </div>
-
-              <div style={row}>
-                <button onClick={saveTutor} style={primaryBtn} disabled={saving}>
-                  Save Tutor Details & Availability
-                </button>
-                {saveMsg && <div style={muted}>{saveMsg}</div>}
-              </div>
-            </Card>
-          </>
+            <div style={row}>
+              <button onClick={saveTutor} style={primaryBtn} disabled={saving}>
+                Save Tutor Details & Availability
+              </button>
+              {saveMsg && <div style={muted}>{saveMsg}</div>}
+            </div>
+          </Card>
         )}
 
         {/* Password */}
