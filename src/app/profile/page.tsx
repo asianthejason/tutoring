@@ -2,7 +2,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import {
@@ -43,7 +42,7 @@ type UserDoc = {
   // NEW common fields
   firstName?: string;
   lastName?: string;
-  birthday?: string;            // yyyy-mm-dd
+  birthday?: string; // yyyy-mm-dd
   country?: string;
   timezone?: string;
 
@@ -54,11 +53,18 @@ type UserDoc = {
 
   // Student fields
   gradeLevel?: string;
-  minutesBalance?: number;      // total minutes available
+  minutesBalance?: number; // total minutes available
 
   // Audit
   profileUpdatedAt?: any;
 };
+
+// ---- Payment result types & guard ----
+type PaymentSuccess = { hours: number; paymentId: string };
+type PaymentError = { message: string };
+function isPaymentSuccess(p: unknown): p is PaymentSuccess {
+  return !!p && typeof p === "object" && "hours" in (p as any) && "paymentId" in (p as any);
+}
 
 const DAYS: { key: DayKey; label: string }[] = [
   { key: "mon", label: "Mon" },
@@ -80,7 +86,7 @@ const COUNTRIES = [
   "France","Germany","Spain","Italy","Netherlands","Sweden","Norway","Denmark","Finland","Poland","Portugal",
   "Brazil","Argentina","Chile","Colombia","Peru","South Africa","Nigeria","Kenya","Egypt","Turkey","UAE",
   "Saudi Arabia","Israel","Ireland","Switzerland","Austria","Belgium","Czechia","Greece","Hungary",
-  // …(trimmed list; add more as you like)
+  // …extend as needed
 ];
 
 const STRIPE_PK = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "";
@@ -92,7 +98,7 @@ const STUDENT_PACKAGES: {
   price: number; // USD
 }[] = [
   { id: "1h",  label: "1 hour",  hours: 1,  price: 55 },
-  { id: "5h",  label: "5 hours", hours: 5,  price: 265 }, // fixed
+  { id: "5h",  label: "5 hours", hours: 5,  price: 265 }, // corrected
   { id: "10h", label: "10 hours",hours: 10, price: 500 },
   { id: "20h", label: "20 hours",hours: 20, price: 900 },
   { id: "40h", label: "40 hours",hours: 40, price: 1600 },
@@ -206,30 +212,6 @@ export default function ProfileSettingsPage() {
   }, [router]);
 
   // ---------- Save handlers ----------
-  async function saveCommon() {
-    if (!uid) return;
-    setSaving(true);
-    setSaveMsg("");
-    const payload: Partial<UserDoc> = {
-      displayName: displayName.trim() || email.split("@")[0],
-      timezone: timezone || guessTimezone(),
-      firstName: firstName.trim(),
-      lastName: lastName.trim(),
-      birthday: birthday || "",
-      country: country || "",
-      profileUpdatedAt: serverTimestamp() as any,
-    };
-
-    try {
-      await setDoc(doc(db, "users", uid), payload, { merge: true });
-      setSaveMsg("Saved ✓");
-    } finally {
-      setSaving(false);
-      setTimeout(() => setSaveMsg(""), 1500);
-    }
-  }
-
-  // STUDENT: single save button (merges “profile + student fields”)
   async function saveStudentProfile() {
     if (!uid) return;
     setSaving(true);
@@ -398,7 +380,6 @@ export default function ProfileSettingsPage() {
       );
       await updateDoc(doc(db, "users", uid), {
         minutesBalance: increment(hoursPurchased * 60),
-        // stamp for any listeners you have
         profileUpdatedAt: serverTimestamp() as any,
       });
       setMinutesBalance((m) => (m || 0) + hoursPurchased * 60);
@@ -751,10 +732,11 @@ export default function ProfileSettingsPage() {
                         params={confirmParams}
                         cardholder={cardholder}
                         onDone={(ok, payload) => {
-                          if (ok) {
+                          if (ok && isPaymentSuccess(payload)) {
                             onCardPaymentSucceeded(payload.hours, payload.paymentId);
                           } else {
-                            setPayMsg(payload.message);
+                            const msg = (payload as PaymentError)?.message || "Payment failed.";
+                            setPayMsg(msg);
                             setPayBusy(false);
                           }
                         }}
@@ -815,9 +797,7 @@ function StripeConfirmSection({
   cardholder: string;
   onDone: (
     ok: boolean,
-    payload:
-      | { hours: number; paymentId: string }
-      | { message: string }
+    payload: PaymentSuccess | PaymentError
   ) => void;
 }) {
   const stripe = useStripe();
