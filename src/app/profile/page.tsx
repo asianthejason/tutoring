@@ -28,9 +28,11 @@ type UserDoc = {
   email: string;
   role: Role;
   displayName?: string;
+  firstName?: string;   // NEW
+  lastName?: string;    // NEW
   timezone?: string;
   availability?: Availability; // tutors
-  gradeLevel?: string; // students
+  gradeLevel?: string;         // students
 };
 
 const DAYS: { key: DayKey; label: string }[] = [
@@ -44,15 +46,24 @@ const DAYS: { key: DayKey; label: string }[] = [
 ];
 
 function emptyAvailability(): Availability {
-  return {
-    mon: [],
-    tue: [],
-    wed: [],
-    thu: [],
-    fri: [],
-    sat: [],
-    sun: [],
-  };
+  return { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] };
+}
+
+// Build a timezone list once (browser-supported; with fallback set)
+const TZ_FALLBACK = [
+  "America/Edmonton","America/Vancouver","America/Denver","America/Chicago",
+  "America/New_York","Europe/London","Europe/Paris","Asia/Hong_Kong",
+  "Asia/Shanghai","Asia/Tokyo","Australia/Sydney","UTC"
+];
+function getTimezones(): string[] {
+  try {
+    // @ts-ignore - supportedValuesOf is Stage 4 in modern browsers
+    const tz: string[] = Intl.supportedValuesOf?.("timeZone") || TZ_FALLBACK;
+    // Keep a reasonable size but searchable; sort for UX
+    return tz.slice().sort((a,b) => a.localeCompare(b));
+  } catch {
+    return TZ_FALLBACK;
+  }
 }
 
 export default function ProfileSettingsPage() {
@@ -66,11 +77,14 @@ export default function ProfileSettingsPage() {
   // common
   const [displayName, setDisplayName] = useState("");
   const [timezone, setTimezone] = useState<string>("");
+  const [tzOptions] = useState<string[]>(getTimezones());
 
   // student
   const [gradeLevel, setGradeLevel] = useState<string>("");
 
-  // tutor
+  // tutor-only extras
+  const [firstName, setFirstName] = useState<string>(""); // NEW
+  const [lastName, setLastName] = useState<string>("");   // NEW
   const [availability, setAvailability] = useState<Availability>(emptyAvailability());
 
   // password
@@ -97,17 +111,20 @@ export default function ProfileSettingsPage() {
 
       const r: Role = (data?.role as Role) || "student";
       setRole(r);
-      setDisplayName(data?.displayName || (user.email?.split("@")[0] ?? ""));
+
+      const initialDisplay =
+        data?.displayName || (user.email?.split("@")[0] ?? "");
+      setDisplayName(initialDisplay);
+
       setTimezone(data?.timezone || guessTimezone());
 
       if (r === "student") {
         setGradeLevel(data?.gradeLevel || "");
       }
       if (r === "tutor") {
-        setAvailability({
-          ...emptyAvailability(),
-          ...(data?.availability || {}),
-        });
+        setAvailability({ ...emptyAvailability(), ...(data?.availability || {}) });
+        setFirstName(data?.firstName || "");
+        setLastName(data?.lastName || "");
       }
 
       setLoading(false);
@@ -131,7 +148,12 @@ export default function ProfileSettingsPage() {
     const payload: Partial<UserDoc> = {
       displayName: displayName.trim() || email.split("@")[0],
       timezone: timezone || guessTimezone(),
-      // write a heartbeat field for auditing
+      ...(role === "tutor"
+        ? {
+            firstName: firstName.trim() || undefined,
+            lastName: lastName.trim() || undefined,
+          }
+        : {}),
       // @ts-ignore
       profileUpdatedAt: serverTimestamp(),
     };
@@ -140,7 +162,6 @@ export default function ProfileSettingsPage() {
       await updateDoc(doc(db, "users", uid), payload as any);
       setSaveMsg("Saved ✓");
     } catch {
-      // If doc might not exist (older accounts), setDoc with merge
       await setDoc(doc(db, "users", uid), payload as any, { merge: true });
       setSaveMsg("Saved ✓");
     } finally {
@@ -218,6 +239,8 @@ export default function ProfileSettingsPage() {
       await updateDoc(doc(db, "users", uid), {
         availability,
         timezone: timezone || guessTimezone(),
+        firstName: firstName.trim() || undefined,
+        lastName: lastName.trim() || undefined,
         // @ts-ignore
         profileUpdatedAt: serverTimestamp(),
       });
@@ -225,7 +248,13 @@ export default function ProfileSettingsPage() {
     } catch {
       await setDoc(
         doc(db, "users", uid),
-        { availability, timezone: timezone || guessTimezone(), profileUpdatedAt: serverTimestamp() as any },
+        {
+          availability,
+          timezone: timezone || guessTimezone(),
+          firstName: firstName.trim() || undefined,
+          lastName: lastName.trim() || undefined,
+          profileUpdatedAt: serverTimestamp() as any,
+        },
         { merge: true }
       );
       setSaveMsg("Saved ✓");
@@ -251,7 +280,6 @@ export default function ProfileSettingsPage() {
       setNewPassword("");
       setCurrentPassword("");
     } catch (err: any) {
-      // If we need recent login, try reauth with the current password the user entered
       if (err?.code === "auth/requires-recent-login") {
         if (!email || !currentPassword) {
           setPwMessage("Please enter your current password to re-authenticate.");
@@ -276,11 +304,7 @@ export default function ProfileSettingsPage() {
   const headerRight = useMemo(
     () => (
       <div style={{ display: "flex", gap: 8 }}>
-        <button
-          style={ghostButton}
-          onClick={() => router.push("/")}
-          title="Home"
-        >
+        <button style={ghostButton} onClick={() => router.push("/")} title="Home">
           ← Home
         </button>
         <button
@@ -327,9 +351,33 @@ export default function ProfileSettingsPage() {
         {/* Profile card (everyone) */}
         <Card>
           <CardTitle>Profile</CardTitle>
+
           <Field label="Email">
             <input disabled value={email} style={input} />
           </Field>
+
+          {/* Tutor-only names */}
+          {role === "tutor" && (
+            <div style={twoCol}>
+              <Field label="First name">
+                <input
+                  value={firstName}
+                  onChange={(e) => setFirstName(e.target.value)}
+                  style={input}
+                  placeholder="Jane"
+                />
+              </Field>
+              <Field label="Last name">
+                <input
+                  value={lastName}
+                  onChange={(e) => setLastName(e.target.value)}
+                  style={input}
+                  placeholder="Doe"
+                />
+              </Field>
+            </div>
+          )}
+
           <Field label="Display name">
             <input
               value={displayName}
@@ -338,23 +386,24 @@ export default function ProfileSettingsPage() {
               placeholder="Your name"
             />
           </Field>
+
           <Field label="Timezone">
-            <input
+            <select
               value={timezone}
               onChange={(e) => setTimezone(e.target.value)}
-              style={input}
-              placeholder="America/Edmonton"
-              list="tzlist"
-            />
-            <datalist id="tzlist">
-              <option value="America/Edmonton" />
-              <option value="America/Denver" />
-              <option value="America/Los_Angeles" />
-              <option value="America/Chicago" />
-              <option value="America/New_York" />
-              <option value="UTC" />
-            </datalist>
+              style={select}
+            >
+              {(!timezone || !tzOptions.includes(timezone)) && (
+                <option value="">{timezone || "Select a timezone…"}</option>
+              )}
+              {tzOptions.map((tz) => (
+                <option key={tz} value={tz}>
+                  {tz}
+                </option>
+              ))}
+            </select>
           </Field>
+
           <div style={row}>
             <button onClick={saveCommon} style={primaryBtn} disabled={saving}>
               Save Profile
@@ -395,14 +444,17 @@ export default function ProfileSettingsPage() {
         {role === "tutor" && (
           <Card>
             <CardTitle>Tutor Availability</CardTitle>
-            <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
+            <div style={{ fontSize: 12, color: "#bbb", marginTop: -6 }}>
               Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or
               more ranges per day (24-hour format).
             </div>
+
+            {/* Availability columns */}
             <div style={availGrid}>
               {DAYS.map(({ key, label }) => (
                 <div key={key} style={availCol}>
-                  <div style={{ fontSize: 12, color: "#fff", marginBottom: 6 }}>{label}</div>
+                  <div style={{ fontSize: 12, color: "#fff", marginBottom: 8 }}>{label}</div>
+
                   {(availability[key] ?? []).map((r, i) => (
                     <div key={i} style={rangeRow}>
                       <input
@@ -411,7 +463,7 @@ export default function ProfileSettingsPage() {
                         onChange={(e) => updateRange(key, i, "start", e.target.value)}
                         style={timeInput}
                       />
-                      <span style={{ color: "#888" }}>–</span>
+                      <span style={{ color: "#888", textAlign: "center" }}>–</span>
                       <input
                         type="time"
                         value={r.end}
@@ -423,12 +475,14 @@ export default function ProfileSettingsPage() {
                       </button>
                     </div>
                   ))}
+
                   <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
                     + Add time
                   </button>
                 </div>
               ))}
             </div>
+
             <div style={row}>
               <button onClick={saveTutor} style={primaryBtn} disabled={saving}>
                 Save Availability
@@ -548,13 +602,7 @@ function CardTitle({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label style={{ display: "grid", gap: 6 }}>
       <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>{label}</div>
@@ -574,7 +622,16 @@ const input: React.CSSProperties = {
   outline: "none",
 };
 
-const select: React.CSSProperties = { ...input, appearance: "none" };
+const select: React.CSSProperties = {
+  ...input,
+  appearance: "none",
+};
+
+const twoCol: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))",
+  gap: 10,
+};
 
 const row: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
 
@@ -604,10 +661,12 @@ const ghostButton: React.CSSProperties = {
 
 const muted: React.CSSProperties = { color: "#a5b0a9", fontSize: 12 };
 
+/* Availability layout (fixed to avoid overlap) */
 const availGrid: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-  gap: 10,
+  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+  gap: 12,
+  marginTop: 8,
 };
 
 const availCol: React.CSSProperties = {
@@ -615,29 +674,35 @@ const availCol: React.CSSProperties = {
   border: "1px solid rgba(255,255,255,0.08)",
   borderRadius: 8,
   padding: 10,
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
 };
 
+/* Row uses CSS grid so controls never overlap; it wraps gracefully on narrow widths */
 const rangeRow: React.CSSProperties = {
-  display: "flex",
+  display: "grid",
+  gridTemplateColumns: "minmax(90px,1fr) 18px minmax(90px,1fr) auto",
   alignItems: "center",
-  gap: 6,
-  marginBottom: 6,
+  columnGap: 8,
 };
 
 const timeInput: React.CSSProperties = {
   ...input,
-  width: "100%",
   padding: "8px 10px",
+  width: "100%",
 };
 
 const smallAddBtn: React.CSSProperties = {
   ...ghostButton,
   padding: "6px 8px",
   fontSize: 12,
+  width: "fit-content",
 };
 
 const smallGhostBtn: React.CSSProperties = {
   ...ghostButton,
   padding: "6px 8px",
   fontSize: 12,
+  width: "fit-content",
 };
