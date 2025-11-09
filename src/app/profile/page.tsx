@@ -18,6 +18,21 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 
+// ---------- Stripe (optional, for student card payments) ----------
+import dynamic from "next/dynamic";
+const StripeElements = dynamic(
+  async () => {
+    const stripe = await import("@stripe/react-stripe-js");
+    return stripe.Elements;
+  },
+  { ssr: false, loading: () => null }
+);
+const CardElement = dynamic(
+  async () => (await import("@stripe/react-stripe-js")).CardElement,
+  { ssr: false, loading: () => null }
+);
+import { loadStripe } from "@stripe/stripe-js";
+
 type Role = "student" | "tutor" | "admin";
 type DayKey = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
 
@@ -32,11 +47,24 @@ type UserDoc = {
   lastName?: string;
   timezone?: string;
   availability?: Availability; // tutors
-  gradeLevel?: string;         // students
-  intro?: string;              // tutors
-  birthday?: string;           // yyyy-mm-dd
-  country?: string;            // tutors
+  gradeLevel?: string; // students
+  intro?: string; // tutors
+  birthday?: string; // yyyy-mm-dd
+  country?: string;
+  paypalEmail?: string; // tutors
+  // student balance (in minutes)
+  balanceMinutes?: number;
 };
+
+type PaymentOption = { id: string; hours: number; priceUSD: number };
+
+const STUDENT_PACKS: PaymentOption[] = [
+  { id: "h1",  hours: 1,  priceUSD: 55 },
+  { id: "h5",  hours: 5,  priceUSD: 159 },
+  { id: "h10", hours: 10, priceUSD: 500 },
+  { id: "h20", hours: 20, priceUSD: 900 },
+  { id: "h40", hours: 40, priceUSD: 1600 },
+];
 
 const DAYS: { key: DayKey; label: string }[] = [
   { key: "mon", label: "Mon" },
@@ -61,13 +89,12 @@ function getTimezones(): string[] {
   try {
     // @ts-ignore
     const list: string[] = Intl.supportedValuesOf?.("timeZone") || TZ_FALLBACK;
-    return list.slice().sort((a,b) => a.localeCompare(b));
+    return list.slice().sort((a,b)=>a.localeCompare(b));
   } catch {
     return TZ_FALLBACK;
   }
 }
 
-// Country dropdown list
 const ALL_COUNTRIES = [
   "Afghanistan","Albania","Algeria","Andorra","Angola","Antigua and Barbuda","Argentina","Armenia","Australia","Austria",
   "Azerbaijan","Bahamas","Bahrain","Bangladesh","Barbados","Belarus","Belgium","Belize","Benin","Bhutan","Bolivia",
@@ -107,12 +134,9 @@ export default function ProfileSettingsPage() {
   const [timezone, setTimezone] = useState<string>("");
   const [tzOptions] = useState<string[]>(getTimezones());
 
-  // live clock (update every 30s)
+  // live clock
   const [, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 30000);
-    return () => clearInterval(id);
-  }, []);
+  useEffect(() => { const id = setInterval(() => setTick((t)=>t+1), 30000); return () => clearInterval(id); }, []);
   const currentTimeInTZ = useMemo(() => {
     try {
       return new Date().toLocaleTimeString(undefined, {
@@ -120,22 +144,34 @@ export default function ProfileSettingsPage() {
         hour: "2-digit",
         minute: "2-digit",
       });
-    } catch {
-      return "";
-    }
+    } catch { return ""; }
   }, [timezone]);
 
-  // student
-  const [gradeLevel, setGradeLevel] = useState<string>("");
-
-  // tutor-only extras
+  // tutor extras
   const [firstName, setFirstName] = useState<string>("");
   const [lastName, setLastName]   = useState<string>("");
   const [birthday, setBirthday]   = useState<string>("");
   const [country, setCountry]     = useState<string>("");
   const [intro, setIntro]         = useState<string>("");
+  const [paypalEmail, setPaypalEmail] = useState<string>("");
 
   const [availability, setAvailability] = useState<Availability>(emptyAvailability());
+
+  // student fields
+  const [gradeLevel, setGradeLevel] = useState<string>("");
+  const [studentFirst, setStudentFirst] = useState("");
+  const [studentLast, setStudentLast]   = useState("");
+  const [studentBirthday, setStudentBirthday] = useState("");
+  const [studentCountry, setStudentCountry]   = useState("");
+  const [balanceMinutes, setBalanceMinutes]   = useState<number>(0);
+
+  // payments state (student)
+  const [selectedPack, setSelectedPack] = useState<string>("h1");
+  const [payMethod, setPayMethod] = useState<"paypal"|"card">("paypal");
+  const stripePromise = useMemo(
+    () => (process.env.NEXT_PUBLIC_STRIPE_PK ? loadStripe(process.env.NEXT_PUBLIC_STRIPE_PK) : null),
+    []
+  );
 
   // password
   const [currentPassword, setCurrentPassword] = useState("");
@@ -149,10 +185,7 @@ export default function ProfileSettingsPage() {
   // Load auth + user doc
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        router.replace("/auth");
-        return;
-      }
+      if (!user) { router.replace("/auth"); return; }
       setUid(user.uid);
       setEmail(user.email ?? "");
 
@@ -162,15 +195,19 @@ export default function ProfileSettingsPage() {
       const r: Role = (data?.role as Role) || "student";
       setRole(r);
 
-      const initialDisplay =
-        data?.displayName || (user.email?.split("@")[0] ?? "");
+      const initialDisplay = data?.displayName || (user.email?.split("@")[0] ?? "");
       setDisplayName(initialDisplay);
-
       setTimezone(data?.timezone || guessTimezone());
 
       if (r === "student") {
         setGradeLevel(data?.gradeLevel || "");
+        setStudentFirst(data?.firstName || "");
+        setStudentLast(data?.lastName || "");
+        setStudentBirthday(data?.birthday || "");
+        setStudentCountry(data?.country || "");
+        setBalanceMinutes(typeof data?.balanceMinutes === "number" ? data!.balanceMinutes! : 0);
       }
+
       if (r === "tutor") {
         setAvailability({ ...emptyAvailability(), ...(data?.availability || {}) });
         setFirstName(data?.firstName || "");
@@ -178,6 +215,7 @@ export default function ProfileSettingsPage() {
         setBirthday(data?.birthday || "");
         setCountry(data?.country || "");
         setIntro(data?.intro || "");
+        setPaypalEmail(data?.paypalEmail || "");
       }
 
       setLoading(false);
@@ -186,13 +224,11 @@ export default function ProfileSettingsPage() {
   }, [router]);
 
   function guessTimezone() {
-    try {
-      return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-    } catch {
-      return "UTC";
-    }
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; }
+    catch { return "UTC"; }
   }
 
+  // ----- Save common (both roles) -----
   async function saveCommon() {
     if (!uid) return;
     setSaving(true);
@@ -206,8 +242,16 @@ export default function ProfileSettingsPage() {
             firstName: firstName.trim() || undefined,
             lastName: lastName.trim() || undefined,
             birthday: birthday || "",
-            country: country.trim() || "",
+            country: country || "",
             intro: intro.trim() || "",
+            paypalEmail: paypalEmail.trim() || "",
+          }
+        : role === "student"
+        ? {
+            firstName: studentFirst.trim() || undefined,
+            lastName: studentLast.trim() || undefined,
+            birthday: studentBirthday || "",
+            country: studentCountry || "",
           }
         : {}),
       // @ts-ignore
@@ -226,7 +270,8 @@ export default function ProfileSettingsPage() {
     }
   }
 
-  async function saveStudent() {
+  // ----- Student-only save (grade) -----
+  async function saveStudentOnly() {
     if (!uid) return;
     setSaving(true);
     setSaveMsg("");
@@ -250,46 +295,17 @@ export default function ProfileSettingsPage() {
     }
   }
 
-  function addTimeRange(day: DayKey) {
-    setAvailability((prev) => ({
-      ...prev,
-      [day]: [...prev[day], { start: "16:00", end: "17:00" }],
-    }));
-  }
+  // ----- Tutor-only save (availability) -----
+  function isRangeValid(r: TimeRange) { return r.start < r.end; }
 
-  function updateRange(day: DayKey, idx: number, field: "start" | "end", value: string) {
-    setAvailability((prev) => {
-      const copy = { ...prev };
-      copy[day] = copy[day].map((r, i) => (i === idx ? { ...r, [field]: value } : r));
-      return copy;
-    });
-  }
-
-  function removeRange(day: DayKey, idx: number) {
-    setAvailability((prev) => {
-      const copy = { ...prev };
-      copy[day] = copy[day].filter((_, i) => i !== idx);
-      return copy;
-    });
-  }
-
-  function isRangeValid(r: TimeRange) {
-    return r.start < r.end;
-  }
-
-  async function saveTutor() {
+  async function saveTutorAvailability() {
     if (!uid) return;
     for (const d of DAYS) {
       for (const r of availability[d.key]) {
-        if (!isRangeValid(r)) {
-          setSaveMsg(`Invalid time range on ${d.label}`);
-          return;
-        }
+        if (!isRangeValid(r)) { setSaveMsg(`Invalid time range on ${d.label}`); return; }
       }
     }
-
-    setSaving(true);
-    setSaveMsg("");
+    setSaving(true); setSaveMsg("");
     try {
       await updateDoc(doc(db, "users", uid), {
         availability,
@@ -298,45 +314,106 @@ export default function ProfileSettingsPage() {
       });
       setSaveMsg("Saved ✓");
     } catch {
-      await setDoc(
-        doc(db, "users", uid),
-        { availability, profileUpdatedAt: serverTimestamp() as any },
-        { merge: true }
-      );
+      await setDoc(doc(db, "users", uid), { availability, profileUpdatedAt: serverTimestamp() as any }, { merge: true });
       setSaveMsg("Saved ✓");
-    } finally {
-      setSaving(false);
-      setTimeout(() => setSaveMsg(""), 1500);
-    }
+    } finally { setSaving(false); setTimeout(() => setSaveMsg(""), 1500); }
   }
 
+  function addTimeRange(day: DayKey) {
+    setAvailability((prev) => ({ ...prev, [day]: [...prev[day], { start: "16:00", end: "17:00" }] }));
+  }
+  function updateRange(day: DayKey, idx: number, field: "start" | "end", value: string) {
+    setAvailability((prev) => {
+      const copy = { ...prev };
+      copy[day] = copy[day].map((r, i) => (i === idx ? { ...r, [field]: value } : r));
+      return copy;
+    });
+  }
+  function removeRange(day: DayKey, idx: number) {
+    setAvailability((prev) => {
+      const copy = { ...prev };
+      copy[day] = copy[day].filter((_, i) => i !== idx);
+      return copy;
+    });
+  }
+
+  // ----- Change password (now requires current first) -----
   async function handleChangePassword() {
     setPwMessage("");
     const user = auth.currentUser;
     if (!user) return;
 
-    if (!currentPassword) {
-      setPwMessage("Please enter your current password.");
-      return;
-    }
-    if (!newPassword || newPassword.length < 6) {
-      setPwMessage("Please enter a new password (at least 6 characters).");
-      return;
-    }
+    if (!currentPassword) { setPwMessage("Please enter your current password."); return; }
+    if (!newPassword || newPassword.length < 6) { setPwMessage("Please enter a new password (at least 6 characters)."); return; }
 
     try {
-      // Always re-auth first (clearer UX since current pw is required)
       const cred = EmailAuthProvider.credential(email, currentPassword);
       await reauthenticateWithCredential(user, cred);
       await updatePassword(user, newPassword);
       setPwMessage("Password updated ✓");
-      setNewPassword("");
-      setCurrentPassword("");
+      setNewPassword(""); setCurrentPassword("");
     } catch (err: any) {
       setPwMessage(err?.message || "Could not update password.");
     }
   }
 
+  // ----- Payments (student) -----
+  function packById(id: string) { return STUDENT_PACKS.find(p => p.id === id)!; }
+  const selected = packById(selectedPack);
+  const perHour = useMemo(() => (selected ? (selected.priceUSD / selected.hours) : 0), [selected]);
+
+  async function handlePayPalCheckout() {
+    if (!uid) return;
+    try {
+      const res = await fetch("/api/payments/paypal/create-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: uid,
+          packId: selected.id,
+          hours: selected.hours,
+          amountUSD: selected.priceUSD,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "PayPal create order failed");
+      // Redirect to PayPal approval URL (your API should return it)
+      if (data?.approvalUrl) window.location.href = data.approvalUrl;
+    } catch (e) {
+      alert((e as any)?.message || "Could not start PayPal checkout.");
+    }
+  }
+
+  async function handleStripePay() {
+    if (!uid) return;
+    if (!process.env.NEXT_PUBLIC_STRIPE_PK) {
+      alert("Stripe publishable key not set (NEXT_PUBLIC_STRIPE_PK).");
+      return;
+    }
+    try {
+      const res = await fetch("/api/payments/stripe/create-payment-intent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: uid,
+          packId: selected.id,
+          hours: selected.hours,
+          amountUSD: selected.priceUSD,
+          currency: "usd",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to create payment intent");
+
+      // We leave confirmation to the Stripe form submit (see button handler below).
+      // This function only ensures the PI exists.
+      return data.clientSecret as string;
+    } catch (e) {
+      alert((e as any)?.message || "Could not start card payment.");
+    }
+  }
+
+  // Header buttons
   const headerRight = useMemo(
     () => (
       <div style={{ display: "flex", gap: 8 }}>
@@ -347,11 +424,8 @@ export default function ProfileSettingsPage() {
           style={ghostButton}
           onClick={() =>
             router.push(
-              role === "tutor"
-                ? "/dashboard/tutor"
-                : role === "admin"
-                ? "/admin"
-                : "/dashboard/student"
+              role === "tutor" ? "/dashboard/tutor" :
+              role === "admin" ? "/admin" : "/dashboard/student"
             )
           }
           title="Dashboard"
@@ -374,24 +448,24 @@ export default function ProfileSettingsPage() {
     );
   }
 
+  const balanceH = Math.floor((balanceMinutes || 0) / 60);
+  const balanceM = (balanceMinutes || 0) % 60;
+
   return (
     <main style={pageShell}>
-      {/* make date icon white for dark UI */}
+      {/* make date icon visible on dark */}
       <style jsx global>{`
-        input[type="date"]::-webkit-calendar-picker-indicator {
-          filter: invert(1);
-        }
+        input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); }
       `}</style>
 
-      {/* Header */}
       <header style={headerBar}>
         <Brand />
         {headerRight}
       </header>
 
-      {/* Body */}
+      {/* ------- GRID: Three columns where needed ------- */}
       <section style={bodyGrid}>
-        {/* LEFT: Profile (with tutor extras in requested order) */}
+        {/* LEFT COLUMN */}
         <Card>
           <CardTitle>Profile</CardTitle>
 
@@ -399,64 +473,72 @@ export default function ProfileSettingsPage() {
             <input disabled value={email} style={input} />
           </Field>
 
-          {role === "tutor" && (
+          {/* Names (tutor or student) */}
+          {(role === "tutor") && (
             <div style={twoCol}>
               <Field label="First name">
-                <input
-                  value={firstName}
-                  onChange={(e) => setFirstName(e.target.value)}
-                  style={input}
-                  placeholder="Jane"
-                />
+                <input value={firstName} onChange={(e)=>setFirstName(e.target.value)} style={input} placeholder="Jane"/>
               </Field>
               <Field label="Last name">
-                <input
-                  value={lastName}
-                  onChange={(e) => setLastName(e.target.value)}
-                  style={input}
-                  placeholder="Doe"
-                />
+                <input value={lastName} onChange={(e)=>setLastName(e.target.value)} style={input} placeholder="Doe"/>
+              </Field>
+            </div>
+          )}
+
+          {(role === "student") && (
+            <div style={twoCol}>
+              <Field label="First name">
+                <input value={studentFirst} onChange={(e)=>setStudentFirst(e.target.value)} style={input} placeholder="Jane"/>
+              </Field>
+              <Field label="Last name">
+                <input value={studentLast} onChange={(e)=>setStudentLast(e.target.value)} style={input} placeholder="Doe"/>
               </Field>
             </div>
           )}
 
           <Field label="Display name">
-            <input
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              style={input}
-              placeholder="Your name"
-            />
+            <input value={displayName} onChange={(e)=>setDisplayName(e.target.value)} style={input} placeholder="Your name"/>
           </Field>
 
-          {role === "tutor" && (
+          {/* Student: Grade level ABOVE birthday */}
+          {role === "student" && (
+            <Field label="Grade level">
+              <select value={gradeLevel} onChange={(e)=>setGradeLevel(e.target.value)} style={select}>
+                <option value="">Select…</option>
+                {["Grade 4","Grade 5","Grade 6","Grade 7","Grade 8","Grade 9","Grade 10","Grade 11","Grade 12","IB / AP"]
+                  .map(g => <option key={g} value={g}>{g}</option>)}
+              </select>
+            </Field>
+          )}
+
+          {/* Birthday / Country */}
+          {(role === "tutor") ? (
             <>
               <Field label="Birthday">
-                <input
-                  type="date"
-                  value={birthday}
-                  onChange={(e) => setBirthday(e.target.value)}
-                  style={input}
-                />
+                <input type="date" value={birthday} onChange={(e)=>setBirthday(e.target.value)} style={input}/>
               </Field>
-
               <Field label="Country of residence">
-                <select
-                  value={country}
-                  onChange={(e) => setCountry(e.target.value)}
-                  style={select}
-                >
+                <select value={country} onChange={(e)=>setCountry(e.target.value)} style={select}>
                   <option value="">Select a country…</option>
-                  {ALL_COUNTRIES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
+                  {ALL_COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </Field>
             </>
-          )}
+          ) : role === "student" ? (
+            <>
+              <Field label="Birthday">
+                <input type="date" value={studentBirthday} onChange={(e)=>setStudentBirthday(e.target.value)} style={input}/>
+              </Field>
+              <Field label="Country of residence">
+                <select value={studentCountry} onChange={(e)=>setStudentCountry(e.target.value)} style={select}>
+                  <option value="">Select a country…</option>
+                  {ALL_COUNTRIES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </Field>
+            </>
+          ) : null}
 
+          {/* Timezone with current time */}
           <label style={{ display: "grid", gap: 6 }}>
             <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>
               Timezone{" "}
@@ -464,151 +546,240 @@ export default function ProfileSettingsPage() {
                 (Current time: <strong style={{ color: "#fff" }}>{currentTimeInTZ}</strong>)
               </span>
             </div>
-            <select
-              value={timezone}
-              onChange={(e) => setTimezone(e.target.value)}
-              style={select}
-            >
+            <select value={timezone} onChange={(e)=>setTimezone(e.target.value)} style={select}>
               {(!timezone || !tzOptions.includes(timezone)) && (
                 <option value="">{timezone || "Select a timezone…"}</option>
               )}
-              {tzOptions.map((tz) => (
-                <option key={tz} value={tz}>
-                  {tz}
-                </option>
-              ))}
+              {tzOptions.map(tz => <option key={tz} value={tz}>{tz}</option>)}
             </select>
           </label>
 
+          {/* Tutor-only: PayPal email + Intro */}
           {role === "tutor" && (
-            <Field label="Tutor introduction">
-              <textarea
-                value={intro}
-                onChange={(e) => setIntro(e.target.value)}
-                style={textarea}
-                placeholder="Write a short introduction students will see (teaching style, subjects, achievements, etc.)"
-                rows={5}
-              />
-            </Field>
+            <>
+              <Field label="PayPal email (for payouts)">
+                <input
+                  type="email"
+                  value={paypalEmail}
+                  onChange={(e)=>setPaypalEmail(e.target.value)}
+                  style={input}
+                  placeholder="your-paypal-email@example.com"
+                />
+              </Field>
+              <Field label="Tutor introduction">
+                <textarea
+                  value={intro}
+                  onChange={(e)=>setIntro(e.target.value)}
+                  style={textarea}
+                  placeholder="Write a short introduction students will see (teaching style, subjects, achievements, etc.)"
+                  rows={5}
+                />
+              </Field>
+            </>
           )}
 
           <div style={row}>
-            <button onClick={saveCommon} style={primaryBtn} disabled={saving}>
-              Save Profile
-            </button>
+            <button onClick={saveCommon} style={primaryBtn} disabled={saving}>Save Profile</button>
+            {role === "student" && (
+              <button onClick={saveStudentOnly} style={ghostButton} disabled={saving}>Save Student Info</button>
+            )}
             {saveMsg && <div style={muted}>{saveMsg}</div>}
           </div>
         </Card>
 
-        {/* MIDDLE/RIGHT: Student or Tutor specifics */}
-        {role === "student" && (
-          <Card>
-            <CardTitle>Student Details</CardTitle>
-            <Field label="Grade level">
-              <select
-                value={gradeLevel}
-                onChange={(e) => setGradeLevel(e.target.value)}
-                style={select}
-              >
-                <option value="">Select…</option>
-                {[
-                  "Grade 4","Grade 5","Grade 6","Grade 7","Grade 8","Grade 9",
-                  "Grade 10","Grade 11","Grade 12","IB / AP"
-                ].map((g) => (
-                  <option key={g} value={g}>{g}</option>
-                ))}
-              </select>
-            </Field>
-            <div style={row}>
-              <button onClick={saveStudent} style={primaryBtn} disabled={saving}>
-                Save Student Info
-              </button>
-              {saveMsg && <div style={muted}>{saveMsg}</div>}
-            </div>
-          </Card>
-        )}
-
-        {role === "tutor" && (
+        {/* MIDDLE COLUMN */}
+        {role === "tutor" ? (
           <Card>
             <CardTitle>Tutor Availability</CardTitle>
             <div style={{ fontSize: 12, color: "#bbb", marginTop: -6 }}>
               Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or
               more ranges per day (24-hour format).
             </div>
-
             <div style={availGrid}>
               {DAYS.map(({ key, label }) => (
                 <div key={key} style={availCol}>
                   <div style={{ fontSize: 12, color: "#fff", marginBottom: 8 }}>{label}</div>
-
                   {(availability[key] ?? []).map((r, i) => (
                     <div key={i} style={rangeRow}>
-                      <input
-                        type="time"
-                        value={r.start}
-                        onChange={(e) => updateRange(key, i, "start", e.target.value)}
-                        style={timeInput}
-                      />
+                      <input type="time" value={r.start} onChange={(e)=>updateRange(key,i,"start",e.target.value)} style={timeInput}/>
                       <span style={{ color: "#888", textAlign: "center" }}>–</span>
-                      <input
-                        type="time"
-                        value={r.end}
-                        onChange={(e) => updateRange(key, i, "end", e.target.value)}
-                        style={timeInput}
-                      />
-                      <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>
-                        Remove
-                      </button>
+                      <input type="time" value={r.end} onChange={(e)=>updateRange(key,i,"end",e.target.value)} style={timeInput}/>
+                      <button onClick={()=>removeRange(key,i)} style={smallGhostBtn}>Remove</button>
                     </div>
                   ))}
-
-                  <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
-                    + Add time
-                  </button>
+                  <button onClick={()=>addTimeRange(key)} style={smallAddBtn}>+ Add time</button>
                 </div>
               ))}
             </div>
-
             <div style={row}>
-              <button onClick={saveTutor} style={primaryBtn} disabled={saving}>
+              <button onClick={saveTutorAvailability} style={primaryBtn} disabled={saving}>
                 Save Tutor Details & Availability
               </button>
               {saveMsg && <div style={muted}>{saveMsg}</div>}
             </div>
           </Card>
+        ) : (
+          // Student: Change Password moved here
+          <Card>
+            <CardTitle>Change Password</CardTitle>
+            <Field label="Current password">
+              <input
+                type="password"
+                value={currentPassword}
+                onChange={(e)=>setCurrentPassword(e.target.value)}
+                style={input}
+                placeholder="Enter your current password"
+              />
+            </Field>
+            <Field label="New password">
+              <input
+                type="password"
+                value={newPassword}
+                onChange={(e)=>setNewPassword(e.target.value)}
+                style={input}
+                placeholder="At least 6 characters"
+              />
+            </Field>
+            <div style={row}>
+              <button onClick={handleChangePassword} style={primaryBtn}>Update Password</button>
+              {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
+            </div>
+          </Card>
         )}
 
-        {/* RIGHTMOST: Password */}
-        <Card>
-          <CardTitle>Change Password</CardTitle>
+        {/* RIGHT COLUMN */}
+        {role === "tutor" ? (
+          <Card>
+            <CardTitle>Change Password</CardTitle>
+            <Field label="Current password">
+              <input
+                type="password"
+                value={currentPassword}
+                onChange={(e)=>setCurrentPassword(e.target.value)}
+                style={input}
+                placeholder="Enter your current password"
+              />
+            </Field>
+            <Field label="New password">
+              <input
+                type="password"
+                value={newPassword}
+                onChange={(e)=>setNewPassword(e.target.value)}
+                style={input}
+                placeholder="At least 6 characters"
+              />
+            </Field>
+            <div style={row}>
+              <button onClick={handleChangePassword} style={primaryBtn}>Update Password</button>
+              {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
+            </div>
+          </Card>
+        ) : (
+          <Card>
+            <CardTitle>Hours & Payments</CardTitle>
 
-          <Field label="Current password">
-            <input
-              type="password"
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              style={input}
-              placeholder="Enter your current password"
-            />
-          </Field>
+            <div style={{ fontSize: 13, color: "#cfead9" }}>
+              Current balance: <strong style={{ color: "#fff" }}>{balanceH}h {balanceM}m</strong>
+            </div>
 
-          <Field label="New password">
-            <input
-              type="password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              style={input}
-              placeholder="At least 6 characters"
-            />
-          </Field>
+            <div style={packsGrid}>
+              {STUDENT_PACKS.map(p => {
+                const active = selectedPack === p.id;
+                const per = p.priceUSD / p.hours;
+                return (
+                  <button
+                    key={p.id}
+                    onClick={()=>setSelectedPack(p.id)}
+                    style={{
+                      ...packCard,
+                      border: active ? "2px solid #6ecf9a" : "1px solid rgba(255,255,255,0.15)",
+                      boxShadow: active ? "0 0 0 3px rgba(110,207,154,0.2)" : packCard.boxShadow,
+                    }}
+                  >
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>{p.hours} hour{p.hours>1?"s":""}</div>
+                    <div style={{ fontSize: 13, color: "#cfead9" }}>${p.priceUSD.toLocaleString()} USD</div>
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)" }}>
+                      ${per.toFixed(2)}/hr
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
 
-          <div style={row}>
-            <button onClick={handleChangePassword} style={primaryBtn}>
-              Update Password
-            </button>
-            {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
-          </div>
-        </Card>
+            <div style={{ marginTop: 8, fontSize: 12, color: "#a5b0a9" }}>
+              Selected: <strong style={{ color: "#fff" }}>{selected.hours}h</strong> for{" "}
+              <strong style={{ color: "#fff" }}>${selected.priceUSD.toLocaleString()} USD</strong>
+              {" "}({`$${perHour.toFixed(2)}/hr`})
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 13, color: "#fff", marginBottom: 6 }}>Payment method</div>
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                <label style={radioWrap}>
+                  <input
+                    type="radio"
+                    name="paymethod"
+                    checked={payMethod === "paypal"}
+                    onChange={()=>setPayMethod("paypal")}
+                  />
+                  <span>PayPal</span>
+                </label>
+                <label style={radioWrap}>
+                  <input
+                    type="radio"
+                    name="paymethod"
+                    checked={payMethod === "card"}
+                    onChange={()=>setPayMethod("card")}
+                  />
+                  <span>Credit / Debit card</span>
+                </label>
+              </div>
+            </div>
+
+            {/* Card form appears only when 'card' chosen */}
+            {payMethod === "card" && (
+              <div style={{ marginTop: 8 }}>
+                {process.env.NEXT_PUBLIC_STRIPE_PK ? (
+                  <StripeElements stripe={stripePromise!}>
+                    <div style={{ padding: "10px 12px", border: "1px solid #444", borderRadius: 8, background: "#111" }}>
+                      <CardElement options={{ hidePostalCode: false }} />
+                    </div>
+                  </StripeElements>
+                ) : (
+                  <div style={{ ...muted, fontSize: 12 }}>
+                    To accept cards, set <code>NEXT_PUBLIC_STRIPE_PK</code> and implement the
+                    <code> /api/payments/stripe/create-payment-intent</code> endpoint.
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              {payMethod === "paypal" ? (
+                <button onClick={handlePayPalCheckout} style={primaryBtn}>
+                  Pay with PayPal
+                </button>
+              ) : (
+                <button
+                  onClick={async () => {
+                    const clientSecret = await handleStripePay();
+                    if (!clientSecret) return;
+                    // In a full integration, confirm card payment here using Stripe.js
+                    // (We keep this minimal to avoid adding more code; your checkout page can handle confirmation.)
+                    alert("Payment Intent created. Finish confirmation in your Stripe handler.");
+                  }}
+                  style={primaryBtn}
+                >
+                  Pay ${selected.priceUSD.toLocaleString()} USD
+                </button>
+              )}
+            </div>
+
+            <div style={{ ...muted, marginTop: 8 }}>
+              After a successful payment, the purchased minutes will be added to your balance automatically.
+            </div>
+          </Card>
+        )}
       </section>
     </main>
   );
@@ -756,14 +927,13 @@ const ghostButton: React.CSSProperties = {
 
 const muted: React.CSSProperties = { color: "#a5b0a9", fontSize: 12 };
 
-/* Availability layout (no overlap) */
+/* Availability */
 const availGrid: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
   gap: 12,
   marginTop: 8,
 };
-
 const availCol: React.CSSProperties = {
   background: "rgba(0,0,0,0.25)",
   border: "1px solid rgba(255,255,255,0.08)",
@@ -773,15 +943,40 @@ const availCol: React.CSSProperties = {
   flexDirection: "column",
   gap: 8,
 };
-
 const rangeRow: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "minmax(90px,1fr) 18px minmax(90px,1fr) auto",
   alignItems: "center",
   columnGap: 8,
 };
-
 const timeInput: React.CSSProperties = { ...input, padding: "8px 10px", width: "100%" };
-
 const smallAddBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12, width: "fit-content" };
 const smallGhostBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12, width: "fit-content" };
+
+/* Packs */
+const packsGrid: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+  gap: 10,
+  marginTop: 8,
+};
+const packCard: React.CSSProperties = {
+  padding: 12,
+  borderRadius: 10,
+  background: "rgba(0,0,0,0.25)",
+  border: "1px solid rgba(255,255,255,0.15)",
+  color: "#fff",
+  textAlign: "left" as const,
+  cursor: "pointer",
+  boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
+} as const;
+
+const radioWrap: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  background: "rgba(0,0,0,0.25)",
+  border: "1px solid rgba(255,255,255,0.15)",
+  padding: "6px 10px",
+  borderRadius: 8,
+};
