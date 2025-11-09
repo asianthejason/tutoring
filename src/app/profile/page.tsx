@@ -23,6 +23,9 @@ import {
   query as fsQuery,
   orderBy,
   limit as fsLimit,
+  startAfter,
+  DocumentData,
+  QueryDocumentSnapshot,
 } from "firebase/firestore";
 
 // Stripe (client)
@@ -44,21 +47,21 @@ type UserDoc = {
   role: Role;
   displayName?: string;
 
-  // NEW common fields
+  // Common
   firstName?: string;
   lastName?: string;
   birthday?: string; // yyyy-mm-dd
   country?: string;
   timezone?: string;
 
-  // Tutor fields
+  // Tutor
   availability?: Availability;
   tutorIntro?: string;
   paypalEmail?: string;
 
-  // Student fields
+  // Student
   gradeLevel?: string;
-  minutesBalance?: number; // total minutes available
+  minutesBalance?: number;
 
   // Audit
   profileUpdatedAt?: any;
@@ -91,7 +94,6 @@ const COUNTRIES = [
   "France","Germany","Spain","Italy","Netherlands","Sweden","Norway","Denmark","Finland","Poland","Portugal",
   "Brazil","Argentina","Chile","Colombia","Peru","South Africa","Nigeria","Kenya","Egypt","Turkey","UAE",
   "Saudi Arabia","Israel","Ireland","Switzerland","Austria","Belgium","Czechia","Greece","Hungary",
-  // …extend as needed
 ];
 
 const STRIPE_PK = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "";
@@ -109,7 +111,7 @@ const STUDENT_PACKAGES: {
   { id: "40h", label: "40 hours",hours: 40, price: 1600 },
 ];
 
-// ---------- Common helpers ----------
+// ---------- Helpers ----------
 function guessTimezone() {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -131,7 +133,7 @@ function formatNowInTZ(tz: string) {
 function fmtUsd(n: number) {
   return `$${n.toLocaleString(undefined, { maximumFractionDigits: 2 })} USD`;
 }
-function fmtDate(d?: Date) {
+function fmtDate(d?: Date | null) {
   if (!d) return "—";
   return d.toLocaleString(undefined, {
     year: "numeric",
@@ -171,7 +173,11 @@ export default function ProfileSettingsPage() {
     method: string;
     createdAt?: Date | null;
   };
+  const PAGE_SIZE = 10;
   const [purchases, setPurchases] = useState<Purchase[]>([]);
+  const [historyCursor, setHistoryCursor] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
 
   // tutor
   const [availability, setAvailability] = useState<Availability>(emptyAvailability());
@@ -201,7 +207,7 @@ export default function ProfileSettingsPage() {
     []
   );
 
-  // Load user
+  // Load user and initial history page
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user: User | null) => {
       if (!user) {
@@ -227,21 +233,7 @@ export default function ProfileSettingsPage() {
       if (r === "student") {
         setGradeLevel(data?.gradeLevel || "");
         setMinutesBalance(Number(data?.minutesBalance || 0));
-        // load recent purchases
-        const colRef = collection(db, "users", user.uid, "payments");
-        const q = fsQuery(colRef, orderBy("createdAt", "desc"), fsLimit(5));
-        const list = await getDocs(q);
-        const rows: Purchase[] = list.docs.map((d) => {
-          const v = d.data() as any;
-          return {
-            id: d.id,
-            hours: Number(v.hours || 0),
-            amountUsd: Number(v.amountUsd || 0),
-            method: String(v.method || ""),
-            createdAt: v?.createdAt?.toDate ? (v.createdAt.toDate() as Date) : null,
-          };
-        });
-        setPurchases(rows);
+        await loadHistoryPage(user.uid, true);
       }
       if (r === "tutor") {
         setAvailability({ ...emptyAvailability(), ...(data?.availability || {}) });
@@ -252,7 +244,48 @@ export default function ProfileSettingsPage() {
       setLoading(false);
     });
     return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
+
+  // ---- History pagination ----
+  async function loadHistoryPage(userId: string, reset = false) {
+    if (historyBusy) return;
+    setHistoryBusy(true);
+    try {
+      const colRef = collection(db, "users", userId, "payments");
+      const base = fsQuery(colRef, orderBy("createdAt", "desc"));
+      const q = reset
+        ? fsQuery(base, fsLimit(PAGE_SIZE))
+        : historyCursor
+        ? fsQuery(base, startAfter(historyCursor), fsLimit(PAGE_SIZE))
+        : fsQuery(base, fsLimit(PAGE_SIZE));
+
+      const list = await getDocs(q);
+      const docs = list.docs;
+      const rows: Purchase[] = docs.map((d) => {
+        const v = d.data() as any;
+        return {
+          id: d.id,
+          hours: Number(v.hours || 0),
+          amountUsd: Number(v.amountUsd || 0),
+          method: String(v.method || ""),
+          createdAt: v?.createdAt?.toDate ? (v.createdAt.toDate() as Date) : null,
+        };
+      });
+
+      if (reset) {
+        setPurchases(rows);
+      } else {
+        setPurchases((prev) => [...prev, ...rows]);
+      }
+
+      const last = docs.length > 0 ? docs[docs.length - 1] : null;
+      setHistoryCursor(last);
+      setHistoryHasMore(docs.length === PAGE_SIZE);
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
 
   // ---------- Save handlers ----------
   async function saveStudentProfile() {
@@ -355,11 +388,15 @@ export default function ProfileSettingsPage() {
       return copy;
     });
   }
-  function isRangeValid(r: TimeRange) {
-    return r.start < r.end;
-  }
 
   // ---------- Card Pay handler ----------
+  const [confirmParams, setConfirmParams] = useState<{
+    clientSecret: string;
+    hours: number;
+    amount: number;
+  } | null>(null);
+  const [confirmNow, setConfirmNow] = useState(0);
+
   async function handleCardPay() {
     if (!uid) return;
     if (!STRIPE_PK) {
@@ -384,7 +421,6 @@ export default function ProfileSettingsPage() {
       const stripe = await stripePromise!;
       if (!stripe) throw new Error("Stripe not initialized");
 
-      // Use embedded child component to confirm (below)
       setConfirmParams({
         clientSecret: json.clientSecret as string,
         hours: Number(json.hours),
@@ -396,14 +432,6 @@ export default function ProfileSettingsPage() {
       setPayBusy(false);
     }
   }
-
-  // state used by the Elements child to trigger confirm
-  const [confirmParams, setConfirmParams] = useState<{
-    clientSecret: string;
-    hours: number;
-    amount: number;
-  } | null>(null);
-  const [confirmNow, setConfirmNow] = useState(0);
 
   // After success, credit minutes & log payment, clear fields, update history
   async function onCardPaymentSucceeded(hoursPurchased: number, paymentId: string) {
@@ -435,11 +463,10 @@ export default function ProfileSettingsPage() {
           createdAt: new Date(),
         },
         ...prev,
-      ].slice(0, 5));
-
-      setCardholder("");                // clear name
-      setConfirmParams(null);           // reset any stale confirm params
+      ]);
       setPayMsg("Payment successful ✓ Minutes added to your balance.");
+      setConfirmParams(null);
+      setCardholder("");
     } catch (e: any) {
       setPayMsg("Payment succeeded, but failed to update balance. Please contact support.");
       console.error("post-success update error", e);
@@ -711,8 +738,20 @@ export default function ProfileSettingsPage() {
         {role === "student" ? (
           <Card>
             <CardTitle>Hours & Payments</CardTitle>
-            <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
-              Current balance: <strong>{balanceH}h {balanceM}m</strong>
+
+            {/* BIG balance pill */}
+            <div style={balanceWrap}>
+              <div style={{ fontSize: 12, opacity: 0.85 }}>Current balance</div>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span style={{ fontSize: 34, fontWeight: 800, letterSpacing: "-0.02em" }}>
+                  {balanceH}
+                  <span style={{ fontSize: 16, marginLeft: 4, opacity: 0.9 }}>h</span>
+                </span>
+                <span style={{ fontSize: 28, fontWeight: 700 }}>
+                  {balanceM}
+                  <span style={{ fontSize: 14, marginLeft: 4, opacity: 0.9 }}>m</span>
+                </span>
+              </div>
             </div>
 
             {/* package cards */}
@@ -832,13 +871,13 @@ export default function ProfileSettingsPage() {
               </div>
             )}
 
-            {/* Purchase history */}
+            {/* Purchase history (paginated) */}
             <div style={{ marginTop: 16 }}>
-              <CardSubTitle>Purchase history (last 5)</CardSubTitle>
+              <CardSubTitle>Purchase history</CardSubTitle>
               {purchases.length === 0 ? (
                 <div style={{ ...muted, marginTop: 6 }}>No purchases yet.</div>
               ) : (
-                <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 0", display: "grid", gap: 8 }}>
+                <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 12px", display: "grid", gap: 8 }}>
                   {purchases.map((p) => (
                     <li
                       key={p.id}
@@ -858,11 +897,22 @@ export default function ProfileSettingsPage() {
                       </div>
                       <div style={{ textAlign: "right" }}>
                         <div>{fmtUsd(p.amountUsd)}</div>
-                        <div style={{ ...muted, fontSize: 11 }}>{fmtDate(p.createdAt || undefined)}</div>
+                        <div style={{ ...muted, fontSize: 11 }}>{fmtDate(p.createdAt || null)}</div>
                       </div>
                     </li>
                   ))}
                 </ul>
+              )}
+
+              {historyHasMore && uid && (
+                <button
+                  style={{ ...ghostButton, width: "100%" }}
+                  disabled={historyBusy}
+                  onClick={() => loadHistoryPage(uid, false)}
+                  title="Load more purchases"
+                >
+                  {historyBusy ? "Loading…" : "Load more"}
+                </button>
               )}
             </div>
 
@@ -871,7 +921,6 @@ export default function ProfileSettingsPage() {
             </div>
           </Card>
         ) : (
-          // right column for tutors: leave empty spacer for nicer grid at large widths
           <div style={{ display: "none" }} />
         )}
       </section>
@@ -889,10 +938,7 @@ function StripeConfirmSection({
   confirmNow: number;
   params: { clientSecret: string; hours: number; amount: number } | null;
   cardholder: string;
-  onDone: (
-    ok: boolean,
-    payload: PaymentSuccess | PaymentError
-  ) => void;
+  onDone: (ok: boolean, payload: PaymentSuccess | PaymentError) => void;
 }) {
   const stripe = useStripe();
   const elements = useElements();
@@ -1122,3 +1168,15 @@ function chip(active: boolean): React.CSSProperties {
     userSelect: "none",
   };
 }
+
+const balanceWrap: React.CSSProperties = {
+  border: "1px solid rgba(255,255,255,0.16)",
+  background:
+    "linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))",
+  borderRadius: 12,
+  padding: "12px 14px",
+  marginBottom: 12,
+  display: "grid",
+  alignItems: "center",
+  gap: 4,
+};
