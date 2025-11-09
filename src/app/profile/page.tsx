@@ -28,11 +28,14 @@ type UserDoc = {
   email: string;
   role: Role;
   displayName?: string;
-  firstName?: string;   // NEW
-  lastName?: string;    // NEW
+  firstName?: string;
+  lastName?: string;
   timezone?: string;
   availability?: Availability; // tutors
   gradeLevel?: string;         // students
+  intro?: string;              // tutors
+  birthday?: string;           // tutors, ISO yyyy-mm-dd
+  country?: string;            // tutors
 };
 
 const DAYS: { key: DayKey; label: string }[] = [
@@ -49,22 +52,29 @@ function emptyAvailability(): Availability {
   return { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] };
 }
 
-// Build a timezone list once (browser-supported; with fallback set)
 const TZ_FALLBACK = [
   "America/Edmonton","America/Vancouver","America/Denver","America/Chicago",
-  "America/New_York","Europe/London","Europe/Paris","Asia/Hong_Kong",
-  "Asia/Shanghai","Asia/Tokyo","Australia/Sydney","UTC"
+  "America/New_York","UTC","Europe/London","Europe/Paris","Asia/Hong_Kong",
+  "Asia/Shanghai","Asia/Tokyo","Australia/Sydney"
 ];
 function getTimezones(): string[] {
   try {
-    // @ts-ignore - supportedValuesOf is Stage 4 in modern browsers
-    const tz: string[] = Intl.supportedValuesOf?.("timeZone") || TZ_FALLBACK;
-    // Keep a reasonable size but searchable; sort for UX
-    return tz.slice().sort((a,b) => a.localeCompare(b));
+    // @ts-ignore
+    const list: string[] = Intl.supportedValuesOf?.("timeZone") || TZ_FALLBACK;
+    return list.slice().sort((a,b) => a.localeCompare(b));
   } catch {
     return TZ_FALLBACK;
   }
 }
+
+// compact country list + datalist; free-type also allowed
+const COUNTRIES = [
+  "Canada","United States","Mexico","United Kingdom","France","Germany","Italy","Spain",
+  "Netherlands","Sweden","Norway","Denmark","Finland","Poland","Czechia","Ireland",
+  "Australia","New Zealand","Japan","South Korea","China","Hong Kong","Taiwan","Singapore",
+  "India","Pakistan","Bangladesh","Philippines","Vietnam","Thailand","Malaysia",
+  "United Arab Emirates","Saudi Arabia","Turkey","Israel","South Africa","Brazil","Argentina",
+];
 
 export default function ProfileSettingsPage() {
   const router = useRouter();
@@ -79,17 +89,38 @@ export default function ProfileSettingsPage() {
   const [timezone, setTimezone] = useState<string>("");
   const [tzOptions] = useState<string[]>(getTimezones());
 
+  // live clock tick (updates current time text)
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 30000); // 30s refresh
+    return () => clearInterval(id);
+  }, []);
+  const currentTimeInTZ = useMemo(() => {
+    try {
+      return new Date().toLocaleTimeString(undefined, {
+        timeZone: timezone || "UTC",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return "";
+    }
+  }, [timezone]);
+
   // student
   const [gradeLevel, setGradeLevel] = useState<string>("");
 
   // tutor-only extras
-  const [firstName, setFirstName] = useState<string>(""); // NEW
-  const [lastName, setLastName] = useState<string>("");   // NEW
+  const [firstName, setFirstName] = useState<string>("");
+  const [lastName, setLastName] = useState<string>("");
+  const [intro, setIntro] = useState<string>("");         // NEW
+  const [birthday, setBirthday] = useState<string>("");   // NEW (yyyy-mm-dd)
+  const [country, setCountry] = useState<string>("");     // NEW
   const [availability, setAvailability] = useState<Availability>(emptyAvailability());
 
   // password
   const [newPassword, setNewPassword] = useState("");
-  const [currentPassword, setCurrentPassword] = useState(""); // for reauth fallback
+  const [currentPassword, setCurrentPassword] = useState("");
   const [pwMessage, setPwMessage] = useState<string>("");
 
   const [loading, setLoading] = useState(true);
@@ -125,6 +156,9 @@ export default function ProfileSettingsPage() {
         setAvailability({ ...emptyAvailability(), ...(data?.availability || {}) });
         setFirstName(data?.firstName || "");
         setLastName(data?.lastName || "");
+        setIntro(data?.intro || "");
+        setBirthday(data?.birthday || "");
+        setCountry(data?.country || "");
       }
 
       setLoading(false);
@@ -223,7 +257,7 @@ export default function ProfileSettingsPage() {
 
   async function saveTutor() {
     if (!uid) return;
-    // basic validation
+    // validate ranges
     for (const d of DAYS) {
       for (const r of availability[d.key]) {
         if (!isRangeValid(r)) {
@@ -241,6 +275,9 @@ export default function ProfileSettingsPage() {
         timezone: timezone || guessTimezone(),
         firstName: firstName.trim() || undefined,
         lastName: lastName.trim() || undefined,
+        intro: intro.trim() || "",
+        birthday: birthday || "",
+        country: country.trim() || "",
         // @ts-ignore
         profileUpdatedAt: serverTimestamp(),
       });
@@ -253,6 +290,9 @@ export default function ProfileSettingsPage() {
           timezone: timezone || guessTimezone(),
           firstName: firstName.trim() || undefined,
           lastName: lastName.trim() || undefined,
+          intro: intro.trim() || "",
+          birthday: birthday || "",
+          country: country.trim() || "",
           profileUpdatedAt: serverTimestamp() as any,
         },
         { merge: true }
@@ -387,7 +427,13 @@ export default function ProfileSettingsPage() {
             />
           </Field>
 
-          <Field label="Timezone">
+          <label style={{ display: "grid", gap: 6 }}>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>
+              Timezone{" "}
+              <span style={{ color: "#a5b0a9" }}>
+                (Current time: <strong style={{ color: "#fff" }}>{currentTimeInTZ}</strong>)
+              </span>
+            </div>
             <select
               value={timezone}
               onChange={(e) => setTimezone(e.target.value)}
@@ -402,7 +448,7 @@ export default function ProfileSettingsPage() {
                 </option>
               ))}
             </select>
-          </Field>
+          </label>
 
           <div style={row}>
             <button onClick={saveCommon} style={primaryBtn} disabled={saving}>
@@ -442,54 +488,97 @@ export default function ProfileSettingsPage() {
 
         {/* Tutor section */}
         {role === "tutor" && (
-          <Card>
-            <CardTitle>Tutor Availability</CardTitle>
-            <div style={{ fontSize: 12, color: "#bbb", marginTop: -6 }}>
-              Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or
-              more ranges per day (24-hour format).
-            </div>
+          <>
+            <Card>
+              <CardTitle>Tutor Details</CardTitle>
 
-            {/* Availability columns */}
-            <div style={availGrid}>
-              {DAYS.map(({ key, label }) => (
-                <div key={key} style={availCol}>
-                  <div style={{ fontSize: 12, color: "#fff", marginBottom: 8 }}>{label}</div>
+              <Field label="Tutor introduction">
+                <textarea
+                  value={intro}
+                  onChange={(e) => setIntro(e.target.value)}
+                  style={textarea}
+                  placeholder="Write a short introduction students will see (teaching style, subjects, achievements, etc.)"
+                  rows={5}
+                />
+              </Field>
 
-                  {(availability[key] ?? []).map((r, i) => (
-                    <div key={i} style={rangeRow}>
-                      <input
-                        type="time"
-                        value={r.start}
-                        onChange={(e) => updateRange(key, i, "start", e.target.value)}
-                        style={timeInput}
-                      />
-                      <span style={{ color: "#888", textAlign: "center" }}>–</span>
-                      <input
-                        type="time"
-                        value={r.end}
-                        onChange={(e) => updateRange(key, i, "end", e.target.value)}
-                        style={timeInput}
-                      />
-                      <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>
-                        Remove
-                      </button>
-                    </div>
-                  ))}
+              <div style={twoCol}>
+                <Field label="Birthday">
+                  <input
+                    type="date"
+                    value={birthday}
+                    onChange={(e) => setBirthday(e.target.value)}
+                    style={input}
+                  />
+                </Field>
 
-                  <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
-                    + Add time
-                  </button>
-                </div>
-              ))}
-            </div>
+                <label style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>Country of residence</div>
+                  <input
+                    value={country}
+                    onChange={(e) => setCountry(e.target.value)}
+                    list="country-list"
+                    style={input}
+                    placeholder="e.g., Canada"
+                  />
+                  <datalist id="country-list">
+                    {COUNTRIES.map((c) => (
+                      <option key={c} value={c} />
+                    ))}
+                  </datalist>
+                </label>
+              </div>
+            </Card>
 
-            <div style={row}>
-              <button onClick={saveTutor} style={primaryBtn} disabled={saving}>
-                Save Availability
-              </button>
-              {saveMsg && <div style={muted}>{saveMsg}</div>}
-            </div>
-          </Card>
+            <Card>
+              <CardTitle>Tutor Availability</CardTitle>
+              <div style={{ fontSize: 12, color: "#bbb", marginTop: -6 }}>
+                Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or
+                more ranges per day (24-hour format).
+              </div>
+
+              {/* Availability columns */}
+              <div style={availGrid}>
+                {DAYS.map(({ key, label }) => (
+                  <div key={key} style={availCol}>
+                    <div style={{ fontSize: 12, color: "#fff", marginBottom: 8 }}>{label}</div>
+
+                    {(availability[key] ?? []).map((r, i) => (
+                      <div key={i} style={rangeRow}>
+                        <input
+                          type="time"
+                          value={r.start}
+                          onChange={(e) => updateRange(key, i, "start", e.target.value)}
+                          style={timeInput}
+                        />
+                        <span style={{ color: "#888", textAlign: "center" }}>–</span>
+                        <input
+                          type="time"
+                          value={r.end}
+                          onChange={(e) => updateRange(key, i, "end", e.target.value)}
+                          style={timeInput}
+                        />
+                        <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+
+                    <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
+                      + Add time
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div style={row}>
+                <button onClick={saveTutor} style={primaryBtn} disabled={saving}>
+                  Save Tutor Details & Availability
+                </button>
+                {saveMsg && <div style={muted}>{saveMsg}</div>}
+              </div>
+            </Card>
+          </>
         )}
 
         {/* Password */}
@@ -622,6 +711,12 @@ const input: React.CSSProperties = {
   outline: "none",
 };
 
+const textarea: React.CSSProperties = {
+  ...input,
+  resize: "vertical",
+  minHeight: 110,
+};
+
 const select: React.CSSProperties = {
   ...input,
   appearance: "none",
@@ -661,7 +756,7 @@ const ghostButton: React.CSSProperties = {
 
 const muted: React.CSSProperties = { color: "#a5b0a9", fontSize: 12 };
 
-/* Availability layout (fixed to avoid overlap) */
+/* Availability layout (no overlap) */
 const availGrid: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
@@ -679,7 +774,6 @@ const availCol: React.CSSProperties = {
   gap: 8,
 };
 
-/* Row uses CSS grid so controls never overlap; it wraps gracefully on narrow widths */
 const rangeRow: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "minmax(90px,1fr) 18px minmax(90px,1fr) auto",
@@ -687,22 +781,7 @@ const rangeRow: React.CSSProperties = {
   columnGap: 8,
 };
 
-const timeInput: React.CSSProperties = {
-  ...input,
-  padding: "8px 10px",
-  width: "100%",
-};
+const timeInput: React.CSSProperties = { ...input, padding: "8px 10px", width: "100%" };
 
-const smallAddBtn: React.CSSProperties = {
-  ...ghostButton,
-  padding: "6px 8px",
-  fontSize: 12,
-  width: "fit-content",
-};
-
-const smallGhostBtn: React.CSSProperties = {
-  ...ghostButton,
-  padding: "6px 8px",
-  fontSize: 12,
-  width: "fit-content",
-};
+const smallAddBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12, width: "fit-content" };
+const smallGhostBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12, width: "fit-content" };
