@@ -1,7 +1,8 @@
-// src/app/profile/page.tsx
+// /src/app/profile/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import {
@@ -9,48 +10,54 @@ import {
   updatePassword,
   reauthenticateWithCredential,
   EmailAuthProvider,
+  User,
 } from "firebase/auth";
 import {
   doc,
   getDoc,
   setDoc,
+  updateDoc,
   serverTimestamp,
+  increment,
 } from "firebase/firestore";
 
-// ─────────── STRIPE (real Elements) ───────────
-import { Elements, CardElement, useStripe, useElements } from "@stripe/react-stripe-js";
+// Stripe (client)
 import { loadStripe } from "@stripe/stripe-js";
+import {
+  Elements,
+  CardElement,
+  useElements,
+  useStripe,
+} from "@stripe/react-stripe-js";
 
-const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "");
-
-// ─────────── Types ───────────
 type Role = "student" | "tutor" | "admin";
 type DayKey = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
-type TimeRange = { start: string; end: string };
+type TimeRange = { start: string; end: string }; // "HH:mm"
 type Availability = Record<DayKey, TimeRange[]>;
 
 type UserDoc = {
   email: string;
   role: Role;
-
-  // shared
   displayName?: string;
+
+  // NEW common fields
   firstName?: string;
   lastName?: string;
-  birthday?: string; // yyyy-mm-dd
+  birthday?: string;            // yyyy-mm-dd
   country?: string;
-
-  // tutor
   timezone?: string;
+
+  // Tutor fields
+  availability?: Availability;
   tutorIntro?: string;
   paypalEmail?: string;
-  availability?: Availability;
 
-  // student
+  // Student fields
   gradeLevel?: string;
+  minutesBalance?: number;      // total minutes available
 
-  // balance (minutes)
-  minutesBalance?: number;
+  // Audit
+  profileUpdatedAt?: any;
 };
 
 const DAYS: { key: DayKey; label: string }[] = [
@@ -67,111 +74,51 @@ function emptyAvailability(): Availability {
   return { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] };
 }
 
-// Pricing (USD) — 5 hours = 265
-const PACKS = [
-  { hours: 1, price: 55 },
-  { hours: 5, price: 265 },
-  { hours: 10, price: 500 },
-  { hours: 20, price: 900 },
-  { hours: 40, price: 1600 },
-];
-
 const COUNTRIES = [
-  "Canada","United States","Mexico","United Kingdom","Ireland","Germany","France","Spain","Italy","Portugal","Netherlands","Belgium","Switzerland","Austria","Sweden","Norway","Denmark","Finland","Poland","Czechia","Slovakia","Hungary","Romania","Bulgaria","Greece","Turkey","Israel","United Arab Emirates","Saudi Arabia","Qatar","India","Pakistan","Bangladesh","Sri Lanka","Nepal","China","Japan","South Korea","Taiwan","Hong Kong","Singapore","Malaysia","Thailand","Vietnam","Philippines","Indonesia","Australia","New Zealand","Brazil","Argentina","Chile","Colombia","Peru","South Africa","Nigeria","Kenya","Egypt","Morocco"
-].sort((a,b)=>a.localeCompare(b));
-
-const TIMEZONES = [
-  "UTC","America/Edmonton","America/Vancouver","America/Los_Angeles","America/Denver","America/Chicago","America/New_York","America/Toronto","Europe/London","Europe/Paris","Europe/Berlin","Europe/Amsterdam","Europe/Madrid","Europe/Rome","Europe/Zurich","Asia/Dubai","Asia/Kolkata","Asia/Singapore","Asia/Hong_Kong","Asia/Tokyo","Asia/Seoul","Australia/Sydney","Pacific/Auckland"
+  "Canada","United States","Mexico","United Kingdom","Australia","New Zealand","Singapore","Hong Kong",
+  "China","Taiwan","Japan","South Korea","India","Philippines","Vietnam","Thailand","Malaysia","Indonesia",
+  "France","Germany","Spain","Italy","Netherlands","Sweden","Norway","Denmark","Finland","Poland","Portugal",
+  "Brazil","Argentina","Chile","Colombia","Peru","South Africa","Nigeria","Kenya","Egypt","Turkey","UAE",
+  "Saudi Arabia","Israel","Ireland","Switzerland","Austria","Belgium","Czechia","Greece","Hungary",
+  // …(trimmed list; add more as you like)
 ];
 
-// ─────────── Card checkout subcomponent ───────────
-// Uses Elements context. Calls your backend to create a PaymentIntent.
-function CardCheckout({
-  uid,
-  email,
-  pack,
-  cardholderName,
-  onPaid,
-}: {
-  uid: string;
-  email: string;
-  pack: { hours: number; price: number };
-  cardholderName: string;
-  onPaid: (piId: string) => void;
-}) {
-  const stripe = useStripe();
-  const elements = useElements();
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string>("");
+const STRIPE_PK = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "";
 
-  const handlePay = useCallback(async () => {
-    if (!stripe || !elements) return;
-    setErr("");
-    setBusy(true);
+const STUDENT_PACKAGES: {
+  id: "1h" | "5h" | "10h" | "20h" | "40h";
+  label: string;
+  hours: number;
+  price: number; // USD
+}[] = [
+  { id: "1h",  label: "1 hour",  hours: 1,  price: 55 },
+  { id: "5h",  label: "5 hours", hours: 5,  price: 265 }, // fixed
+  { id: "10h", label: "10 hours",hours: 10, price: 500 },
+  { id: "20h", label: "20 hours",hours: 20, price: 900 },
+  { id: "40h", label: "40 hours",hours: 40, price: 1600 },
+];
 
-    try {
-      // Create PI on your server (amount in cents)
-      const res = await fetch("/api/payments/stripe/create-payment-intent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId: uid,
-          email,
-          hours: pack.hours,
-          amountUsd: pack.price,
-          // Optional: metadata for reconciliation
-          metadata: { product: `${pack.hours}h_package` },
-        }),
-      });
-
-      const { clientSecret, error } = await res.json();
-      if (error || !clientSecret) {
-        throw new Error(error || "Could not create payment intent");
-      }
-
-      const card = elements.getElement(CardElement);
-      if (!card) throw new Error("Card element not ready.");
-
-      const result = await stripe.confirmCardPayment(clientSecret, {
-        payment_method: {
-          card,
-          billing_details: {
-            name: cardholderName || email,
-            email,
-          },
-        },
-      });
-
-      if (result.error) {
-        throw new Error(result.error.message || "Payment failed.");
-      }
-
-      if (result.paymentIntent && result.paymentIntent.status === "succeeded") {
-        onPaid(result.paymentIntent.id);
-      } else {
-        throw new Error("Payment did not complete.");
-      }
-    } catch (e: any) {
-      setErr(e?.message || "Payment failed.");
-    } finally {
-      setBusy(false);
-    }
-  }, [stripe, elements, uid, email, pack, cardholderName, onPaid]);
-
-  return (
-    <div style={{ display: "grid", gap: 8 }}>
-      <div style={{ ...input, padding: 12 }}>
-        <CardElement options={{ style: { base: { color: "#fff", "::placeholder": { color: "#bbb" } } } }} />
-      </div>
-      {err && <div style={{ color: "#ffb3b3", fontSize: 12 }}>{err}</div>}
-      <button onClick={handlePay} style={{ ...primaryBtn, width: "100%" }} disabled={busy || !stripe}>
-        {busy ? "Processing…" : `Pay $${pack.price} USD`}
-      </button>
-    </div>
-  );
+// ---------- Common helpers ----------
+function guessTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+function formatNowInTZ(tz: string) {
+  try {
+    return new Date().toLocaleTimeString(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: tz || "UTC",
+    });
+  } catch {
+    return "";
+  }
 }
 
-// ─────────── Page ───────────
+// ---------- Main component ----------
 export default function ProfileSettingsPage() {
   const router = useRouter();
 
@@ -180,45 +127,49 @@ export default function ProfileSettingsPage() {
   const [email, setEmail] = useState<string>("");
   const [role, setRole] = useState<Role | null>(null);
 
-  // shared profile
-  const [firstName, setFirstName] = useState("");
-  const [lastName, setLastName] = useState("");
+  // common
   const [displayName, setDisplayName] = useState("");
-  const [birthday, setBirthday] = useState<string>("");
-  const [country, setCountry] = useState<string>("");
-
-  // timezone with live clock
-  const [timezone, setTimezone] = useState<string>("");
-  const [tzNow, setTzNow] = useState<string>("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName]   = useState("");
+  const [birthday, setBirthday]   = useState("");
+  const [country, setCountry]     = useState("");
+  const [timezone, setTimezone]   = useState<string>("");
 
   // student
   const [gradeLevel, setGradeLevel] = useState<string>("");
-
-  // tutor
-  const [tutorIntro, setTutorIntro] = useState("");
-  const [paypalEmail, setPaypalEmail] = useState("");
-  const [availability, setAvailability] = useState<Availability>(emptyAvailability());
-
-  // balance (minutes)
   const [minutesBalance, setMinutesBalance] = useState<number>(0);
 
-  // password
-  const [newPassword, setNewPassword] = useState("");
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [pwMessage, setPwMessage] = useState<string>("");
+  // tutor
+  const [availability, setAvailability] = useState<Availability>(emptyAvailability());
+  const [tutorIntro, setTutorIntro] = useState("");
+  const [paypalEmail, setPaypalEmail] = useState("");
 
+  // password
+  const [currPw, setCurrPw] = useState("");
+  const [newPw, setNewPw]   = useState("");
+  const [pwMessage, setPwMessage] = useState("");
+
+  // payments (student)
+  const [selectedPkg, setSelectedPkg] = useState<typeof STUDENT_PACKAGES[number]>(STUDENT_PACKAGES[0]);
+  const [payMethod, setPayMethod] = useState<"paypal"|"card">("card");
+  const [cardholder, setCardholder] = useState("");
+  const [payBusy, setPayBusy] = useState(false);
+  const [payMsg, setPayMsg] = useState("");
+
+  // misc
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving]   = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
 
-  // purchase UI
-  const [selectedPack, setSelectedPack] = useState(PACKS[2]); // default 10h
-  const [payMethod, setPayMethod] = useState<"paypal"|"card">("paypal");
-  const [cardholderName, setCardholderName] = useState("");
+  // Stripe
+  const stripePromise = useMemo(
+    () => (STRIPE_PK ? loadStripe(STRIPE_PK) : null),
+    []
+  );
 
-  // auth+user load
+  // Load user
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
+    const unsub = onAuthStateChanged(auth, async (user: User | null) => {
       if (!user) {
         router.replace("/auth");
         return;
@@ -228,25 +179,25 @@ export default function ProfileSettingsPage() {
 
       const snap = await getDoc(doc(db, "users", user.uid));
       const data = snap.data() as UserDoc | undefined;
-
       const r: Role = (data?.role as Role) || "student";
       setRole(r);
 
+      // common
+      setDisplayName(data?.displayName || (user.email?.split("@")[0] ?? ""));
+      setTimezone(data?.timezone || guessTimezone());
       setFirstName(data?.firstName || "");
       setLastName(data?.lastName || "");
-      setDisplayName(data?.displayName || (user.email?.split("@")[0] ?? ""));
       setBirthday(data?.birthday || "");
       setCountry(data?.country || "");
-      setTimezone(data?.timezone || guessTimezone());
-      setMinutesBalance(typeof data?.minutesBalance === "number" ? data!.minutesBalance! : 0);
 
       if (r === "student") {
         setGradeLevel(data?.gradeLevel || "");
+        setMinutesBalance(Number(data?.minutesBalance || 0));
       }
       if (r === "tutor") {
+        setAvailability({ ...emptyAvailability(), ...(data?.availability || {}) });
         setTutorIntro(data?.tutorIntro || "");
         setPaypalEmail(data?.paypalEmail || "");
-        setAvailability({ ...emptyAvailability(), ...(data?.availability || {}) });
       }
 
       setLoading(false);
@@ -254,71 +205,114 @@ export default function ProfileSettingsPage() {
     return unsub;
   }, [router]);
 
-  // tz clock
-  useEffect(() => {
-    function refresh() {
-      try {
-        const fmt = new Intl.DateTimeFormat([], {
-          timeZone: timezone || guessTimezone(),
-          hour: "2-digit",
-          minute: "2-digit",
-        });
-        setTzNow(fmt.format(new Date()));
-      } catch {
-        setTzNow("");
-      }
-    }
-    refresh();
-    const id = setInterval(refresh, 30_000);
-    return () => clearInterval(id);
-  }, [timezone]);
+  // ---------- Save handlers ----------
+  async function saveCommon() {
+    if (!uid) return;
+    setSaving(true);
+    setSaveMsg("");
+    const payload: Partial<UserDoc> = {
+      displayName: displayName.trim() || email.split("@")[0],
+      timezone: timezone || guessTimezone(),
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      birthday: birthday || "",
+      country: country || "",
+      profileUpdatedAt: serverTimestamp() as any,
+    };
 
-  function guessTimezone() {
     try {
-      return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-    } catch {
-      return "UTC";
+      await setDoc(doc(db, "users", uid), payload, { merge: true });
+      setSaveMsg("Saved ✓");
+    } finally {
+      setSaving(false);
+      setTimeout(() => setSaveMsg(""), 1500);
     }
   }
 
-  // saves
-  async function saveCommon() {
+  // STUDENT: single save button (merges “profile + student fields”)
+  async function saveStudentProfile() {
     if (!uid) return;
-    setSaving(true); setSaveMsg("");
+    setSaving(true);
+    setSaveMsg("");
     try {
       await setDoc(
         doc(db, "users", uid),
         {
+          displayName: displayName.trim() || email.split("@")[0],
+          timezone: timezone || guessTimezone(),
           firstName: firstName.trim(),
           lastName: lastName.trim(),
-          displayName: displayName.trim() || email.split("@")[0],
           birthday: birthday || "",
           country: country || "",
+          gradeLevel: gradeLevel || "",
           profileUpdatedAt: serverTimestamp() as any,
         },
         { merge: true }
       );
       setSaveMsg("Saved ✓");
     } finally {
-      setSaving(false); setTimeout(()=>setSaveMsg(""),1500);
+      setSaving(false);
+      setTimeout(() => setSaveMsg(""), 1500);
     }
   }
 
-  async function saveStudent() {
+  // TUTOR: save tutor details + availability together
+  async function saveTutorDetails() {
     if (!uid) return;
-    setSaving(true); setSaveMsg("");
+    setSaving(true);
+    setSaveMsg("");
     try {
       await setDoc(
         doc(db, "users", uid),
-        { gradeLevel: gradeLevel || "", timezone: timezone || guessTimezone(), profileUpdatedAt: serverTimestamp() as any },
+        {
+          displayName: displayName.trim() || email.split("@")[0],
+          timezone: timezone || guessTimezone(),
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          birthday: birthday || "",
+          country: country || "",
+          tutorIntro: tutorIntro || "",
+          paypalEmail: paypalEmail || "",
+          availability,
+          profileUpdatedAt: serverTimestamp() as any,
+        },
         { merge: true }
       );
       setSaveMsg("Saved ✓");
     } finally {
-      setSaving(false); setTimeout(()=>setSaveMsg(""),1500);
+      setSaving(false);
+      setTimeout(() => setSaveMsg(""), 1500);
     }
   }
 
+  // ---------- Password ----------
+  async function handleChangePassword() {
+    setPwMessage("");
+    const user = auth.currentUser;
+    if (!user) return;
+
+    if (!currPw || !newPw) {
+      setPwMessage("Please enter both current and new password.");
+      return;
+    }
+    if (newPw.length < 6) {
+      setPwMessage("New password must be at least 6 characters.");
+      return;
+    }
+
+    try {
+      const cred = EmailAuthProvider.credential(email, currPw);
+      await reauthenticateWithCredential(user, cred);
+      await updatePassword(user, newPw);
+      setPwMessage("Password updated ✓");
+      setCurrPw("");
+      setNewPw("");
+    } catch (e: any) {
+      setPwMessage(e?.message || "Could not update password.");
+    }
+  }
+
+  // ---------- Availability UI helpers ----------
   function addTimeRange(day: DayKey) {
     setAvailability((prev) => ({ ...prev, [day]: [...prev[day], { start: "16:00", end: "17:00" }] }));
   }
@@ -336,64 +330,105 @@ export default function ProfileSettingsPage() {
       return copy;
     });
   }
-  function isRangeValid(r: TimeRange) { return r.start < r.end; }
+  function isRangeValid(r: TimeRange) {
+    return r.start < r.end;
+  }
 
-  async function saveTutor() {
+  // ---------- Card Pay handler ----------
+  async function handleCardPay() {
     if (!uid) return;
-    for (const d of DAYS) {
-      for (const r of availability[d.key]) {
-        if (!isRangeValid(r)) { setSaveMsg(`Invalid time range on ${d.label}`); return; }
-      }
+    if (!STRIPE_PK) {
+      setPayMsg("Stripe publishable key not set.");
+      return;
     }
-    setSaving(true); setSaveMsg("");
+    setPayMsg("");
+    setPayBusy(true);
+
+    try {
+      const res = await fetch("/api/stripe/create-intent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ packageId: selectedPkg.id }),
+      });
+
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.clientSecret) {
+        throw new Error(json?.error || "Failed to create payment intent");
+      }
+
+      const stripe = await stripePromise!;
+      if (!stripe) throw new Error("Stripe not initialized");
+
+      // Use embedded child component to confirm (below)
+      setConfirmParams({
+        clientSecret: json.clientSecret as string,
+        hours: Number(json.hours),
+        amount: Number(json.amount),
+      });
+      setConfirmNow((c) => c + 1); // trigger confirm in the child
+    } catch (e: any) {
+      setPayMsg(e?.message || "Payment error.");
+      setPayBusy(false);
+    }
+  }
+
+  // state used by the Elements child to trigger confirm
+  const [confirmParams, setConfirmParams] = useState<{
+    clientSecret: string;
+    hours: number;
+    amount: number;
+  } | null>(null);
+  const [confirmNow, setConfirmNow] = useState(0);
+
+  // After success, credit minutes & log payment
+  async function onCardPaymentSucceeded(hoursPurchased: number, paymentId: string) {
+    if (!uid) return;
     try {
       await setDoc(
-        doc(db, "users", uid),
-        { timezone: timezone || guessTimezone(), tutorIntro: tutorIntro || "", paypalEmail: paypalEmail.trim() || "", availability, profileUpdatedAt: serverTimestamp() as any },
+        doc(db, "users", uid, "payments", paymentId),
+        {
+          createdAt: serverTimestamp() as any,
+          method: "card",
+          packageId: selectedPkg.id,
+          hours: hoursPurchased,
+          amountUsd: selectedPkg.price,
+          status: "succeeded",
+        },
         { merge: true }
       );
-      setSaveMsg("Saved ✓");
-    } finally {
-      setSaving(false); setTimeout(()=>setSaveMsg(""),1500);
-    }
-  }
-
-  async function handleChangePassword() {
-    setPwMessage("");
-    const user = auth.currentUser;
-    if (!user) return;
-
-    if (!currentPassword) { setPwMessage("Current password is required."); return; }
-    if (!newPassword || newPassword.length < 6) { setPwMessage("New password must be at least 6 characters."); return; }
-
-    try {
-      const cred = EmailAuthProvider.credential(email, currentPassword);
-      await reauthenticateWithCredential(user, cred);
-      await updatePassword(user, newPassword);
-      setPwMessage("Password updated ✓");
-      setNewPassword(""); setCurrentPassword("");
+      await updateDoc(doc(db, "users", uid), {
+        minutesBalance: increment(hoursPurchased * 60),
+        // stamp for any listeners you have
+        profileUpdatedAt: serverTimestamp() as any,
+      });
+      setMinutesBalance((m) => (m || 0) + hoursPurchased * 60);
+      setPayMsg("Payment successful ✓ Minutes added.");
     } catch (e: any) {
-      setPwMessage(e?.message || "Could not update password.");
+      setPayMsg("Payment succeeded, but failed to update balance. Please contact support.");
+      console.error("post-success update error", e);
+    } finally {
+      setPayBusy(false);
     }
   }
 
-  // payments
-  const perHour = (p: {hours:number; price:number}) => (p.price / p.hours);
-  const hoursText = `${Math.floor((minutesBalance || 0)/60)}h ${(minutesBalance || 0)%60}m`;
-
-  const handlePaidSuccess = async (_piId: string) => {
-    // Optionally show a toast; minutes will be credited by your webhook.
-    // You could also poll or call an endpoint to refresh minutes after success.
-    alert("Payment completed! Your balance will update shortly.");
-  };
-
+  // ---------- Layout ----------
   const headerRight = useMemo(
     () => (
       <div style={{ display: "flex", gap: 8 }}>
-        <button style={ghostButton} onClick={() => router.push("/")} title="Home">← Home</button>
+        <button style={ghostButton} onClick={() => router.push("/")} title="Home">
+          ← Home
+        </button>
         <button
           style={ghostButton}
-          onClick={() => router.push(role === "tutor" ? "/dashboard/tutor" : role === "admin" ? "/admin" : "/dashboard/student")}
+          onClick={() =>
+            router.push(
+              role === "tutor"
+                ? "/dashboard/tutor"
+                : role === "admin"
+                ? "/admin"
+                : "/dashboard/student"
+            )
+          }
           title="Dashboard"
         >
           Dashboard
@@ -414,31 +449,49 @@ export default function ProfileSettingsPage() {
     );
   }
 
+  const currentTime = formatNowInTZ(timezone || "UTC");
+  const balanceH = Math.floor((minutesBalance || 0) / 60);
+  const balanceM = (minutesBalance || 0) % 60;
+
   return (
     <main style={pageShell}>
+      {/* Header */}
       <header style={headerBar}>
         <Brand />
         {headerRight}
       </header>
 
+      {/* Body */}
       <section style={bodyGrid}>
-        {/* Left column: Profile */}
+        {/* Left column */}
         <Card>
           <CardTitle>Profile</CardTitle>
-          <Field label="Email"><input disabled value={email} style={input} /></Field>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <Field label="First name"><input value={firstName} onChange={(e)=>setFirstName(e.target.value)} style={input} placeholder="Jane" /></Field>
-            <Field label="Last name"><input value={lastName} onChange={(e)=>setLastName(e.target.value)} style={input} placeholder="Doe" /></Field>
+          <Field label="Email">
+            <input disabled value={email} style={input} />
+          </Field>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="First name">
+              <input value={firstName} onChange={(e) => setFirstName(e.target.value)} style={input} />
+            </Field>
+            <Field label="Last name">
+              <input value={lastName} onChange={(e) => setLastName(e.target.value)} style={input} />
+            </Field>
           </div>
 
-          <Field label="Display name"><input value={displayName} onChange={(e)=>setDisplayName(e.target.value)} style={input} placeholder="Your name" /></Field>
+          <Field label="Display name">
+            <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} style={input} />
+          </Field>
 
           {role === "student" && (
             <Field label="Grade level">
-              <select value={gradeLevel} onChange={(e)=>setGradeLevel(e.target.value)} style={select}>
+              <select value={gradeLevel} onChange={(e) => setGradeLevel(e.target.value)} style={select}>
                 <option value="">Select…</option>
-                {["Grade 4","Grade 5","Grade 6","Grade 7","Grade 8","Grade 9","Grade 10","Grade 11","Grade 12","IB / AP"].map((g) => (
+                {[
+                  "Grade 4","Grade 5","Grade 6","Grade 7","Grade 8","Grade 9",
+                  "Grade 10","Grade 11","Grade 12","IB / AP"
+                ].map((g) => (
                   <option key={g} value={g}>{g}</option>
                 ))}
               </select>
@@ -447,156 +500,108 @@ export default function ProfileSettingsPage() {
 
           <Field label="Birthday">
             <div style={{ position: "relative" }}>
-              <input type="date" value={birthday} onChange={(e)=>setBirthday(e.target.value)} style={{ ...input, paddingRight: 32 }} />
-              <div style={{ position: "absolute", right: 10, top: 10, width: 16, height: 16, border: "2px solid #fff", borderRadius: 3, opacity: 0.9 }} />
+              <input
+                type="date"
+                value={birthday}
+                onChange={(e) => setBirthday(e.target.value)}
+                style={{ ...input, paddingRight: 36 }}
+              />
+              <div
+                aria-hidden
+                style={{
+                  position: "absolute",
+                  right: 10,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  width: 18,
+                  height: 18,
+                  borderRadius: 4,
+                  border: "1px solid #777",
+                  color: "#fff",
+                  fontSize: 10,
+                  display: "grid",
+                  placeItems: "center",
+                  opacity: 0.9,
+                }}
+              >
+                ⌚
+              </div>
             </div>
           </Field>
 
           <Field label="Country of residence">
-            <select value={country} onChange={(e)=>setCountry(e.target.value)} style={select}>
+            <select value={country} onChange={(e) => setCountry(e.target.value)} style={select}>
               <option value="">Select a country…</option>
-              {COUNTRIES.map((c) => <option key={c} value={c}>{c}</option>)}
+              {COUNTRIES.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
             </select>
           </Field>
 
-          <Field label={`Timezone (Current time: ${tzNow || "—"})`}>
-            <select value={timezone} onChange={(e)=>setTimezone(e.target.value)} style={select}>
-              {TIMEZONES.map((z) => <option key={z} value={z}>{z}</option>)}
-            </select>
+          <Field label={`Timezone (Current time: ${currentTime || "—"})`}>
+            <input
+              value={timezone}
+              onChange={(e) => setTimezone(e.target.value)}
+              style={input}
+              placeholder="America/Edmonton"
+              list="tzlist"
+            />
+            <datalist id="tzlist">
+              <option value="America/Edmonton" />
+              <option value="America/Denver" />
+              <option value="America/Chicago" />
+              <option value="America/Los_Angeles" />
+              <option value="America/New_York" />
+              <option value="UTC" />
+            </datalist>
           </Field>
 
           {role === "tutor" && (
             <>
+              <CardSubTitle>Tutor Details</CardSubTitle>
+
               <Field label="PayPal email (for payouts)">
-                <input value={paypalEmail} onChange={(e)=>setPaypalEmail(e.target.value)} style={input} placeholder="your-paypal-email@example.com" />
+                <input
+                  value={paypalEmail}
+                  onChange={(e) => setPaypalEmail(e.target.value)}
+                  style={input}
+                  placeholder="your-paypal-email@example.com"
+                />
               </Field>
 
-              <div style={{ marginTop: 6, fontWeight: 600, color: "#fff" }}>Tutor Details</div>
               <Field label="Tutor introduction">
                 <textarea
+                  rows={5}
                   value={tutorIntro}
-                  onChange={(e)=>setTutorIntro(e.target.value)}
-                  placeholder="Write a short introduction students will see (teaching style, subjects, achievements, etc.)"
-                  style={{ ...input, minHeight: 120, resize: "vertical" }}
+                  onChange={(e) => setTutorIntro(e.target.value)}
+                  style={{ ...input, minHeight: 120, resize: "vertical" as const }}
+                  placeholder="Write a short introduction students will see…"
                 />
               </Field>
             </>
           )}
 
           <div style={row}>
-            <button onClick={saveCommon} style={primaryBtn} disabled={saving}>Save Profile</button>
-            {role === "student" && (
-              <button onClick={saveStudent} style={{ ...primaryBtn, background: "#2b7", borderColor: "#6ecf9a" }} disabled={saving}>
-                Save Student Info
+            {role === "tutor" ? (
+              <button onClick={saveTutorDetails} style={primaryBtn} disabled={saving}>
+                Save Tutor Details
+              </button>
+            ) : (
+              <button onClick={saveStudentProfile} style={primaryBtn} disabled={saving}>
+                Save Student Profile
               </button>
             )}
             {saveMsg && <div style={muted}>{saveMsg}</div>}
           </div>
         </Card>
 
-        {/* Middle column: Password */}
-        <Card>
-          <CardTitle>Change Password</CardTitle>
-          <Field label="Current password">
-            <input type="password" value={currentPassword} onChange={(e)=>setCurrentPassword(e.target.value)} style={input} placeholder="Enter your current password" />
-          </Field>
-          <Field label="New password">
-            <input type="password" value={newPassword} onChange={(e)=>setNewPassword(e.target.value)} style={input} placeholder="At least 6 characters" />
-          </Field>
-          <div style={row}>
-            <button onClick={handleChangePassword} style={primaryBtn}>Update Password</button>
-            {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
-          </div>
-        </Card>
-
-        {/* Right column */}
-        {role === "student" ? (
-          <Card>
-            <CardTitle>Hours & Payments</CardTitle>
-            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)", marginBottom: 8 }}>
-              Current balance: <strong>{hoursText}</strong>
-            </div>
-
-            {/* Packs */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
-              {PACKS.map((p) => {
-                const selected = selectedPack.hours === p.hours;
-                return (
-                  <button
-                    key={p.hours}
-                    onClick={() => setSelectedPack(p)}
-                    style={{
-                      textAlign: "left",
-                      padding: 12,
-                      borderRadius: 12,
-                      border: selected ? "2px solid #6ecf9a" : "1px solid rgba(255,255,255,0.15)",
-                      background: "rgba(0,0,0,0.25)",
-                      color: "#fff",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <div style={{ fontWeight: 700 }}>{p.hours} {p.hours === 1 ? "hour" : "hours"}</div>
-                    <div style={{ opacity: 0.9 }}>${p.price} USD</div>
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>${perHour(p).toFixed(2)}/hr</div>
-                  </button>
-                );
-              })}
-            </div>
-
-            <div style={{ marginTop: 10, fontSize: 12, color: "rgba(255,255,255,0.85)" }}>
-              Selected: <strong>{selectedPack.hours}h</strong> for <strong>${selectedPack.price} USD</strong> (${perHour(selectedPack).toFixed(2)}/hr)
-            </div>
-
-            {/* Method */}
-            <div style={{ marginTop: 14 }}>
-              <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)", marginBottom: 6 }}>Payment method</div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <label style={pill(payMethod === "paypal")}><input type="radio" checked={payMethod === "paypal"} onChange={() => setPayMethod("paypal")} />&nbsp; PayPal</label>
-                <label style={pill(payMethod === "card")}><input type="radio" checked={payMethod === "card"} onChange={() => setPayMethod("card")} />&nbsp; Credit / Debit card</label>
-              </div>
-            </div>
-
-            {/* Cardholder + Elements (only when card selected) */}
-            {payMethod === "card" && (
-              <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
-                <Field label="Cardholder name">
-                  <input value={cardholderName} onChange={(e)=>setCardholderName(e.target.value)} style={input} placeholder="Name on card" />
-                </Field>
-                <Elements stripe={stripePromise} options={{ appearance: { theme: "night" }, locale: "en" }}>
-                  <CardCheckout
-                    uid={uid!}
-                    email={email}
-                    pack={selectedPack}
-                    cardholderName={cardholderName}
-                    onPaid={handlePaidSuccess}
-                  />
-                </Elements>
-              </div>
-            )}
-
-            {/* PayPal button */}
-            {payMethod === "paypal" && (
-              <div style={{ marginTop: 14 }}>
-                <button
-                  onClick={() => {
-                    const q = new URLSearchParams({ hours: String(selectedPack.hours), price: String(selectedPack.price) });
-                    window.location.href = `/api/payments/paypal/create-order?${q.toString()}`;
-                  }}
-                  style={{ ...primaryBtn, width: "100%" }}
-                >
-                  Pay ${selectedPack.price} USD
-                </button>
-                <div style={{ ...muted, marginTop: 8 }}>
-                  After a successful payment, the purchased minutes will be added to your balance automatically.
-                </div>
-              </div>
-            )}
-          </Card>
-        ) : (
+        {/* Middle column */}
+        {role === "tutor" ? (
           <Card>
             <CardTitle>Tutor Availability</CardTitle>
             <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
-              Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or more ranges per day (24-hour format).
+              Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or more
+              ranges per day (24-hour format).
             </div>
             <div style={availGrid}>
               {DAYS.map(({ key, label }) => (
@@ -604,28 +609,270 @@ export default function ProfileSettingsPage() {
                   <div style={{ fontSize: 12, color: "#fff", marginBottom: 6 }}>{label}</div>
                   {(availability[key] ?? []).map((r, i) => (
                     <div key={i} style={rangeRow}>
-                      <input type="time" value={r.start} onChange={(e)=>updateRange(key, i, "start", e.target.value)} style={timeInput} />
+                      <input
+                        type="time"
+                        value={r.start}
+                        onChange={(e) => updateRange(key, i, "start", e.target.value)}
+                        style={timeInput}
+                      />
                       <span style={{ color: "#888" }}>–</span>
-                      <input type="time" value={r.end} onChange={(e)=>updateRange(key, i, "end", e.target.value)} style={timeInput} />
-                      <button onClick={()=>removeRange(key, i)} style={smallGhostBtn}>Remove</button>
+                      <input
+                        type="time"
+                        value={r.end}
+                        onChange={(e) => updateRange(key, i, "end", e.target.value)}
+                        style={timeInput}
+                      />
+                      <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>
+                        Remove
+                      </button>
                     </div>
                   ))}
-                  <button onClick={()=>addTimeRange(key)} style={smallAddBtn}>+ Add time</button>
+                  <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
+                    + Add time
+                  </button>
                 </div>
               ))}
             </div>
             <div style={row}>
-              <button onClick={saveTutor} style={primaryBtn} disabled={saving}>Save Tutor Details & Availability</button>
+              <button onClick={saveTutorDetails} style={primaryBtn} disabled={saving}>
+                Save Tutor Details & Availability
+              </button>
               {saveMsg && <div style={muted}>{saveMsg}</div>}
             </div>
           </Card>
+        ) : (
+          <Card>
+            <CardTitle>Change Password</CardTitle>
+            <Field label="Current password">
+              <input
+                type="password"
+                value={currPw}
+                onChange={(e) => setCurrPw(e.target.value)}
+                style={input}
+                placeholder="Enter your current password"
+              />
+            </Field>
+            <Field label="New password">
+              <input
+                type="password"
+                value={newPw}
+                onChange={(e) => setNewPw(e.target.value)}
+                style={input}
+                placeholder="At least 6 characters"
+              />
+            </Field>
+            <div style={row}>
+              <button onClick={handleChangePassword} style={primaryBtn}>
+                Update Password
+              </button>
+              {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
+            </div>
+          </Card>
+        )}
+
+        {/* Right column */}
+        {role === "student" ? (
+          <Card>
+            <CardTitle>Hours & Payments</CardTitle>
+            <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
+              Current balance: <strong>{balanceH}h {balanceM}m</strong>
+            </div>
+
+            {/* package cards */}
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 10,
+              marginBottom: 12,
+            }}>
+              {STUDENT_PACKAGES.map((p) => {
+                const selected = selectedPkg.id === p.id;
+                const perHour = (p.price / p.hours).toFixed(2);
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => setSelectedPkg(p)}
+                    style={{
+                      padding: 12,
+                      borderRadius: 10,
+                      border: selected ? "1px solid #6ecf9a" : "1px solid #444",
+                      background: selected ? "rgba(110,207,154,0.12)" : "rgba(255,255,255,0.03)",
+                      textAlign: "left",
+                      color: "#fff",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ fontWeight: 700 }}>{p.label}</div>
+                    <div style={{ opacity: 0.9 }}>${p.price} USD</div>
+                    <div style={{ fontSize: 12, opacity: 0.8 }}>${perHour}/hr</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
+              Selected: <strong>{selectedPkg.hours}h</strong> for{" "}
+              <strong>${selectedPkg.price} USD</strong> (${(selectedPkg.price/selectedPkg.hours).toFixed(2)}/hr)
+            </div>
+
+            {/* payment method */}
+            <Field label="Payment method">
+              <div style={{ display: "flex", gap: 10 }}>
+                <label style={chip(payMethod === "paypal")} onClick={() => setPayMethod("paypal")}>
+                  <input type="radio" checked={payMethod === "paypal"} readOnly /> PayPal
+                </label>
+                <label style={chip(payMethod === "card")} onClick={() => setPayMethod("card")}>
+                  <input type="radio" checked={payMethod === "card"} readOnly /> Credit / Debit card
+                </label>
+              </div>
+            </Field>
+
+            {/* Card form (Stripe) */}
+            {payMethod === "card" && (
+              <>
+                {!STRIPE_PK ? (
+                  <div style={{ ...muted, marginBottom: 10 }}>
+                    Stripe key missing. Set <code>NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY</code>.
+                  </div>
+                ) : (
+                  <>
+                    <Field label="Cardholder name">
+                      <input
+                        value={cardholder}
+                        onChange={(e) => setCardholder(e.target.value)}
+                        style={input}
+                        placeholder="Name on card"
+                      />
+                    </Field>
+
+                    <Elements stripe={stripePromise!} options={{ appearance: { theme: "night" } }}>
+                      <StripeConfirmSection
+                        confirmNow={confirmNow}
+                        params={confirmParams}
+                        cardholder={cardholder}
+                        onDone={(ok, payload) => {
+                          if (ok) {
+                            onCardPaymentSucceeded(payload.hours, payload.paymentId);
+                          } else {
+                            setPayMsg(payload.message);
+                            setPayBusy(false);
+                          }
+                        }}
+                      />
+                    </Elements>
+                  </>
+                )}
+              </>
+            )}
+
+            {/* Pay button */}
+            <div style={{ marginTop: 12 }}>
+              {payMethod === "paypal" ? (
+                <button
+                  style={{ ...primaryBtn, width: "100%" }}
+                  onClick={() => {
+                    // TODO: replace with your PayPal Checkout route
+                    window.location.href = `/api/paypal/checkout?package=${selectedPkg.id}`;
+                  }}
+                >
+                  Pay ${selectedPkg.price} USD with PayPal
+                </button>
+              ) : (
+                <button
+                  style={{ ...primaryBtn, width: "100%", opacity: payBusy ? 0.7 : 1 }}
+                  onClick={handleCardPay}
+                  disabled={payBusy || !STRIPE_PK}
+                >
+                  {payBusy ? "Processing…" : `Pay $${selectedPkg.price} USD`}
+                </button>
+              )}
+            </div>
+
+            {payMsg && <div style={{ ...muted, marginTop: 8 }}>{payMsg}</div>}
+
+            <div style={{ ...muted, marginTop: 10 }}>
+              After a successful payment, purchased minutes will be added to your balance automatically.
+            </div>
+          </Card>
+        ) : (
+          // right column for tutors: leave empty spacer for nicer grid at large widths
+          <div style={{ display: "none" }} />
         )}
       </section>
     </main>
   );
 }
 
-/* ─────────── UI helpers ─────────── */
+/** ---- Stripe confirmation sub-component (inside <Elements>) ---- */
+function StripeConfirmSection({
+  confirmNow,
+  params,
+  cardholder,
+  onDone,
+}: {
+  confirmNow: number;
+  params: { clientSecret: string; hours: number; amount: number } | null;
+  cardholder: string;
+  onDone: (
+    ok: boolean,
+    payload:
+      | { hours: number; paymentId: string }
+      | { message: string }
+  ) => void;
+}) {
+  const stripe = useStripe();
+  const elements = useElements();
+
+  // When confirmNow changes and we have params, attempt payment
+  useEffect(() => {
+    (async () => {
+      if (!params || !stripe || !elements || !confirmNow) return;
+
+      const card = elements.getElement(CardElement);
+      if (!card) {
+        onDone(false, { message: "Card element not ready." });
+        return;
+      }
+
+      const { clientSecret, hours } = params;
+
+      const result = await stripe.confirmCardPayment(clientSecret, {
+        payment_method: {
+          card,
+          billing_details: {
+            name: cardholder || undefined,
+          },
+        },
+      });
+
+      if (result.error) {
+        onDone(false, { message: result.error.message || "Card error." });
+      } else if (result.paymentIntent && result.paymentIntent.status === "succeeded") {
+        onDone(true, {
+          hours,
+          paymentId: result.paymentIntent.id,
+        });
+      } else {
+        onDone(false, { message: "Payment not completed." });
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirmNow]);
+
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ ...input, padding: 12 }}>
+        <CardElement
+          options={{
+            style: { base: { color: "#fff", "::placeholder": { color: "#bbb" } } },
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ----------------- tiny UI helpers ----------------- */
 
 const pageShell: React.CSSProperties = {
   minHeight: "100vh",
@@ -670,7 +917,7 @@ const bodyGrid: React.CSSProperties = {
   maxWidth: 1280,
   margin: "0 auto",
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+  gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))",
   gap: 16,
 };
 
@@ -679,7 +926,8 @@ function Card({ children }: { children: React.ReactNode }) {
     <div
       style={{
         borderRadius: 12,
-        background: "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.08) 0%, rgba(20,20,20,0.6) 60%)",
+        background:
+          "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.08) 0%, rgba(20,20,20,0.6) 60%)",
         border: "1px solid rgba(255,255,255,0.12)",
         boxShadow: "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
         padding: "16px 16px 14px",
@@ -687,6 +935,7 @@ function Card({ children }: { children: React.ReactNode }) {
         display: "flex",
         flexDirection: "column",
         gap: 12,
+        minHeight: 120,
       }}
     >
       {children}
@@ -697,6 +946,13 @@ function Card({ children }: { children: React.ReactNode }) {
 function CardTitle({ children }: { children: React.ReactNode }) {
   return (
     <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em", marginBottom: 4 }}>
+      {children}
+    </div>
+  );
+}
+function CardSubTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: "-0.01em", marginTop: 6 }}>
       {children}
     </div>
   );
@@ -720,12 +976,10 @@ const input: React.CSSProperties = {
   fontSize: 14,
   lineHeight: 1.4,
   outline: "none",
-  width: "100%",
-  boxSizing: "border-box",
 };
 
-const select: React.CSSProperties = { ...input, appearance: "none" as const };
-const row: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" };
+const select: React.CSSProperties = { ...input, appearance: "none" };
+const row: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10 };
 
 const primaryBtn: React.CSSProperties = {
   padding: "10px 14px",
@@ -748,7 +1002,7 @@ const ghostButton: React.CSSProperties = {
   lineHeight: 1.2,
   cursor: "pointer",
   minWidth: 80,
-  textAlign: "center" as const,
+  textAlign: "center",
 };
 
 const muted: React.CSSProperties = { color: "#a5b0a9", fontSize: 12 };
@@ -773,17 +1027,19 @@ const rangeRow: React.CSSProperties = {
   marginBottom: 6,
 };
 
-const timeInput: React.CSSProperties = { ...input, padding: "8px 10px" };
+const timeInput: React.CSSProperties = { ...input, width: "100%", padding: "8px 10px" };
 const smallAddBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12 };
 const smallGhostBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12 };
 
-function pill(active: boolean): React.CSSProperties {
+function chip(active: boolean): React.CSSProperties {
   return {
-    padding: "8px 10px",
-    borderRadius: 10,
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "6px 10px",
+    borderRadius: 999,
     border: active ? "1px solid #6ecf9a" : "1px solid #444",
-    background: active ? "rgba(46, 178, 107, 0.25)" : "#2a2a2a",
-    color: "#fff",
+    background: active ? "rgba(110,207,154,0.12)" : "rgba(255,255,255,0.03)",
     cursor: "pointer",
     userSelect: "none",
   };
