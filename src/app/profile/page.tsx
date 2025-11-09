@@ -67,7 +67,7 @@ function getTimezones(): string[] {
   }
 }
 
-// ISO 3166-ish country list (UN members + a few common territories)
+// Country dropdown list
 const ALL_COUNTRIES = [
   "Afghanistan","Albania","Algeria","Andorra","Angola","Antigua and Barbuda","Argentina","Armenia","Australia","Austria",
   "Azerbaijan","Bahamas","Bahrain","Bangladesh","Barbados","Belarus","Belgium","Belize","Benin","Bhutan","Bolivia",
@@ -89,7 +89,6 @@ const ALL_COUNTRIES = [
   "Syria","Taiwan","Tajikistan","Tanzania","Thailand","Timor-Leste","Togo","Tonga","Trinidad and Tobago","Tunisia",
   "Turkey","Turkmenistan","Tuvalu","Uganda","Ukraine","United Arab Emirates","United Kingdom","United States","Uruguay",
   "Uzbekistan","Vanuatu","Vatican City","Venezuela","Vietnam","Yemen","Zambia","Zimbabwe",
-  // Common territories / regions often used by users
   "Hong Kong","Macau","Puerto Rico","Greenland","Aruba","Bermuda","Cayman Islands","Curacao","Faroe Islands",
   "Gibraltar","Guernsey","Isle of Man","Jersey","Kosovo","New Caledonia","Northern Mariana Islands","Reunion",
   "French Polynesia","Guadeloupe","Martinique","Mayotte"
@@ -108,10 +107,10 @@ export default function ProfileSettingsPage() {
   const [timezone, setTimezone] = useState<string>("");
   const [tzOptions] = useState<string[]>(getTimezones());
 
-  // live clock tick (updates current time text)
+  // live clock (update every 30s)
   const [, setTick] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 30000); // refresh every 30s
+    const id = setInterval(() => setTick((t) => t + 1), 30000);
     return () => clearInterval(id);
   }, []);
   const currentTimeInTZ = useMemo(() => {
@@ -131,16 +130,16 @@ export default function ProfileSettingsPage() {
 
   // tutor-only extras
   const [firstName, setFirstName] = useState<string>("");
-  const [lastName, setLastName] = useState<string>("");
-  const [intro, setIntro] = useState<string>("");
-  const [birthday, setBirthday] = useState<string>("");
-  const [country, setCountry] = useState<string>("");
+  const [lastName, setLastName]   = useState<string>("");
+  const [birthday, setBirthday]   = useState<string>("");
+  const [country, setCountry]     = useState<string>("");
+  const [intro, setIntro]         = useState<string>("");
 
   const [availability, setAvailability] = useState<Availability>(emptyAvailability());
 
   // password
-  const [newPassword, setNewPassword] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [pwMessage, setPwMessage] = useState<string>("");
 
   const [loading, setLoading] = useState(true);
@@ -176,9 +175,9 @@ export default function ProfileSettingsPage() {
         setAvailability({ ...emptyAvailability(), ...(data?.availability || {}) });
         setFirstName(data?.firstName || "");
         setLastName(data?.lastName || "");
-        setIntro(data?.intro || "");
         setBirthday(data?.birthday || "");
         setCountry(data?.country || "");
+        setIntro(data?.intro || "");
       }
 
       setLoading(false);
@@ -206,9 +205,9 @@ export default function ProfileSettingsPage() {
         ? {
             firstName: firstName.trim() || undefined,
             lastName: lastName.trim() || undefined,
-            intro: intro.trim() || "",
             birthday: birthday || "",
             country: country.trim() || "",
+            intro: intro.trim() || "",
           }
         : {}),
       // @ts-ignore
@@ -280,7 +279,6 @@ export default function ProfileSettingsPage() {
 
   async function saveTutor() {
     if (!uid) return;
-    // validate ranges
     for (const d of DAYS) {
       for (const r of availability[d.key]) {
         if (!isRangeValid(r)) {
@@ -295,7 +293,6 @@ export default function ProfileSettingsPage() {
     try {
       await updateDoc(doc(db, "users", uid), {
         availability,
-        timezone: timezone || guessTimezone(),
         // @ts-ignore
         profileUpdatedAt: serverTimestamp(),
       });
@@ -303,7 +300,7 @@ export default function ProfileSettingsPage() {
     } catch {
       await setDoc(
         doc(db, "users", uid),
-        { availability, timezone: timezone || guessTimezone(), profileUpdatedAt: serverTimestamp() as any },
+        { availability, profileUpdatedAt: serverTimestamp() as any },
         { merge: true }
       );
       setSaveMsg("Saved ✓");
@@ -318,35 +315,25 @@ export default function ProfileSettingsPage() {
     const user = auth.currentUser;
     if (!user) return;
 
+    if (!currentPassword) {
+      setPwMessage("Please enter your current password.");
+      return;
+    }
     if (!newPassword || newPassword.length < 6) {
-      setPwMessage("Password must be at least 6 characters.");
+      setPwMessage("Please enter a new password (at least 6 characters).");
       return;
     }
 
     try {
+      // Always re-auth first (clearer UX since current pw is required)
+      const cred = EmailAuthProvider.credential(email, currentPassword);
+      await reauthenticateWithCredential(user, cred);
       await updatePassword(user, newPassword);
       setPwMessage("Password updated ✓");
       setNewPassword("");
       setCurrentPassword("");
     } catch (err: any) {
-      if (err?.code === "auth/requires-recent-login") {
-        if (!email || !currentPassword) {
-          setPwMessage("Please enter your current password to re-authenticate.");
-          return;
-        }
-        try {
-          const cred = EmailAuthProvider.credential(email, currentPassword);
-          await reauthenticateWithCredential(user, cred);
-          await updatePassword(user, newPassword);
-          setPwMessage("Password updated ✓");
-          setNewPassword("");
-          setCurrentPassword("");
-        } catch (e2: any) {
-          setPwMessage(e2?.message || "Re-authentication failed.");
-        }
-      } else {
-        setPwMessage(err?.message || "Could not update password.");
-      }
+      setPwMessage(err?.message || "Could not update password.");
     }
   }
 
@@ -404,7 +391,7 @@ export default function ProfileSettingsPage() {
 
       {/* Body */}
       <section style={bodyGrid}>
-        {/* Profile + Tutor details on the LEFT */}
+        {/* LEFT: Profile (with tutor extras in requested order) */}
         <Card>
           <CardTitle>Profile</CardTitle>
 
@@ -442,6 +429,34 @@ export default function ProfileSettingsPage() {
             />
           </Field>
 
+          {role === "tutor" && (
+            <>
+              <Field label="Birthday">
+                <input
+                  type="date"
+                  value={birthday}
+                  onChange={(e) => setBirthday(e.target.value)}
+                  style={input}
+                />
+              </Field>
+
+              <Field label="Country of residence">
+                <select
+                  value={country}
+                  onChange={(e) => setCountry(e.target.value)}
+                  style={select}
+                >
+                  <option value="">Select a country…</option>
+                  {ALL_COUNTRIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </>
+          )}
+
           <label style={{ display: "grid", gap: 6 }}>
             <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>
               Timezone{" "}
@@ -466,45 +481,15 @@ export default function ProfileSettingsPage() {
           </label>
 
           {role === "tutor" && (
-            <>
-              <CardTitle>Tutor Details</CardTitle>
-
-              <Field label="Tutor introduction">
-                <textarea
-                  value={intro}
-                  onChange={(e) => setIntro(e.target.value)}
-                  style={textarea}
-                  placeholder="Write a short introduction students will see (teaching style, subjects, achievements, etc.)"
-                  rows={5}
-                />
-              </Field>
-
-              <div style={twoCol}>
-                <Field label="Birthday">
-                  <input
-                    type="date"
-                    value={birthday}
-                    onChange={(e) => setBirthday(e.target.value)}
-                    style={input}
-                  />
-                </Field>
-
-                <Field label="Country of residence">
-                  <select
-                    value={country}
-                    onChange={(e) => setCountry(e.target.value)}
-                    style={select}
-                  >
-                    <option value="">Select a country…</option>
-                    {ALL_COUNTRIES.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-              </div>
-            </>
+            <Field label="Tutor introduction">
+              <textarea
+                value={intro}
+                onChange={(e) => setIntro(e.target.value)}
+                style={textarea}
+                placeholder="Write a short introduction students will see (teaching style, subjects, achievements, etc.)"
+                rows={5}
+              />
+            </Field>
           )}
 
           <div style={row}>
@@ -515,7 +500,7 @@ export default function ProfileSettingsPage() {
           </div>
         </Card>
 
-        {/* Student section */}
+        {/* MIDDLE/RIGHT: Student or Tutor specifics */}
         {role === "student" && (
           <Card>
             <CardTitle>Student Details</CardTitle>
@@ -543,7 +528,6 @@ export default function ProfileSettingsPage() {
           </Card>
         )}
 
-        {/* Availability on the RIGHT */}
         {role === "tutor" && (
           <Card>
             <CardTitle>Tutor Availability</CardTitle>
@@ -594,27 +578,30 @@ export default function ProfileSettingsPage() {
           </Card>
         )}
 
-        {/* Password */}
+        {/* RIGHTMOST: Password */}
         <Card>
           <CardTitle>Change Password</CardTitle>
+
+          <Field label="Current password">
+            <input
+              type="password"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              style={input}
+              placeholder="Enter your current password"
+            />
+          </Field>
+
           <Field label="New password">
             <input
               type="password"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
               style={input}
-              placeholder="••••••••"
+              placeholder="At least 6 characters"
             />
           </Field>
-          <Field label="Current password (only if asked)">
-            <input
-              type="password"
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              style={input}
-              placeholder="Needed if re-authentication required"
-            />
-          </Field>
+
           <div style={row}>
             <button onClick={handleChangePassword} style={primaryBtn}>
               Update Password
