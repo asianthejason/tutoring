@@ -18,6 +18,11 @@ import {
   updateDoc,
   serverTimestamp,
   increment,
+  collection,
+  getDocs,
+  query as fsQuery,
+  orderBy,
+  limit as fsLimit,
 } from "firebase/firestore";
 
 // Stripe (client)
@@ -123,6 +128,19 @@ function formatNowInTZ(tz: string) {
     return "";
   }
 }
+function fmtUsd(n: number) {
+  return `$${n.toLocaleString(undefined, { maximumFractionDigits: 2 })} USD`;
+}
+function fmtDate(d?: Date) {
+  if (!d) return "—";
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 // ---------- Main component ----------
 export default function ProfileSettingsPage() {
@@ -144,6 +162,16 @@ export default function ProfileSettingsPage() {
   // student
   const [gradeLevel, setGradeLevel] = useState<string>("");
   const [minutesBalance, setMinutesBalance] = useState<number>(0);
+
+  // purchase history (student)
+  type Purchase = {
+    id: string;
+    hours: number;
+    amountUsd: number;
+    method: string;
+    createdAt?: Date | null;
+  };
+  const [purchases, setPurchases] = useState<Purchase[]>([]);
 
   // tutor
   const [availability, setAvailability] = useState<Availability>(emptyAvailability());
@@ -199,6 +227,21 @@ export default function ProfileSettingsPage() {
       if (r === "student") {
         setGradeLevel(data?.gradeLevel || "");
         setMinutesBalance(Number(data?.minutesBalance || 0));
+        // load recent purchases
+        const colRef = collection(db, "users", user.uid, "payments");
+        const q = fsQuery(colRef, orderBy("createdAt", "desc"), fsLimit(5));
+        const list = await getDocs(q);
+        const rows: Purchase[] = list.docs.map((d) => {
+          const v = d.data() as any;
+          return {
+            id: d.id,
+            hours: Number(v.hours || 0),
+            amountUsd: Number(v.amountUsd || 0),
+            method: String(v.method || ""),
+            createdAt: v?.createdAt?.toDate ? (v.createdAt.toDate() as Date) : null,
+          };
+        });
+        setPurchases(rows);
       }
       if (r === "tutor") {
         setAvailability({ ...emptyAvailability(), ...(data?.availability || {}) });
@@ -362,28 +405,41 @@ export default function ProfileSettingsPage() {
   } | null>(null);
   const [confirmNow, setConfirmNow] = useState(0);
 
-  // After success, credit minutes & log payment
+  // After success, credit minutes & log payment, clear fields, update history
   async function onCardPaymentSucceeded(hoursPurchased: number, paymentId: string) {
     if (!uid) return;
     try {
-      await setDoc(
-        doc(db, "users", uid, "payments", paymentId),
-        {
-          createdAt: serverTimestamp() as any,
-          method: "card",
-          packageId: selectedPkg.id,
-          hours: hoursPurchased,
-          amountUsd: selectedPkg.price,
-          status: "succeeded",
-        },
-        { merge: true }
-      );
+      const paymentRow = {
+        createdAt: serverTimestamp() as any,
+        method: "card",
+        packageId: selectedPkg.id,
+        hours: hoursPurchased,
+        amountUsd: selectedPkg.price,
+        status: "succeeded",
+      };
+
+      await setDoc(doc(db, "users", uid, "payments", paymentId), paymentRow, { merge: true });
       await updateDoc(doc(db, "users", uid), {
         minutesBalance: increment(hoursPurchased * 60),
         profileUpdatedAt: serverTimestamp() as any,
       });
+
+      // update local state optimistically
       setMinutesBalance((m) => (m || 0) + hoursPurchased * 60);
-      setPayMsg("Payment successful ✓ Minutes added.");
+      setPurchases((prev) => [
+        {
+          id: paymentId,
+          hours: hoursPurchased,
+          amountUsd: selectedPkg.price,
+          method: "card",
+          createdAt: new Date(),
+        },
+        ...prev,
+      ].slice(0, 5));
+
+      setCardholder("");                // clear name
+      setConfirmParams(null);           // reset any stale confirm params
+      setPayMsg("Payment successful ✓ Minutes added to your balance.");
     } catch (e: any) {
       setPayMsg("Payment succeeded, but failed to update balance. Please contact support.");
       console.error("post-success update error", e);
@@ -684,7 +740,7 @@ export default function ProfileSettingsPage() {
                     }}
                   >
                     <div style={{ fontWeight: 700 }}>{p.label}</div>
-                    <div style={{ opacity: 0.9 }}>${p.price} USD</div>
+                    <div style={{ opacity: 0.9 }}>{fmtUsd(p.price)}</div>
                     <div style={{ fontSize: 12, opacity: 0.8 }}>${perHour}/hr</div>
                   </button>
                 );
@@ -693,7 +749,7 @@ export default function ProfileSettingsPage() {
 
             <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
               Selected: <strong>{selectedPkg.hours}h</strong> for{" "}
-              <strong>${selectedPkg.price} USD</strong> (${(selectedPkg.price/selectedPkg.hours).toFixed(2)}/hr)
+              <strong>{fmtUsd(selectedPkg.price)}</strong> (${(selectedPkg.price/selectedPkg.hours).toFixed(2)}/hr)
             </div>
 
             {/* payment method */}
@@ -757,7 +813,7 @@ export default function ProfileSettingsPage() {
                     window.location.href = `/api/paypal/checkout?package=${selectedPkg.id}`;
                   }}
                 >
-                  Pay ${selectedPkg.price} USD with PayPal
+                  Pay {fmtUsd(selectedPkg.price)} with PayPal
                 </button>
               ) : (
                 <button
@@ -765,12 +821,50 @@ export default function ProfileSettingsPage() {
                   onClick={handleCardPay}
                   disabled={payBusy || !STRIPE_PK}
                 >
-                  {payBusy ? "Processing…" : `Pay $${selectedPkg.price} USD`}
+                  {payBusy ? "Processing…" : `Pay ${fmtUsd(selectedPkg.price)}`}
                 </button>
               )}
             </div>
 
-            {payMsg && <div style={{ ...muted, marginTop: 8 }}>{payMsg}</div>}
+            {payMsg && (
+              <div style={{ ...muted, marginTop: 8 }}>
+                {payMsg}
+              </div>
+            )}
+
+            {/* Purchase history */}
+            <div style={{ marginTop: 16 }}>
+              <CardSubTitle>Purchase history (last 5)</CardSubTitle>
+              {purchases.length === 0 ? (
+                <div style={{ ...muted, marginTop: 6 }}>No purchases yet.</div>
+              ) : (
+                <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 0", display: "grid", gap: 8 }}>
+                  {purchases.map((p) => (
+                    <li
+                      key={p.id}
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        padding: "10px 12px",
+                        borderRadius: 8,
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        background: "rgba(255,255,255,0.03)",
+                      }}
+                    >
+                      <div style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
+                        <span style={{ fontWeight: 700 }}>{p.hours}h</span>
+                        <span style={{ ...muted }}>• {p.method}</span>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div>{fmtUsd(p.amountUsd)}</div>
+                        <div style={{ ...muted, fontSize: 11 }}>{fmtDate(p.createdAt || undefined)}</div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
 
             <div style={{ ...muted, marginTop: 10 }}>
               After a successful payment, purchased minutes will be added to your balance automatically.
@@ -828,6 +922,10 @@ function StripeConfirmSection({
       if (result.error) {
         onDone(false, { message: result.error.message || "Card error." });
       } else if (result.paymentIntent && result.paymentIntent.status === "succeeded") {
+        // Clear the card UI so the field is empty post-success
+        try {
+          (card as any).clear?.();
+        } catch {}
         onDone(true, {
           hours,
           paymentId: result.paymentIntent.id,
