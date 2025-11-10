@@ -1,8 +1,9 @@
 // src/app/tutors/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import { auth, db } from "@/lib/firebase";
 import {
   collection,
   onSnapshot,
@@ -10,10 +11,20 @@ import {
   where,
   DocumentData,
   Timestamp,
+  doc,
+  getDoc,
+  setDoc,
+  runTransaction,
+  serverTimestamp,
+  getDocs,
 } from "firebase/firestore";
-import { db } from "@/lib/firebase";
 
-type TutorInfo = {
+type Role = "student" | "tutor" | "admin";
+type DayKey = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+type TimeRange = { start: string; end: string }; // "HH:mm"
+type Availability = Record<DayKey, TimeRange[]>;
+
+type TutorRow = {
   uid: string;
   displayName: string;
   email: string;
@@ -23,8 +34,39 @@ type TutorInfo = {
   lastActiveAt?: number; // ms epoch
 };
 
+type TutorDoc = {
+  displayName?: string;
+  email?: string;
+  roomId?: string;
+  availability?: Availability;
+  timezone?: string;
+};
+
+type Booking = {
+  id: string;
+  tutorId: string;
+  tutorName?: string;
+  tutorEmail?: string;
+  studentId: string;
+  studentName?: string;
+  studentEmail?: string;
+  startTime: number; // ms
+  durationMin: number; // always 60 here
+  roomId?: string;
+  createdAt?: any;
+};
+
 // consider rows stale after 90s and hide them
 const STALE_MS = 90_000;
+const DAYS: { key: DayKey; label: string }[] = [
+  { key: "mon", label: "Mon" },
+  { key: "tue", label: "Tue" },
+  { key: "wed", label: "Wed" },
+  { key: "thu", label: "Thu" },
+  { key: "fri", label: "Fri" },
+  { key: "sat", label: "Sat" },
+  { key: "sun", label: "Sun" },
+];
 
 /** Normalize Firestore timestamp-ish values into a ms epoch number */
 function tsToMs(v: unknown): number | undefined {
@@ -48,8 +90,8 @@ function tsToMs(v: unknown): number | undefined {
   return undefined;
 }
 
-/** Direct mapping of users/{uid}.status -> UI label */
-function deriveStatusLabel(t: TutorInfo) {
+/** status -> UI label */
+function deriveStatusLabel(t: TutorRow) {
   const s = (t.statusRaw || "offline") as "waiting" | "busy" | "offline";
   return {
     label: s === "waiting" ? "Waiting" : s === "busy" ? "Busy" : "Offline",
@@ -58,25 +100,90 @@ function deriveStatusLabel(t: TutorInfo) {
   };
 }
 
+/** Monday 00:00 of the week containing date `d` (local) */
+function startOfWeek(d: Date) {
+  const copy = new Date(d);
+  const day = copy.getDay(); // 0=Sun..6=Sat
+  const diff = (day === 0 ? -6 : 1 - day); // move to Monday
+  copy.setDate(copy.getDate() + diff);
+  copy.setHours(0, 0, 0, 0);
+  return copy;
+}
+
+/** Add days to a date (does not mutate input) */
+function addDays(d: Date, days: number) {
+  const c = new Date(d);
+  c.setDate(c.getDate() + days);
+  return c;
+}
+
+/** "HH:mm" -> minutes from midnight */
+function hmToMinutes(hhmm: string): number {
+  const [h, m] = hhmm.split(":").map((x) => parseInt(x, 10));
+  return h * 60 + m;
+}
+
+/** Clamp to 60-min slots on the hour within [start,end) */
+function generateHourStarts(startHHMM: string, endHHMM: string): number[] {
+  const s = hmToMinutes(startHHMM);
+  const e = hmToMinutes(endHHMM);
+  const first = Math.ceil(s / 60) * 60;
+  const lastStart = e - 60;
+  const out: number[] = [];
+  for (let m = first; m <= lastStart; m += 60) out.push(m);
+  return out;
+}
+
+/** format time in a specific timezone (falls back to local) */
+function fmtTime(ms: number, tz?: string) {
+  const opts: Intl.DateTimeFormatOptions = {
+    hour: "numeric",
+    minute: "2-digit",
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  };
+  try {
+    return new Intl.DateTimeFormat(undefined, tz ? { ...opts, timeZone: tz } : opts).format(ms);
+  } catch {
+    return new Intl.DateTimeFormat(undefined, opts).format(ms);
+  }
+}
+
+/** Build a Date at local timezone from y/m/d and minutes since midnight */
+function dateAtLocal(y: number, m: number, d: number, minutes: number) {
+  const dt = new Date(y, m, d, Math.floor(minutes / 60), minutes % 60, 0, 0);
+  return dt;
+}
+
 export default function TutorsLobbyPage() {
   const router = useRouter();
-  const [tutors, setTutors] = useState<TutorInfo[]>([]);
+  const [tutors, setTutors] = useState<TutorRow[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // modal state
+  const [modalOpen, setModalOpen] = useState(false);
+  const [activeTutorId, setActiveTutorId] = useState<string | null>(null);
+  const [activeTutor, setActiveTutor] = useState<(TutorDoc & { uid: string }) | null>(null);
+  const [activeWeekStart, setActiveWeekStart] = useState<Date>(startOfWeek(new Date()));
+  const [bookedStarts, setBookedStarts] = useState<number[]>([]); // ms startTimes for active tutor in visible week
+  const [bookingBusy, setBookingBusy] = useState(false);
+  const [bookingMsg, setBookingMsg] = useState("");
+
+  // Subscribe to all tutors
   useEffect(() => {
-    // Subscribe to all tutors
-    const q = query(collection(db, "users"), where("role", "==", "tutor"));
+    const qRef = query(collection(db, "users"), where("role", "==", "tutor"));
 
     const unsub = onSnapshot(
-      q,
+      qRef,
       (snap) => {
         const now = Date.now();
-        const base: TutorInfo[] = [];
+        const base: TutorRow[] = [];
 
         snap.forEach((d) => {
           const data = d.data() as DocumentData;
 
-          const item: TutorInfo = {
+          const item: TutorRow = {
             uid: d.id,
             displayName: data.displayName || "Tutor",
             email: data.email || "",
@@ -86,15 +193,12 @@ export default function TutorsLobbyPage() {
             lastActiveAt: tsToMs(data.lastActiveAt),
           };
 
-          // Freshness filter: only show tutors with a recent heartbeat
           const fresh =
-            typeof item.lastActiveAt === "number" &&
-            now - item.lastActiveAt < STALE_MS;
+            typeof item.lastActiveAt === "number" && now - item.lastActiveAt < STALE_MS;
 
           if (fresh) base.push(item);
         });
 
-        // Sort: Waiting first, then Busy, then Offline; then by name
         const ranked = base.slice().sort((a, b) => {
           const sa = deriveStatusLabel(a);
           const sb = deriveStatusLabel(b);
@@ -118,10 +222,207 @@ export default function TutorsLobbyPage() {
     return () => unsub();
   }, []);
 
+  // Open modal for a tutor (load availability + timezone + bookings for week)
+  const openTutorModal = useCallback(async (tutorId: string) => {
+    setBookingMsg("");
+    setActiveTutorId(tutorId);
+    setModalOpen(true);
+
+    // fetch full tutor doc
+    const docSnap = await getDoc(doc(db, "users", tutorId));
+    const data = (docSnap.exists() ? (docSnap.data() as TutorDoc) : {}) as TutorDoc;
+    const td: TutorDoc & { uid: string } = {
+      uid: tutorId,
+      displayName: data.displayName || "Tutor",
+      email: data.email || "",
+      roomId: data.roomId || "",
+      availability: (data.availability as Availability) || {
+        mon: [],
+        tue: [],
+        wed: [],
+        thu: [],
+        fri: [],
+        sat: [],
+        sun: [],
+      },
+      timezone: data.timezone || undefined,
+    };
+    setActiveTutor(td);
+
+    // load booked starts for visible week
+    const weekStart = startOfWeek(new Date());
+    await loadBookedSlots(tutorId, weekStart);
+    setActiveWeekStart(weekStart);
+  }, []);
+
+  // Load already-booked startTime values for given week (for the active tutor)
+  const loadBookedSlots = useCallback(async (tutorId: string, weekStart: Date) => {
+    const weekEnd = addDays(weekStart, 7);
+    // naive range query on startTime; filter client-side on tutorId (or add composite index if needed)
+    const qRef = query(collection(db, "bookings"), where("tutorId", "==", tutorId));
+    const snap = await getDocs(qRef);
+    const list: number[] = [];
+    snap.forEach((ds) => {
+      const d = ds.data() as any;
+      const st = Number(d.startTime || 0);
+      if (st >= +weekStart && st < +weekEnd) list.push(st);
+    });
+    setBookedStarts(list);
+  }, []);
+
+  // Week navigation
+  const goPrevWeek = useCallback(async () => {
+    if (!activeTutorId) return;
+    const prev = addDays(activeWeekStart, -7);
+    setActiveWeekStart(prev);
+    await loadBookedSlots(activeTutorId, prev);
+  }, [activeWeekStart, activeTutorId, loadBookedSlots]);
+
+  const goNextWeek = useCallback(async () => {
+    if (!activeTutorId) return;
+    const next = addDays(activeWeekStart, 7);
+    setActiveWeekStart(next);
+    await loadBookedSlots(activeTutorId, next);
+  }, [activeWeekStart, activeTutorId, loadBookedSlots]);
+
+  // Build calendar slots (1h) from availability for the visible week
+  const calendarColumns = useMemo(() => {
+    if (!activeTutor) return [];
+    const tz = activeTutor.timezone;
+    const avail = activeTutor.availability || {
+      mon: [],
+      tue: [],
+      wed: [],
+      thu: [],
+      fri: [],
+      sat: [],
+      sun: [],
+    };
+
+    const cols: {
+      key: DayKey;
+      label: string;
+      date: Date;
+      slots: { startMs: number; label: string; disabled: boolean }[];
+    }[] = [];
+
+    const now = Date.now();
+
+    for (let i = 0; i < 7; i++) {
+      const dayDate = addDays(activeWeekStart, i);
+      const dow = (["sun", "mon", "tue", "wed", "thu", "fri", "sat"][
+        dayDate.getDay()
+      ] || "mon") as DayKey;
+      const key = dow;
+      const label = DAYS.find((d) => d.key === key)?.label || "Day";
+      const Y = dayDate.getFullYear();
+      const M = dayDate.getMonth(); // 0-based
+      const D = dayDate.getDate();
+
+      const slots: { startMs: number; label: string; disabled: boolean }[] = [];
+
+      for (const rng of avail[key] || []) {
+        const starts = generateHourStarts(rng.start, rng.end);
+        for (const mins of starts) {
+          // Build local date at student's local tz; for most users (incl. you) this matches tutor tz
+          const dt = dateAtLocal(Y, M, D, mins);
+          const ms = +dt;
+          const taken = bookedStarts.includes(ms);
+          const past = ms <= now;
+          const disabled = taken || past;
+          const labelSlot = fmtTime(ms, tz);
+          slots.push({ startMs: ms, label: labelSlot, disabled });
+        }
+      }
+
+      // sort by ms
+      slots.sort((a, b) => a.startMs - b.startMs);
+
+      cols.push({ key, label, date: dayDate, slots });
+    }
+
+    return cols;
+  }, [activeTutor, activeWeekStart, bookedStarts]);
+
+  // Create 1-hour booking at a given start time
+  const bookSlot = useCallback(
+    async (slotStartMs: number) => {
+      setBookingMsg("");
+      setBookingBusy(true);
+      try {
+        const user = auth.currentUser;
+        if (!user) {
+          setBookingMsg("Please sign in as a student to book.");
+          setBookingBusy(false);
+          return;
+        }
+        // get student profile for name/email
+        const stuDoc = await getDoc(doc(db, "users", user.uid));
+        const stuData = (stuDoc.exists() ? stuDoc.data() : {}) as any;
+        const role = (stuData.role as Role) || "student";
+        if (role !== "student") {
+          setBookingMsg("Only student accounts can book a session.");
+          setBookingBusy(false);
+          return;
+        }
+
+        if (!activeTutor) {
+          setBookingMsg("No tutor selected.");
+          setBookingBusy(false);
+          return;
+        }
+
+        const durationMin = 60;
+        const bookingId = `${activeTutor.uid}_${slotStartMs}`;
+        const bookingRef = doc(db, "bookings", bookingId);
+
+        // Prevent double-booking using a transaction (fail if doc already exists)
+        await runTransaction(db, async (tx) => {
+          const existing = await tx.get(bookingRef);
+          if (existing.exists()) {
+            throw new Error("That time has just been booked by someone else.");
+          }
+          // Minimal overlap guard: ensure no other booking by same tutor at same minute
+          // (your dashboards list bookings by tutorId; this ID strategy is strict per-start)
+          tx.set(bookingRef, {
+            tutorId: activeTutor.uid,
+            tutorName: activeTutor.displayName || "Tutor",
+            tutorEmail: activeTutor.email || "",
+            studentId: user.uid,
+            studentName:
+              stuData.displayName ||
+              `${(stuData.firstName || "").trim()} ${(stuData.lastName || "").trim()}`.trim() ||
+              user.email?.split("@")[0] ||
+              "Student",
+            studentEmail: user.email || "",
+            startTime: slotStartMs,
+            durationMin,
+            roomId: activeTutor.roomId || "",
+            createdAt: serverTimestamp(),
+          } as Booking);
+        });
+
+        setBookingMsg("Booked ✓ This will appear on both dashboards.");
+        // Refresh booked slots in modal
+        if (activeTutorId) {
+          await loadBookedSlots(activeTutorId, activeWeekStart);
+        }
+      } catch (err: any) {
+        console.error("[bookSlot]", err);
+        setBookingMsg(err?.message || "Could not book this slot.");
+      } finally {
+        setBookingBusy(false);
+        setTimeout(() => setBookingMsg(""), 2500);
+      }
+    },
+    [activeTutor, activeTutorId, activeWeekStart, loadBookedSlots]
+  );
+
+  // Cards (kept from your original with a “View Availability” button)
   const cards = useMemo(() => {
     return tutors.map((t) => {
       const d = deriveStatusLabel(t);
-      const canJoin = d.online && !d.busy && Boolean(t.roomId); // only instant join if Waiting
+      const canJoin = d.online && !d.busy && Boolean(t.roomId); // instant join if Waiting
 
       const chip =
         d.label === "Waiting"
@@ -144,7 +445,7 @@ export default function TutorsLobbyPage() {
             display: "flex",
             flexDirection: "column",
             gap: 12,
-            minHeight: 150,
+            minHeight: 170,
           }}
         >
           {/* header row */}
@@ -242,7 +543,7 @@ export default function TutorsLobbyPage() {
             )}
           </div>
 
-          {/* action button */}
+          {/* actions */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             <button
               disabled={!t.roomId}
@@ -268,18 +569,36 @@ export default function TutorsLobbyPage() {
                   ? "Tutor does not have a room configured"
                   : canJoin
                   ? "Enter this tutor’s room"
-                  : d.label === "Busy"
+                  : deriveStatusLabel(t).label === "Busy"
                   ? "They’re helping someone—use queue on the dashboard"
                   : "Tutor is offline right now"
               }
             >
-              {canJoin ? "Join Room" : d.label === "Busy" ? "Join Queue" : "Join (offline)"}
+              {canJoin ? "Join Room" : deriveStatusLabel(t).label === "Busy" ? "Join Queue" : "Join (offline)"}
+            </button>
+
+            <button
+              onClick={() => openTutorModal(t.uid)}
+              style={{
+                padding: "10px 14px",
+                borderRadius: 10,
+                background: "#1f2937",
+                border: "1px solid #3b3b3b",
+                color: "#fff",
+                fontSize: 14,
+                lineHeight: 1.2,
+                fontWeight: 500,
+                cursor: "pointer",
+              }}
+              title="See weekly availability and book a 1-hour session"
+            >
+              View Availability
             </button>
           </div>
         </div>
       );
     });
-  }, [tutors, router]);
+  }, [tutors, router, openTutorModal]);
 
   return (
     <main
@@ -359,7 +678,8 @@ export default function TutorsLobbyPage() {
           </div>
           <div style={{ fontSize: 14, lineHeight: 1.4, opacity: 0.8, color: "#fff", marginTop: 8 }}>
             Pick a tutor below. If they’re <b>Waiting</b>, you’ll join their 1-on-1 room instantly.
-            If they’re <b>Busy</b>, you’ll be placed in queue and they’ll pull you in next.
+            If they’re <b>Busy</b>, you’ll be placed in queue and they’ll pull you in next. For scheduled sessions,
+            click <b>View Availability</b> to book a 1-hour appointment.
           </div>
         </div>
 
@@ -412,6 +732,237 @@ export default function TutorsLobbyPage() {
           Online math tutoring for grades 4–12
         </div>
       </footer>
+
+      {/* Availability Modal */}
+      {modalOpen && activeTutor && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.65)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 50,
+          }}
+          onClick={() => {
+            setModalOpen(false);
+            setActiveTutorId(null);
+            setActiveTutor(null);
+            setBookedStarts([]);
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(1080px, 96vw)",
+              maxHeight: "90vh",
+              overflow: "hidden",
+              borderRadius: 12,
+              border: "1px solid rgba(255,255,255,0.15)",
+              background:
+                "linear-gradient(180deg, rgba(255,255,255,0.07) 0%, rgba(20,20,20,0.6) 100%)",
+              boxShadow: "0 40px 120px rgba(0,0,0,0.8)",
+              color: "#fff",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            {/* modal header */}
+            <div
+              style={{
+                padding: "14px 16px",
+                borderBottom: "1px solid rgba(255,255,255,0.12)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+                flexWrap: "wrap",
+              }}
+            >
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 16, fontWeight: 600 }}>
+                  {activeTutor.displayName || "Tutor"} — Book a 1-hour session
+                </div>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>
+                  Times shown in {activeTutor.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone}
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  onClick={goPrevWeek}
+                  style={navButtonStyle}
+                  title="Previous week"
+                >
+                  ← Prev
+                </button>
+                <div
+                  style={{
+                    padding: "8px 10px",
+                    border: "1px solid rgba(255,255,255,0.15)",
+                    borderRadius: 8,
+                    fontSize: 12,
+                    background: "rgba(255,255,255,0.04)",
+                  }}
+                >
+                  Week of{" "}
+                  {new Intl.DateTimeFormat(undefined, {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                  }).format(activeWeekStart)}
+                </div>
+                <button
+                  onClick={goNextWeek}
+                  style={navButtonStyle}
+                  title="Next week"
+                >
+                  Next →
+                </button>
+                <button
+                  onClick={() => {
+                    const now = startOfWeek(new Date());
+                    setActiveWeekStart(now);
+                    if (activeTutorId) loadBookedSlots(activeTutorId, now);
+                  }}
+                  style={navButtonStyle}
+                  title="Jump to current week"
+                >
+                  Today
+                </button>
+              </div>
+
+              <button
+                onClick={() => {
+                  setModalOpen(false);
+                  setActiveTutorId(null);
+                  setActiveTutor(null);
+                  setBookedStarts([]);
+                }}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: 8,
+                  border: "1px solid rgba(255,255,255,0.2)",
+                  background: "rgba(255,255,255,0.06)",
+                  color: "#fff",
+                  cursor: "pointer",
+                }}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* calendar */}
+            <div
+              style={{
+                padding: 16,
+                overflow: "auto",
+              }}
+            >
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(7, minmax(140px, 1fr))",
+                  gap: 12,
+                  minWidth: 720,
+                }}
+              >
+                {calendarColumns.map((col) => (
+                  <div
+                    key={col.key + +col.date}
+                    style={{
+                      background: "rgba(255,255,255,0.04)",
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      borderRadius: 10,
+                      padding: 10,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 8,
+                      minHeight: 180,
+                    }}
+                  >
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>
+                      {col.label} {col.date.getMonth() + 1}/{col.date.getDate()}
+                    </div>
+
+                    {col.slots.length === 0 ? (
+                      <div style={{ fontSize: 12, opacity: 0.6 }}>No availability</div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {col.slots.map((s) => (
+                          <button
+                            key={s.startMs}
+                            disabled={s.disabled || bookingBusy}
+                            onClick={() => bookSlot(s.startMs)}
+                            style={{
+                              padding: "8px 8px",
+                              borderRadius: 8,
+                              textAlign: "left",
+                              border: s.disabled
+                                ? "1px solid rgba(255,255,255,0.15)"
+                                : "1px solid #4ade80",
+                              background: s.disabled
+                                ? "rgba(255,255,255,0.05)"
+                                : "linear-gradient(180deg, rgba(34,197,94,0.25), rgba(34,197,94,0.15))",
+                              color: s.disabled ? "rgba(255,255,255,0.6)" : "#eafff0",
+                              cursor: s.disabled ? "not-allowed" : "pointer",
+                              fontSize: 12,
+                              lineHeight: 1.2,
+                            }}
+                            title={s.disabled ? "Unavailable" : "Book this 1-hour slot"}
+                          >
+                            {s.label}
+                            {bookedStarts.includes(s.startMs) ? " — Booked" : ""}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* modal footer */}
+            <div
+              style={{
+                padding: "10px 16px",
+                borderTop: "1px solid rgba(255,255,255,0.12)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+                flexWrap: "wrap",
+              }}
+            >
+              <div style={{ fontSize: 12, color: bookingMsg ? "#a7f3d0" : "rgba(255,255,255,0.6)" }}>
+                {bookingMsg || "Select a green time to book a 1-hour session."}
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ fontSize: 11, opacity: 0.7 }}>
+                  Bookings appear on your dashboard and the tutor’s dashboard.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
+
+// small styles
+const navButtonStyle: React.CSSProperties = {
+  padding: "8px 10px",
+  borderRadius: 8,
+  background: "#1f2937",
+  border: "1px solid #3b3b3b",
+  color: "#fff",
+  fontSize: 12,
+  lineHeight: 1.2,
+  cursor: "pointer",
+};
