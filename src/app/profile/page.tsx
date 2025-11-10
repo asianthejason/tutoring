@@ -37,6 +37,8 @@ import {
   useStripe,
 } from "@stripe/react-stripe-js";
 
+/* ===================== Types ===================== */
+
 type Role = "student" | "tutor" | "admin";
 type DayKey = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
 type TimeRange = { start: string; end: string }; // "HH:mm"
@@ -73,6 +75,8 @@ type PaymentError = { message: string };
 function isPaymentSuccess(p: unknown): p is PaymentSuccess {
   return !!p && typeof p === "object" && "hours" in (p as any) && "paymentId" in (p as any);
 }
+
+/* ===================== Constants ===================== */
 
 const DAYS: { key: DayKey; label: string }[] = [
   { key: "mon", label: "Mon" },
@@ -111,7 +115,8 @@ const STUDENT_PACKAGES: {
   { id: "40h", label: "40 hours",hours: 40, price: 1600 },
 ];
 
-// ---------- Helpers ----------
+/* ===================== Helpers ===================== */
+
 function guessTimezone() {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -144,7 +149,8 @@ function fmtDate(d?: Date | null) {
   });
 }
 
-// ---------- Main component ----------
+/* ===================== Main Component ===================== */
+
 export default function ProfileSettingsPage() {
   const router = useRouter();
 
@@ -286,7 +292,8 @@ export default function ProfileSettingsPage() {
     }
   }
 
-  // ---------- Save handlers ----------
+  /* ===================== Save Handlers ===================== */
+
   async function saveStudentProfile() {
     if (!uid) return;
     setSaving(true);
@@ -313,7 +320,6 @@ export default function ProfileSettingsPage() {
     }
   }
 
-  // TUTOR: save tutor details + availability together
   async function saveTutorDetails() {
     if (!uid) return;
     setSaving(true);
@@ -342,7 +348,8 @@ export default function ProfileSettingsPage() {
     }
   }
 
-  // ---------- Password ----------
+  /* ===================== Password ===================== */
+
   async function handleChangePassword() {
     setPwMessage("");
     const user = auth.currentUser;
@@ -369,7 +376,8 @@ export default function ProfileSettingsPage() {
     }
   }
 
-  // ---------- Availability UI helpers ----------
+  /* ===================== Availability helpers ===================== */
+
   function addTimeRange(day: DayKey) {
     setAvailability((prev) => ({ ...prev, [day]: [...prev[day], { start: "16:00", end: "17:00" }] }));
   }
@@ -388,7 +396,8 @@ export default function ProfileSettingsPage() {
     });
   }
 
-  // ---------- Card Pay handler (Stripe only) ----------
+  /* ===================== Stripe (card only) ===================== */
+
   const [confirmParams, setConfirmParams] = useState<{
     clientSecret: string;
     hours: number;
@@ -425,14 +434,13 @@ export default function ProfileSettingsPage() {
         hours: Number(json.hours),
         amount: Number(json.amount),
       });
-      setConfirmNow((c) => c + 1); // trigger confirm in the child
+      setConfirmNow((c) => c + 1);
     } catch (e: any) {
       setPayMsg(e?.message || "Payment error.");
       setPayBusy(false);
     }
   }
 
-  // After success, credit minutes & log payment, clear fields, update history
   async function onCardPaymentSucceeded(hoursPurchased: number, paymentId: string) {
     if (!uid) return;
     try {
@@ -451,16 +459,10 @@ export default function ProfileSettingsPage() {
         profileUpdatedAt: serverTimestamp() as any,
       });
 
-      // update local state optimistically
+      // optimistic UI
       setMinutesBalance((m) => (m || 0) + hoursPurchased * 60);
       setPurchases((prev) => [
-        {
-          id: paymentId,
-          hours: hoursPurchased,
-          amountUsd: selectedPkg.price,
-          method: "card",
-          createdAt: new Date(),
-        },
+        { id: paymentId, hours: hoursPurchased, amountUsd: selectedPkg.price, method: "card", createdAt: new Date() },
         ...prev,
       ]);
       setPayMsg("Payment successful ✓ Minutes added to your balance.");
@@ -474,7 +476,8 @@ export default function ProfileSettingsPage() {
     }
   }
 
-  // ---------- Layout ----------
+  /* ===================== Layout ===================== */
+
   const headerRight = useMemo(
     () => (
       <div style={{ display: "flex", gap: 8 }}>
@@ -518,15 +521,14 @@ export default function ProfileSettingsPage() {
 
   return (
     <main style={pageShell}>
-      {/* Header */}
       <header style={headerBar}>
         <Brand />
         {headerRight}
       </header>
 
-      {/* Body */}
-      <section style={bodyGrid}>
-        {/* Left column */}
+      {/* 3-column grid always. For narrow screens it gracefully stacks. */}
+      <section style={bodyGrid3}>
+        {/* Column 1: Profile (both roles) */}
         <Card>
           <CardTitle>Profile</CardTitle>
 
@@ -658,82 +660,36 @@ export default function ProfileSettingsPage() {
           </div>
         </Card>
 
-        {/* Middle column */}
-        {role === "tutor" ? (
-          <Card>
-            <CardTitle>Tutor Availability</CardTitle>
-            <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
-              Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or more
-              ranges per day (24-hour format).
-            </div>
-            <div style={availGrid}>
-              {DAYS.map(({ key, label }) => (
-                <div key={key} style={availCol}>
-                  <div style={{ fontSize: 12, color: "#fff", marginBottom: 6 }}>{label}</div>
-                  {(availability[key] ?? []).map((r, i) => (
-                    <div key={i} style={rangeRow}>
-                      <input
-                        type="time"
-                        value={r.start}
-                        onChange={(e) => updateRange(key, i, "start", e.target.value)}
-                        style={timeInput}
-                      />
-                      <span style={{ color: "#888" }}>–</span>
-                      <input
-                        type="time"
-                        value={r.end}
-                        onChange={(e) => updateRange(key, i, "end", e.target.value)}
-                        style={timeInput}
-                      />
-                      <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>
-                        Remove
-                      </button>
-                    </div>
-                  ))}
-                  <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
-                    + Add time
-                  </button>
-                </div>
-              ))}
-            </div>
-            <div style={row}>
-              <button onClick={saveTutorDetails} style={primaryBtn} disabled={saving}>
-                Save Tutor Details & Availability
-              </button>
-              {saveMsg && <div style={muted}>{saveMsg}</div>}
-            </div>
-          </Card>
-        ) : (
-          <Card>
-            <CardTitle>Change Password</CardTitle>
-            <Field label="Current password">
-              <input
-                type="password"
-                value={currPw}
-                onChange={(e) => setCurrPw(e.target.value)}
-                style={input}
-                placeholder="Enter your current password"
-              />
-            </Field>
-            <Field label="New password">
-              <input
-                type="password"
-                value={newPw}
-                onChange={(e) => setNewPw(e.target.value)}
-                style={input}
-                placeholder="At least 6 characters"
-              />
-            </Field>
-            <div style={row}>
-              <button onClick={handleChangePassword} style={primaryBtn}>
-                Update Password
-              </button>
-              {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
-            </div>
-          </Card>
-        )}
+        {/* Column 2: Change Password (always) */}
+        <Card>
+          <CardTitle>Change Password</CardTitle>
+          <Field label="Current password">
+            <input
+              type="password"
+              value={currPw}
+              onChange={(e) => setCurrPw(e.target.value)}
+              style={input}
+              placeholder="Enter your current password"
+            />
+          </Field>
+          <Field label="New password">
+            <input
+              type="password"
+              value={newPw}
+              onChange={(e) => setNewPw(e.target.value)}
+              style={input}
+              placeholder="At least 6 characters"
+            />
+          </Field>
+          <div style={row}>
+            <button onClick={handleChangePassword} style={primaryBtn}>
+              Update Password
+            </button>
+            {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
+          </div>
+        </Card>
 
-        {/* Right column */}
+        {/* Column 3: Students = Payments | Tutors = Availability */}
         {role === "student" ? (
           <Card>
             <CardTitle>Hours & Payments</CardTitle>
@@ -790,7 +746,7 @@ export default function ProfileSettingsPage() {
               <strong>{fmtUsd(selectedPkg.price)}</strong> (${(selectedPkg.price/selectedPkg.hours).toFixed(2)}/hr)
             </div>
 
-            {/* Card form (Stripe only) */}
+            {/* Stripe card-only form */}
             {!STRIPE_PK ? (
               <div style={{ ...muted, marginBottom: 10 }}>
                 Stripe key missing. Set <code>NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY</code>.
@@ -836,13 +792,9 @@ export default function ProfileSettingsPage() {
               </button>
             </div>
 
-            {payMsg && (
-              <div style={{ ...muted, marginTop: 8 }}>
-                {payMsg}
-              </div>
-            )}
+            {payMsg && <div style={{ ...muted, marginTop: 8 }}>{payMsg}</div>}
 
-            {/* Purchase history (paginated) */}
+            {/* Purchase history */}
             <div style={{ marginTop: 16 }}>
               <CardSubTitle>Purchase history</CardSubTitle>
               {purchases.length === 0 ? (
@@ -892,14 +844,66 @@ export default function ProfileSettingsPage() {
             </div>
           </Card>
         ) : (
-          <div style={{ display: "none" }} />
+          <Card>
+            <CardTitle>Tutor Availability</CardTitle>
+            <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
+              Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or more
+              ranges per day (24-hour format).
+            </div>
+
+            {/* Availability day grid */}
+            <div style={availGridDays}>
+              {DAYS.map(({ key, label }) => (
+                <div key={key} style={availDayCard}>
+                  <div style={{ fontSize: 12, color: "#fff", marginBottom: 8, fontWeight: 700 }}>{label}</div>
+
+                  {(availability[key] ?? []).length === 0 && (
+                    <div style={{ ...muted, marginBottom: 6 }}>No ranges</div>
+                  )}
+
+                  {(availability[key] ?? []).map((r, i) => (
+                    <div key={i} style={rangeRowGrid}>
+                      <input
+                        type="time"
+                        value={r.start}
+                        onChange={(e) => updateRange(key, i, "start", e.target.value)}
+                        style={timeInput}
+                      />
+                      <span style={{ color: "#888", textAlign: "center" }}>–</span>
+                      <input
+                        type="time"
+                        value={r.end}
+                        onChange={(e) => updateRange(key, i, "end", e.target.value)}
+                        style={timeInput}
+                      />
+                      <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+
+                  <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
+                    + Add time
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <div style={row}>
+              <button onClick={saveTutorDetails} style={primaryBtn} disabled={saving}>
+                Save Tutor Details & Availability
+              </button>
+              {saveMsg && <div style={muted}>{saveMsg}</div>}
+            </div>
+          </Card>
         )}
       </section>
     </main>
   );
 }
 
-/** ---- Stripe confirmation sub-component (inside <Elements>) ---- */
+/* ===================== Stripe sub-component ===================== */
+
 function StripeConfirmSection({
   confirmNow,
   params,
@@ -914,7 +918,6 @@ function StripeConfirmSection({
   const stripe = useStripe();
   const elements = useElements();
 
-  // When confirmNow changes and we have params, attempt payment
   useEffect(() => {
     (async () => {
       if (!params || !stripe || !elements || !confirmNow) return;
@@ -930,23 +933,15 @@ function StripeConfirmSection({
       const result = await stripe.confirmCardPayment(clientSecret, {
         payment_method: {
           card,
-          billing_details: {
-            name: cardholder || undefined,
-          },
+          billing_details: { name: cardholder || undefined },
         },
       });
 
       if (result.error) {
         onDone(false, { message: result.error.message || "Card error." });
       } else if (result.paymentIntent && result.paymentIntent.status === "succeeded") {
-        // Clear the card UI so the field is empty post-success
-        try {
-          (card as any).clear?.();
-        } catch {}
-        onDone(true, {
-          hours,
-          paymentId: result.paymentIntent.id,
-        });
+        try { (card as any).clear?.(); } catch {}
+        onDone(true, { hours, paymentId: result.paymentIntent.id });
       } else {
         onDone(false, { message: "Payment not completed." });
       }
@@ -957,17 +952,13 @@ function StripeConfirmSection({
   return (
     <div style={{ marginBottom: 10 }}>
       <div style={{ ...input, padding: 12 }}>
-        <CardElement
-          options={{
-            style: { base: { color: "#fff", "::placeholder": { color: "#bbb" } } },
-          }}
-        />
+        <CardElement options={{ style: { base: { color: "#fff", "::placeholder": { color: "#bbb" } } } }} />
       </div>
     </div>
   );
 }
 
-/* ----------------- tiny UI helpers ----------------- */
+/* ===================== Tiny UI helpers ===================== */
 
 const pageShell: React.CSSProperties = {
   minHeight: "100vh",
@@ -1007,15 +998,17 @@ function Brand() {
   );
 }
 
-const bodyGrid: React.CSSProperties = {
+/* === 3-column grid (restores tutor layout) === */
+const bodyGrid3: React.CSSProperties = {
   width: "100%",
   maxWidth: 1280,
   margin: "0 auto",
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))",
+  gridTemplateColumns: "repeat(3, minmax(320px, 1fr))",
   gap: 16,
 };
 
+/* Card + Field styling */
 function Card({ children }: { children: React.ReactNode }) {
   return (
     <div
@@ -1102,34 +1095,33 @@ const ghostButton: React.CSSProperties = {
 
 const muted: React.CSSProperties = { color: "#a5b0a9", fontSize: 12 };
 
-const availGrid: React.CSSProperties = {
+/* === Availability layout (no overlap) === */
+const availGridDays: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-  gap: 10,
+  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+  gap: 12,
 };
-
-const availCol: React.CSSProperties = {
+const availDayCard: React.CSSProperties = {
   background: "rgba(0,0,0,0.25)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 8,
+  border: "1px solid rgba(255,255,255,0.12)",
+  borderRadius: 10,
   padding: 10,
+  display: "grid",
+  gap: 8,
 };
-
-const rangeRow: React.CSSProperties = {
-  display: "flex",
+const rangeRowGrid: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(120px,1fr) 20px minmax(120px,1fr) auto",
   alignItems: "center",
   gap: 6,
-  marginBottom: 6,
 };
-
 const timeInput: React.CSSProperties = { ...input, width: "100%", padding: "8px 10px" };
-const smallAddBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12 };
+const smallAddBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12, width: "fit-content" };
 const smallGhostBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12 };
 
 const balanceWrap: React.CSSProperties = {
   border: "1px solid rgba(255,255,255,0.16)",
-  background:
-    "linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))",
+  background: "linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))",
   borderRadius: 12,
   padding: "12px 14px",
   marginBottom: 12,
@@ -1137,3 +1129,5 @@ const balanceWrap: React.CSSProperties = {
   alignItems: "center",
   gap: 4,
 };
+
+/* ===================== END ===================== */
