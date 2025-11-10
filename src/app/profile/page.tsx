@@ -191,7 +191,6 @@ export default function ProfileSettingsPage() {
 
   // payments (student)
   const [selectedPkg, setSelectedPkg] = useState<typeof STUDENT_PACKAGES[number]>(STUDENT_PACKAGES[0]);
-  const [payMethod, setPayMethod] = useState<"paypal"|"card">("card");
   const [cardholder, setCardholder] = useState("");
   const [payBusy, setPayBusy] = useState(false);
   const [payMsg, setPayMsg] = useState("");
@@ -389,7 +388,7 @@ export default function ProfileSettingsPage() {
     });
   }
 
-  // ---------- Card Pay handler ----------
+  // ---------- Card Pay handler (Stripe only) ----------
   const [confirmParams, setConfirmParams] = useState<{
     clientSecret: string;
     hours: number;
@@ -791,78 +790,50 @@ export default function ProfileSettingsPage() {
               <strong>{fmtUsd(selectedPkg.price)}</strong> (${(selectedPkg.price/selectedPkg.hours).toFixed(2)}/hr)
             </div>
 
-            {/* payment method */}
-            <Field label="Payment method">
-              <div style={{ display: "flex", gap: 10 }}>
-                <label style={chip(payMethod === "paypal")} onClick={() => setPayMethod("paypal")}>
-                  <input type="radio" checked={payMethod === "paypal"} readOnly /> PayPal
-                </label>
-                <label style={chip(payMethod === "card")} onClick={() => setPayMethod("card")}>
-                  <input type="radio" checked={payMethod === "card"} readOnly /> Credit / Debit card
-                </label>
+            {/* Card form (Stripe only) */}
+            {!STRIPE_PK ? (
+              <div style={{ ...muted, marginBottom: 10 }}>
+                Stripe key missing. Set <code>NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY</code>.
               </div>
-            </Field>
-
-            {/* Card form (Stripe) */}
-            {payMethod === "card" && (
+            ) : (
               <>
-                {!STRIPE_PK ? (
-                  <div style={{ ...muted, marginBottom: 10 }}>
-                    Stripe key missing. Set <code>NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY</code>.
-                  </div>
-                ) : (
-                  <>
-                    <Field label="Cardholder name">
-                      <input
-                        value={cardholder}
-                        onChange={(e) => setCardholder(e.target.value)}
-                        style={input}
-                        placeholder="Name on card"
-                      />
-                    </Field>
+                <Field label="Cardholder name">
+                  <input
+                    value={cardholder}
+                    onChange={(e) => setCardholder(e.target.value)}
+                    style={input}
+                    placeholder="Name on card"
+                  />
+                </Field>
 
-                    <Elements stripe={stripePromise!} options={{ appearance: { theme: "night" } }}>
-                      <StripeConfirmSection
-                        confirmNow={confirmNow}
-                        params={confirmParams}
-                        cardholder={cardholder}
-                        onDone={(ok, payload) => {
-                          if (ok && isPaymentSuccess(payload)) {
-                            onCardPaymentSucceeded(payload.hours, payload.paymentId);
-                          } else {
-                            const msg = (payload as PaymentError)?.message || "Payment failed.";
-                            setPayMsg(msg);
-                            setPayBusy(false);
-                          }
-                        }}
-                      />
-                    </Elements>
-                  </>
-                )}
+                <Elements stripe={stripePromise!} options={{ appearance: { theme: "night" } }}>
+                  <StripeConfirmSection
+                    confirmNow={confirmNow}
+                    params={confirmParams}
+                    cardholder={cardholder}
+                    onDone={(ok, payload) => {
+                      if (ok && isPaymentSuccess(payload)) {
+                        onCardPaymentSucceeded(payload.hours, payload.paymentId);
+                      } else {
+                        const msg = (payload as PaymentError)?.message || "Payment failed.";
+                        setPayMsg(msg);
+                        setPayBusy(false);
+                      }
+                    }}
+                  />
+                </Elements>
               </>
             )}
 
             {/* Pay button */}
             <div style={{ marginTop: 12 }}>
-              {payMethod === "paypal" ? (
-                <button
-                  style={{ ...primaryBtn, width: "100%" }}
-                  onClick={() => {
-                    // TODO: replace with your PayPal Checkout route
-                    window.location.href = `/api/paypal/checkout?package=${selectedPkg.id}`;
-                  }}
-                >
-                  Pay {fmtUsd(selectedPkg.price)} with PayPal
-                </button>
-              ) : (
-                <button
-                  style={{ ...primaryBtn, width: "100%", opacity: payBusy ? 0.7 : 1 }}
-                  onClick={handleCardPay}
-                  disabled={payBusy || !STRIPE_PK}
-                >
-                  {payBusy ? "Processing…" : `Pay ${fmtUsd(selectedPkg.price)}`}
-                </button>
-              )}
+              <button
+                style={{ ...primaryBtn, width: "100%", opacity: payBusy ? 0.7 : 1 }}
+                onClick={handleCardPay}
+                disabled={payBusy || !STRIPE_PK}
+              >
+                {payBusy ? "Processing…" : `Pay ${fmtUsd(selectedPkg.price)}`}
+              </button>
             </div>
 
             {payMsg && (
@@ -1154,20 +1125,6 @@ const rangeRow: React.CSSProperties = {
 const timeInput: React.CSSProperties = { ...input, width: "100%", padding: "8px 10px" };
 const smallAddBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12 };
 const smallGhostBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12 };
-
-function chip(active: boolean): React.CSSProperties {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    padding: "6px 10px",
-    borderRadius: 999,
-    border: active ? "1px solid #6ecf9a" : "1px solid #444",
-    background: active ? "rgba(110,207,154,0.12)" : "rgba(255,255,255,0.03)",
-    cursor: "pointer",
-    userSelect: "none",
-  };
-}
 
 const balanceWrap: React.CSSProperties = {
   border: "1px solid rgba(255,255,255,0.16)",
