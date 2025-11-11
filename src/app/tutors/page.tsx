@@ -91,11 +91,11 @@ function deriveStatusLabel(t: TutorRow) {
 const ONE_HOUR = 60 * 60 * 1000;
 const DAY_MS = 24 * ONE_HOUR;
 
-function startOfWeek(d: Date) {
+// ——— anchor the grid to SUNDAY (matches the UI you’re showing) ———
+function startOfWeekSunday(d: Date) {
   const copy = new Date(d);
   const day = copy.getDay(); // Sun=0..Sat=6
-  const diff = day === 0 ? -6 : 1 - day; // Monday
-  copy.setDate(copy.getDate() + diff);
+  copy.setDate(copy.getDate() - day); // go back to Sunday
   copy.setHours(0, 0, 0, 0);
   return copy;
 }
@@ -155,7 +155,6 @@ function getYMDInTZ(ms: number, tz: string) {
 
 // weekday (Sun=0..Sat=6) *in a given timezone* for a timestamp
 function getWeekdayInTZ(ms: number, tz: string): number {
-  // take the Y/M/D in tz, then build UTC noon and read its UTC weekday
   const { year, month, day } = getYMDInTZ(ms, tz);
   const noonUtc = Date.UTC(year, month, day, 12, 0, 0, 0);
   return new Date(noonUtc).getUTCDay(); // 0..6
@@ -207,8 +206,8 @@ export default function TutorsLobbyPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [activeTutor, setActiveTutor] = useState<(TutorDoc & { uid: string }) | null>(null);
 
-  // week
-  const [activeWeekStart, setActiveWeekStart] = useState<Date>(startOfWeek(new Date()));
+  // week (SUNDAY anchor)
+  const [activeWeekStart, setActiveWeekStart] = useState<Date>(startOfWeekSunday(new Date()));
 
   // bookings
   const [bookedThisWeek, setBookedThisWeek] = useState<Booking[]>([]);
@@ -228,8 +227,13 @@ export default function TutorsLobbyPage() {
   const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
 
   // debugging
-  const [debug, setDebug] = useState(false);
+  const [debug, setDebug] = useState(true);
   const [debugMsg, setDebugMsg] = useState<string>("");
+  const [debugNumbers, setDebugNumbers] = useState<{
+    chosenStart?: number;
+    chosenEnd?: number;
+    containing?: { startMs: number; endMs: number } | null;
+  }>({});
 
   const [toast, setToast] = useState("");
 
@@ -281,7 +285,7 @@ export default function TutorsLobbyPage() {
     setFormStartHM("");
     setSelectedDayIdx(null);
 
-    const week0 = startOfWeek(new Date());
+    const week0 = startOfWeekSunday(new Date());
     setActiveWeekStart(week0);
 
     const tSnap = await getDoc(doc(db, "users", tutorId));
@@ -387,7 +391,7 @@ export default function TutorsLobbyPage() {
   }, [activeTutor, activeWeekStart, refreshWeekBookings]);
   const jumpToThisWeek = useCallback(async () => {
     if (!activeTutor) return;
-    const nowW = startOfWeek(new Date());
+    const nowW = startOfWeekSunday(new Date());
     setActiveWeekStart(nowW);
     await refreshWeekBookings(activeTutor.uid, nowW);
   }, [activeTutor, refreshWeekBookings]);
@@ -406,7 +410,7 @@ export default function TutorsLobbyPage() {
     const tutorTZ = activeTutor.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
     const now = Date.now();
 
-    // helper: map Sun(0)..Sat(6) -> DayKey
+    // helper: map Sun(0)..Sat(6) -> DayKey (NOTE: our Availability uses keys with 'sun' at the end; create mapping).
     const dowToKey = (dow: number): DayKey =>
       (["sun", "mon", "tue", "wed", "thu", "fri", "sat"][dow] as DayKey);
 
@@ -415,15 +419,14 @@ export default function TutorsLobbyPage() {
     for (let i = 0; i < 7; i++) {
       const dayDateStudent = addDays(activeWeekStart, i);
 
-      // Find what weekday this column corresponds to IN THE TUTOR'S TIMEZONE.
-      // This is the crucial fix: we don’t assume the student’s weekday == tutor’s weekday.
-      const tutorDOW = getWeekdayInTZ(+dayDateStudent, tutorTZ); // 0..6 in tutor tz
+      // Use the TUTOR'S weekday for this column
+      const tutorDOW = getWeekdayInTZ(+dayDateStudent, tutorTZ); // 0..6 (Sun..Sat)
       const key = dowToKey(tutorDOW);
 
       const rangesDef = (activeTutor.availability?.[key] || []) as TimeRange[];
 
-      // Build absolute UTC ranges from tutor wall times
-      const { year, month, day } = getYMDInTZ(+dayDateStudent, tutorTZ); // tutor-local Y/M/D for this column
+      // Build absolute UTC ranges from tutor wall times on the tutor's Y/M/D that corresponds to this column
+      const { year, month, day } = getYMDInTZ(+dayDateStudent, tutorTZ);
       const abs: AbsRange[] = rangesDef
         .map((r) => {
           const s = hmToMinutes(r.start);
@@ -509,6 +512,7 @@ export default function TutorsLobbyPage() {
     setFormDuration(60);
     setFormVisible(true);
     setDebugMsg("");
+    setDebugNumbers({});
   }, []);
 
   const submitBooking = useCallback(async () => {
@@ -516,6 +520,7 @@ export default function TutorsLobbyPage() {
     setToast("");
     setFormBusy(true);
     setDebugMsg("");
+    setDebugNumbers({});
 
     try {
       const user = auth.currentUser;
@@ -536,10 +541,11 @@ export default function TutorsLobbyPage() {
       const ranges = block?.ranges ?? [];
       const containing = findContainingRange(chosenStart, chosenEnd, ranges);
 
+      // expose ground truth in debug
+      setDebugNumbers({ chosenStart, chosenEnd, containing: containing ?? null });
+
       if (!containing) {
-        setDebugMsg(
-          "Validator: selected start/end not fully contained in any availability range for the selected column."
-        );
+        setDebugMsg("Validator: selected start/end not fully contained in any availability range for the selected column.");
         throw new Error("Selected time is outside the tutor’s availability.");
       }
       if (chosenStart <= Date.now()) throw new Error("Selected time is in the past.");
@@ -1203,7 +1209,7 @@ export default function TutorsLobbyPage() {
                         </button>
                       </div>
 
-                      {/* DEBUG PANEL */}
+                      {/* DEBUG PANEL (now shows the real UTC numbers) */}
                       {debug && (
                         <div
                           style={{
@@ -1220,20 +1226,37 @@ export default function TutorsLobbyPage() {
                           <div>Student TZ: {studentTZ}</div>
                           <div>Tutor TZ: {activeTutor?.timezone || "(default/unknown)"}</div>
                           <div>Selected column: {selectedDayIdx ?? "-"}</div>
-                          <div>Start HM (student tz): {formStartHM || "(none)"}</div>
-                          <div>Duration (min): {formDuration}</div>
+                          <div>Start HM (student tz): {formStartHM || "(none)"} · Duration: {formDuration} min</div>
                           <div>Start options shown: {formStartOptions.length}</div>
+
                           {selectedDayIdx !== null && (
                             <>
-                              <div style={{ marginTop: 6, opacity: 0.8 }}>Ranges (local):</div>
+                              <div style={{ marginTop: 6, opacity: 0.8 }}>Ranges (student local):</div>
                               <ul style={{ margin: 0, paddingLeft: 16 }}>
                                 {slotBlocks[selectedDayIdx]?.ranges.map((r, i) => (
                                   <li key={i}>
                                     {fmtTimeInTZ(r.startMs, studentTZ)}–{fmtTimeInTZ(r.endMs, studentTZ)}
+                                    {"  "}
+                                    <span style={{ opacity: 0.7 }}>
+                                      [UTC {new Date(r.startMs).toISOString().slice(11, 16)}–
+                                      {new Date(r.endMs).toISOString().slice(11, 16)}]
+                                    </span>
                                   </li>
                                 ))}
                               </ul>
                             </>
+                          )}
+
+                          {"chosenStart" in debugNumbers && (
+                            <div style={{ marginTop: 6 }}>
+                              Chosen UTC: {new Date(debugNumbers.chosenStart!).toISOString()} →{" "}
+                              {new Date(debugNumbers.chosenEnd!).toISOString()}
+                            </div>
+                          )}
+                          {"containing" in debugNumbers && debugNumbers.containing === null && (
+                            <div style={{ color: "#fbbf24", marginTop: 6 }}>
+                              Note: Validator failed containment on these UTC values.
+                            </div>
                           )}
                           {debugMsg && <div style={{ color: "#fbbf24", marginTop: 6 }}>Note: {debugMsg}</div>}
                         </div>
