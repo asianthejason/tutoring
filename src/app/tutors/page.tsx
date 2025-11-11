@@ -38,7 +38,7 @@ type TutorDoc = {
   email?: string;
   roomId?: string;
   availability?: Availability;
-  timezone?: string; // tutor's timezone
+  timezone?: string; // tutor's timezone (IANA)
 };
 
 type Booking = {
@@ -49,9 +49,9 @@ type Booking = {
   studentId: string;
   studentName?: string;
   studentEmail?: string;
-  startTime: number;
+  startTime: number; // ms epoch
   durationMin: number;
-  endTime?: number;
+  endTime?: number;  // ms epoch
   roomId?: string;
   createdAt?: any;
 };
@@ -118,27 +118,55 @@ function minutesToHM(mins: number) {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
-// Build a Date representing the intended wall-time in given TZ
-function zonedDateFromParts(y: number, m: number, d: number, h: number, min: number, timeZone: string) {
-  const utcDate = new Date(Date.UTC(y, m, d, h, min));
-  const asInTz = new Date(utcDate.toLocaleString("en-US", { timeZone }));
-  const diff = utcDate.getTime() - asInTz.getTime();
-  return new Date(utcDate.getTime() - diff);
+/** Get the timezone offset (in ms) for `tz` at instant `ms`. */
+function getTzOffsetMs(tz: string, ms: number): number {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const parts = dtf.formatToParts(new Date(ms));
+  const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  const asUTC = Date.UTC(
+    Number(map.year),
+    Number(map.month) - 1,
+    Number(map.day),
+    Number(map.hour),
+    Number(map.minute),
+    Number(map.second)
+  );
+  // If ms shows the above wall-time in `tz`, then:
+  // asUTC = ms + offset  =>  offset = asUTC - ms
+  return asUTC - ms;
 }
 
-function fmtInTZ(ms: number, tz?: string) {
-  const opts: Intl.DateTimeFormatOptions = {
-    hour: "numeric",
-    minute: "2-digit",
+/** Convert a wall time in `tz` to UTC ms robustly (handles DST without drift). */
+function wallTimeToUTC(y: number, m: number, d: number, H: number, M: number, tz: string): number {
+  const guess = Date.UTC(y, m, d, H, M, 0, 0);
+  const offset = getTzOffsetMs(tz, guess);
+  return guess - offset;
+}
+
+function fmtDateInTZ(ms: number, tz: string) {
+  return new Intl.DateTimeFormat(undefined, {
     weekday: "short",
     month: "short",
     day: "numeric",
-  };
-  try {
-    return new Intl.DateTimeFormat(undefined, tz ? { ...opts, timeZone: tz } : opts).format(ms);
-  } catch {
-    return new Intl.DateTimeFormat(undefined, opts).format(ms);
-  }
+    timeZone: tz,
+  }).format(ms);
+}
+
+function fmtTimeInTZ(ms: number, tz: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: tz,
+  }).format(ms);
 }
 
 function hm24InTZ(ms: number, tz: string): string {
@@ -195,7 +223,7 @@ export default function TutorsLobbyPage() {
 
   const [toast, setToast] = useState("");
 
-  // --- load ALL tutors (no freshness filter) ---
+  // --- load ALL tutors ---
   useEffect(() => {
     const qRef = query(collection(db, "users"), where("role", "==", "tutor"));
     const unsub = onSnapshot(
@@ -233,13 +261,14 @@ export default function TutorsLobbyPage() {
     return () => unsub();
   }, []);
 
-  // --- open modal: load tutor, student prefs, week bookings, my bookings ---
+  // --- open modal ---
   const openTutorModal = useCallback(async (tutorId: string) => {
     setToast("");
     setFormVisible(false);
     setFormRepeatCount(0);
     setFormDuration(60);
     setFormStartHM("18:00");
+
     const week0 = startOfWeek(new Date());
     setActiveWeekStart(week0);
 
@@ -351,28 +380,27 @@ export default function TutorsLobbyPage() {
 
   const jumpToThisWeek = useCallback(async () => {
     if (!activeTutor) return;
-    const now = startOfWeek(new Date());
-    setActiveWeekStart(now);
-    await refreshWeekBookings(activeTutor.uid, now);
+    const nowW = startOfWeek(new Date());
+    setActiveWeekStart(nowW);
+    await refreshWeekBookings(activeTutor.uid, nowW);
   }, [activeTutor, refreshWeekBookings]);
 
   // ---------- build availability blocks for this week ----------
   type AbsRange = { startMs: number; endMs: number };
   type SlotBlock = {
-    label: string;
-    dayDate: Date;
+    dayHeader: string; // "Mon, Nov 10"
+    dayDate: Date;     // anchor date (local device calendar)
     ranges: AbsRange[];
-    past: boolean; // whole block-day is past (all ranges end in past)
+    past: boolean;
   };
 
   const slotBlocks: SlotBlock[] = useMemo(() => {
     if (!activeTutor) return [];
     const tutorTZ = activeTutor.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const blocks: SlotBlock[] = [];
     const now = Date.now();
-
-    // map Mon..Sun directly by index
     const keys: DayKey[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+    const blocks: SlotBlock[] = [];
 
     for (let i = 0; i < 7; i++) {
       const dayDateLocal = addDays(activeWeekStart, i);
@@ -387,64 +415,39 @@ export default function TutorsLobbyPage() {
           const s = hmToMinutes(r.start);
           const e = hmToMinutes(r.end);
           if (e <= s) return null;
-          const sDate = zonedDateFromParts(y, m, d, Math.floor(s / 60), s % 60, tutorTZ);
-          const eDate = zonedDateFromParts(y, m, d, Math.floor(e / 60), e % 60, tutorTZ);
-          return { startMs: +sDate, endMs: +eDate };
+          const sMs = wallTimeToUTC(y, m, d, Math.floor(s / 60), s % 60, tutorTZ);
+          const eMs = wallTimeToUTC(y, m, d, Math.floor(e / 60), e % 60, tutorTZ);
+          return { startMs: sMs, endMs: eMs };
         })
         .filter(Boolean) as AbsRange[];
 
       abs.sort((a, b) => a.startMs - b.startMs);
 
-      // student-facing label: first range time in student tz if present
-      let label =
-        new Intl.DateTimeFormat(undefined, {
-          weekday: "short",
-          month: "short",
-          day: "numeric",
-          timeZone: studentTZ,
-        }).format(+dayDateLocal) + (abs.length ? " " : " — no availability");
-
-      if (abs.length) {
-        label += `${new Intl.DateTimeFormat(undefined, {
-          hour: "numeric",
-          minute: "2-digit",
-          timeZone: studentTZ,
-        }).format(abs[0].startMs)}–${new Intl.DateTimeFormat(undefined, {
-          hour: "numeric",
-          minute: "2-digit",
-          timeZone: studentTZ,
-        }).format(abs[0].endMs)}${abs.length > 1 ? ` (+${abs.length - 1} more)` : ""}`;
-      }
-
-      const allPast = abs.length > 0 && abs.every((r) => r.endMs <= now);
-
-      blocks.push({ label, dayDate: dayDateLocal, ranges: abs, past: allPast });
+      blocks.push({
+        dayHeader: fmtDateInTZ(+dayDateLocal, studentTZ), // ONLY day+date
+        dayDate: dayDateLocal,
+        ranges: abs,
+        past: abs.length > 0 && abs.every((r) => r.endMs <= now),
+      });
     }
 
     return blocks;
   }, [activeTutor, activeWeekStart, studentTZ]);
 
-  // ---------- start-time options for chosen day (values are HH:mm 24h in student tz) ----------
+  // ---------- start-time options for chosen day ----------
   const formStartOptions = useMemo(() => {
     if (!activeTutor || !formDate) return [];
     const options: { value: string; label: string }[] = [];
     const now = Date.now();
 
-    // find day block
     const block = slotBlocks.find((b) => b.dayDate.toDateString() === formDate.toDateString());
     if (!block) return [];
 
     for (const r of block.ranges) {
-      // step through in 15-min increments in absolute time
       for (let t = r.startMs; t + 30 * 60000 <= r.endMs; t += 15 * 60000) {
         if (t <= now) continue; // only future starts
-        const value = hm24InTZ(t, studentTZ); // "HH:mm" in student's tz
-        const label = new Intl.DateTimeFormat(undefined, {
-          hour: "numeric",
-          minute: "2-digit",
-          timeZone: studentTZ,
-        }).format(t);
-        // avoid duplicates when multiple ranges overlap on the same HH:mm
+        const value = hm24InTZ(t, studentTZ); // value = "HH:mm" (student tz)
+        const label = fmtTimeInTZ(t, studentTZ);
         if (!options.some((o) => o.value === value)) options.push({ value, label });
       }
     }
@@ -464,8 +467,7 @@ export default function TutorsLobbyPage() {
   }
   function studentWallToUTC(date: Date, hm24: string, tz: string): number {
     const [H, M] = hm24.split(":").map((x) => parseInt(x, 10));
-    const d = zonedDateFromParts(date.getFullYear(), date.getMonth(), date.getDate(), H, M, tz);
-    return +d;
+    return wallTimeToUTC(date.getFullYear(), date.getMonth(), date.getDate(), H, M, tz);
   }
 
   const openFormForDay = useCallback((d: Date) => {
@@ -489,7 +491,7 @@ export default function TutorsLobbyPage() {
       const role = (stuData.role as Role) || "student";
       if (role !== "student") throw new Error("Only student accounts can book a session.");
 
-      // absolute start/end from student's selected tz & chosen date
+      // absolute start/end from student's tz & chosen date (robust conversion)
       const chosenStart = studentWallToUTC(formDate, formStartHM, studentTZ);
       const dur = Number(formDuration || 60);
       const chosenEnd = chosenStart + dur * 60000;
@@ -501,9 +503,9 @@ export default function TutorsLobbyPage() {
         throw new Error("Selected time is outside the tutor’s availability.");
 
       if (chosenStart <= Date.now()) throw new Error("Selected time is in the past.");
-
       if (hasTutorConflict(chosenStart, chosenEnd)) throw new Error("That time conflicts with another booking.");
 
+      // prepare occurrences (weekly repeats)
       const repeats = Math.max(0, Math.min(12, formRepeatCount || 0));
       const occurrences: { start: number; end: number }[] = [];
       for (let i = 0; i <= repeats; i++) {
@@ -512,6 +514,7 @@ export default function TutorsLobbyPage() {
         occurrences.push({ start, end });
       }
 
+      // write each via transaction (race-safe)
       for (const occ of occurrences) {
         const bookingId = `${activeTutor.uid}_${occ.start}`;
         const bookingRef = doc(db, "bookings", bookingId);
@@ -606,7 +609,7 @@ export default function TutorsLobbyPage() {
     [activeTutor, activeWeekStart, refreshWeekBookings, refreshMyUpcomingWithTutor]
   );
 
-  // ---------- cards ----------
+  // ---------- tutor cards ----------
 
   const cards = useMemo(() => {
     return tutors.map((t) => {
@@ -905,7 +908,7 @@ export default function TutorsLobbyPage() {
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
-              width: "min(1220px, 97vw)", // wider so 7 columns fit
+              width: "min(1220px, 97vw)", // 7 days without scroll
               maxHeight: "92vh",
               overflow: "hidden",
               borderRadius: 12,
@@ -1007,7 +1010,8 @@ export default function TutorsLobbyPage() {
                         minHeight: 160,
                       }}
                     >
-                      <div style={{ fontSize: 12.5, fontWeight: 700 }}>{b.label}</div>
+                      {/* Header: ONLY day + date */}
+                      <div style={{ fontSize: 12.5, fontWeight: 700 }}>{b.dayHeader}</div>
 
                       {b.ranges.length === 0 ? (
                         <div style={{ fontSize: 12, opacity: 0.6 }}>No availability</div>
@@ -1035,7 +1039,8 @@ export default function TutorsLobbyPage() {
                                 }}
                                 title={isPast ? "This block is in the past" : "Pick a start time & duration"}
                               >
-                                {fmtInTZ(r.startMs, studentTZ)}–{fmtInTZ(r.endMs, studentTZ)}
+                                {/* Chip text: ONLY time range */}
+                                {fmtTimeInTZ(r.startMs, studentTZ)}–{fmtTimeInTZ(r.endMs, studentTZ)}
                               </button>
                             );
                           })}
@@ -1202,7 +1207,18 @@ export default function TutorsLobbyPage() {
                           >
                             <div>
                               <div style={{ fontWeight: 600 }}>
-                                {fmtInTZ(b.startTime, studentTZ)} • {b.durationMin} min
+                                {new Intl.DateTimeFormat(undefined, {
+                                  weekday: "short",
+                                  month: "short",
+                                  day: "numeric",
+                                  timeZone: studentTZ,
+                                }).format(b.startTime)}{" "}
+                                • {new Intl.DateTimeFormat(undefined, {
+                                  hour: "numeric",
+                                  minute: "2-digit",
+                                  timeZone: studentTZ,
+                                }).format(b.startTime)}{" "}
+                                ({b.durationMin} min)
                               </div>
                               <div style={{ opacity: 0.7 }}>Your timezone: {studentTZ}</div>
                             </div>
