@@ -109,7 +109,7 @@ const STUDENT_PACKAGES: {
   price: number; // USD
 }[] = [
   { id: "1h",  label: "1 hour",  hours: 1,  price: 55 },
-  { id: "5h",  label: "5 hours", hours: 5,  price: 265 }, // corrected
+  { id: "5h",  label: "5 hours", hours: 5,  price: 265 },
   { id: "10h", label: "10 hours",hours: 10, price: 500 },
   { id: "20h", label: "20 hours",hours: 20, price: 900 },
   { id: "40h", label: "40 hours",hours: 40, price: 1600 },
@@ -124,6 +124,37 @@ function guessTimezone() {
     return "UTC";
   }
 }
+function allTimezones(): string[] {
+  // Modern browsers: full IANA list
+  try {
+    // @ts-ignore
+    if (Intl.supportedValuesOf) {
+      // @ts-ignore
+      const tzs = Intl.supportedValuesOf("timeZone") as string[];
+      if (Array.isArray(tzs) && tzs.length > 0) return tzs;
+    }
+  } catch {}
+  // Fallback (curated common set)
+  return [
+    "UTC",
+    // Americas
+    "America/St_Johns","America/Halifax","America/Toronto","America/Winnipeg","America/Edmonton","America/Vancouver",
+    "America/New_York","America/Chicago","America/Denver","America/Los_Angeles","America/Phoenix","America/Anchorage","America/Adak","Pacific/Honolulu",
+    "America/Mexico_City","America/Bogota","America/Lima","America/Caracas","America/Santiago","America/Sao_Paulo","America/Buenos_Aires",
+    // Europe/Africa
+    "Europe/London","Europe/Dublin","Europe/Lisbon","Europe/Madrid","Europe/Paris","Europe/Berlin","Europe/Rome","Europe/Amsterdam","Europe/Brussels",
+    "Europe/Zurich","Europe/Stockholm","Europe/Oslo","Europe/Copenhagen","Europe/Helsinki","Europe/Athens","Europe/Bucharest","Europe/Sofia",
+    "Europe/Kiev","Europe/Warsaw","Europe/Prague","Europe/Vienna","Europe/Budapest","Europe/Moscow","Africa/Cairo","Africa/Johannesburg",
+    // Middle East / Asia
+    "Asia/Jerusalem","Asia/Istanbul","Europe/Istanbul","Asia/Dubai","Asia/Kolkata","Asia/Karachi","Asia/Dhaka","Asia/Bangkok","Asia/Jakarta",
+    "Asia/Ho_Chi_Minh","Asia/Kuala_Lumpur","Asia/Singapore","Asia/Hong_Kong","Asia/Taipei","Asia/Manila","Asia/Tokyo","Asia/Seoul",
+    "Asia/Shanghai","Asia/Chongqing","Asia/Urumqi",
+    // Oceania
+    "Australia/Adelaide","Australia/Brisbane","Australia/Sydney","Australia/Melbourne","Australia/Perth","Pacific/Auckland","Pacific/Guam","Pacific/Fiji",
+  ];
+}
+const ALL_TIMEZONES = allTimezones();
+
 function formatNowInTZ(tz: string) {
   try {
     return new Date().toLocaleTimeString(undefined, {
@@ -526,11 +557,11 @@ export default function ProfileSettingsPage() {
         {headerRight}
       </header>
 
-      {/* Grid: 3 columns. For tutors we span availability across cols 2-3. */}
+      {/* 3-col grid; tutor availability spans 2 cols. Student splits Payments and History. */}
       <section style={bodyGrid3}>
         {role === "tutor" ? (
           <>
-            {/* Col 1, Row 1: Profile */}
+            {/* Col 1: Profile */}
             <Card style={{ gridColumn: "1 / span 1" }}>
               <CardTitle>Profile</CardTitle>
 
@@ -559,26 +590,7 @@ export default function ProfileSettingsPage() {
                     onChange={(e) => setBirthday(e.target.value)}
                     style={{ ...input, paddingRight: 36 }}
                   />
-                  <div
-                    aria-hidden
-                    style={{
-                      position: "absolute",
-                      right: 10,
-                      top: "50%",
-                      transform: "translateY(-50%)",
-                      width: 18,
-                      height: 18,
-                      borderRadius: 4,
-                      border: "1px solid #777",
-                      color: "#fff",
-                      fontSize: 10,
-                      display: "grid",
-                      placeItems: "center",
-                      opacity: 0.9,
-                    }}
-                  >
-                    ⌚
-                  </div>
+                  <div aria-hidden style={miniSuffixBox}>⌚</div>
                 </div>
               </Field>
 
@@ -592,21 +604,15 @@ export default function ProfileSettingsPage() {
               </Field>
 
               <Field label={`Timezone (Current time: ${currentTime || "—"})`}>
-                <input
+                <select
                   value={timezone}
                   onChange={(e) => setTimezone(e.target.value)}
-                  style={input}
-                  placeholder="America/Edmonton"
-                  list="tzlist"
-                />
-                <datalist id="tzlist">
-                  <option value="America/Edmonton" />
-                  <option value="America/Denver" />
-                  <option value="America/Chicago" />
-                  <option value="America/Los_Angeles" />
-                  <option value="America/New_York" />
-                  <option value="UTC" />
-                </datalist>
+                  style={select}
+                >
+                  {ALL_TIMEZONES.map((tz) => (
+                    <option key={tz} value={tz}>{tz}</option>
+                  ))}
+                </select>
               </Field>
 
               <CardSubTitle>Tutor Details</CardSubTitle>
@@ -638,7 +644,7 @@ export default function ProfileSettingsPage() {
               </div>
             </Card>
 
-            {/* Cols 2-3, Row 1: Availability (double width) */}
+            {/* Cols 2-3: Availability (double width; each day its own row) */}
             <Card style={{ gridColumn: "2 / span 2" }}>
               <CardTitle>Tutor Availability</CardTitle>
               <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
@@ -646,39 +652,36 @@ export default function ProfileSettingsPage() {
                 ranges per day (24-hour format).
               </div>
 
-              <div style={availGridDays}>
+              {/* One row per day */}
+              <div style={availRows}>
                 {DAYS.map(({ key, label }) => (
-                  <div key={key} style={availDayCard}>
-                    <div style={{ fontSize: 12, color: "#fff", marginBottom: 8, fontWeight: 700 }}>{label}</div>
-
-                    {(availability[key] ?? []).length === 0 && (
-                      <div style={{ ...muted, marginBottom: 6 }}>No ranges</div>
-                    )}
-
-                    {(availability[key] ?? []).map((r, i) => (
-                      <div key={i} style={rangeRowGrid}>
-                        <input
-                          type="time"
-                          value={r.start}
-                          onChange={(e) => updateRange(key, i, "start", e.target.value)}
-                          style={timeInput}
-                        />
-                        <span style={{ color: "#888", textAlign: "center" }}>–</span>
-                        <input
-                          type="time"
-                          value={r.end}
-                          onChange={(e) => updateRange(key, i, "end", e.target.value)}
-                          style={timeInput}
-                        />
-                        <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-
-                    <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
-                      + Add time
-                    </button>
+                  <div key={key} style={dayRow}>
+                    <div style={dayHead}>{label}</div>
+                    <div style={rangesWrap}>
+                      {(availability[key] ?? []).map((r, i) => (
+                        <div key={i} style={rangeRowGrid}>
+                          <input
+                            type="time"
+                            value={r.start}
+                            onChange={(e) => updateRange(key, i, "start", e.target.value)}
+                            style={timeInput}
+                          />
+                          <span style={{ color: "#888", textAlign: "center" }}>–</span>
+                          <input
+                            type="time"
+                            value={r.end}
+                            onChange={(e) => updateRange(key, i, "end", e.target.value)}
+                            style={timeInput}
+                          />
+                          <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                      <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
+                        + Add time
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -691,7 +694,7 @@ export default function ProfileSettingsPage() {
               </div>
             </Card>
 
-            {/* Col 1, Row 2: Change Password (stacked under Profile) */}
+            {/* Col 1: Change Password under Profile */}
             <Card style={{ gridColumn: "1 / span 1" }}>
               <CardTitle>Change Password</CardTitle>
               <Field label="Current password">
@@ -721,10 +724,10 @@ export default function ProfileSettingsPage() {
             </Card>
           </>
         ) : (
-          /* ===== Student layout (unchanged 3 columns) ===== */
+          /* ===== Student layout (left: Profile + Password, middle: Payments, right: History) ===== */
           <>
             {/* Col 1: Profile */}
-            <Card>
+            <Card style={{ gridColumn: "1 / span 1" }}>
               <CardTitle>Profile</CardTitle>
 
               <Field label="Email">
@@ -764,26 +767,7 @@ export default function ProfileSettingsPage() {
                     onChange={(e) => setBirthday(e.target.value)}
                     style={{ ...input, paddingRight: 36 }}
                   />
-                  <div
-                    aria-hidden
-                    style={{
-                      position: "absolute",
-                      right: 10,
-                      top: "50%",
-                      transform: "translateY(-50%)",
-                      width: 18,
-                      height: 18,
-                      borderRadius: 4,
-                      border: "1px solid #777",
-                      color: "#fff",
-                      fontSize: 10,
-                      display: "grid",
-                      placeItems: "center",
-                      opacity: 0.9,
-                    }}
-                  >
-                    ⌚
-                  </div>
+                  <div aria-hidden style={miniSuffixBox}>⌚</div>
                 </div>
               </Field>
 
@@ -797,33 +781,20 @@ export default function ProfileSettingsPage() {
               </Field>
 
               <Field label={`Timezone (Current time: ${currentTime || "—"})`}>
-                <input
+                <select
                   value={timezone}
                   onChange={(e) => setTimezone(e.target.value)}
-                  style={input}
-                  placeholder="America/Edmonton"
-                  list="tzlist"
-                />
-                <datalist id="tzlist">
-                  <option value="America/Edmonton" />
-                  <option value="America/Denver" />
-                  <option value="America/Chicago" />
-                  <option value="America/Los_Angeles" />
-                  <option value="America/New_York" />
-                  <option value="UTC" />
-                </datalist>
+                  style={select}
+                >
+                  {ALL_TIMEZONES.map((tz) => (
+                    <option key={tz} value={tz}>{tz}</option>
+                  ))}
+                </select>
               </Field>
-
-              <div style={row}>
-                <button onClick={saveStudentProfile} style={primaryBtn} disabled={saving}>
-                  Save Student Profile
-                </button>
-                {saveMsg && <div style={muted}>{saveMsg}</div>}
-              </div>
             </Card>
 
-            {/* Col 2: Change Password */}
-            <Card>
+            {/* Col 1 (stacked): Change Password */}
+            <Card style={{ gridColumn: "1 / span 1" }}>
               <CardTitle>Change Password</CardTitle>
               <Field label="Current password">
                 <input
@@ -849,10 +820,17 @@ export default function ProfileSettingsPage() {
                 </button>
                 {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
               </div>
+
+              <div style={{ ...row, marginTop: 10 }}>
+                <button onClick={saveStudentProfile} style={primaryBtn} disabled={saving}>
+                  Save Student Profile
+                </button>
+                {saveMsg && <div style={muted}>{saveMsg}</div>}
+              </div>
             </Card>
 
-            {/* Col 3: Hours & Payments */}
-            <Card>
+            {/* Col 2: Hours & Payments (package cards each on their own row) */}
+            <Card style={{ gridColumn: "2 / span 1" }}>
               <CardTitle>Hours & Payments</CardTitle>
 
               {/* BIG balance pill */}
@@ -870,13 +848,8 @@ export default function ProfileSettingsPage() {
                 </div>
               </div>
 
-              {/* package cards */}
-              <div style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 10,
-                marginBottom: 12,
-              }}>
+              {/* package cards: one per row */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginBottom: 12 }}>
                 {STUDENT_PACKAGES.map((p) => {
                   const selected = selectedPkg.id === p.id;
                   const perHour = (p.price / p.hours).toFixed(2);
@@ -954,55 +927,51 @@ export default function ProfileSettingsPage() {
               </div>
 
               {payMsg && <div style={{ ...muted, marginTop: 8 }}>{payMsg}</div>}
+            </Card>
 
-              {/* Purchase history */}
-              <div style={{ marginTop: 16 }}>
-                <CardSubTitle>Purchase history</CardSubTitle>
-                {purchases.length === 0 ? (
-                  <div style={{ ...muted, marginTop: 6 }}>No purchases yet.</div>
-                ) : (
-                  <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 12px", display: "grid", gap: 8 }}>
-                    {purchases.map((p) => (
-                      <li
-                        key={p.id}
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                          padding: "10px 12px",
-                          borderRadius: 8,
-                          border: "1px solid rgba(255,255,255,0.12)",
-                          background: "rgba(255,255,255,0.03)",
-                        }}
-                      >
-                        <div style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
-                          <span style={{ fontWeight: 700 }}>{p.hours}h</span>
-                          <span style={{ ...muted }}>• {p.method}</span>
-                        </div>
-                        <div style={{ textAlign: "right" }}>
-                          <div>{fmtUsd(p.amountUsd)}</div>
-                          <div style={{ ...muted, fontSize: 11 }}>{fmtDate(p.createdAt || null)}</div>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+            {/* Col 3: Purchase history (separate card) */}
+            <Card style={{ gridColumn: "3 / span 1" }}>
+              <CardTitle>Purchase history</CardTitle>
+              {purchases.length === 0 ? (
+                <div style={{ ...muted, marginTop: 6 }}>No purchases yet.</div>
+              ) : (
+                <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 12px", display: "grid", gap: 8 }}>
+                  {purchases.map((p) => (
+                    <li
+                      key={p.id}
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        padding: "10px 12px",
+                        borderRadius: 8,
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        background: "rgba(255,255,255,0.03)",
+                      }}
+                    >
+                      <div style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
+                        <span style={{ fontWeight: 700 }}>{p.hours}h</span>
+                        <span style={{ ...muted }}>• {p.method}</span>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div>{fmtUsd(p.amountUsd)}</div>
+                        <div style={{ ...muted, fontSize: 11 }}>{fmtDate(p.createdAt || null)}</div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
 
-                {historyHasMore && uid && (
-                  <button
-                    style={{ ...ghostButton, width: "100%" }}
-                    disabled={historyBusy}
-                    onClick={() => loadHistoryPage(uid, false)}
-                    title="Load more purchases"
-                  >
-                    {historyBusy ? "Loading…" : "Load more"}
-                  </button>
-                )}
-              </div>
-
-              <div style={{ ...muted, marginTop: 10 }}>
-                After a successful payment, purchased minutes will be added to your balance automatically.
-              </div>
+              {historyHasMore && uid && (
+                <button
+                  style={{ ...ghostButton, width: "100%" }}
+                  disabled={historyBusy}
+                  onClick={() => loadHistoryPage(uid, false)}
+                  title="Load more purchases"
+                >
+                  {historyBusy ? "Loading…" : "Load more"}
+                </button>
+              )}
             </Card>
           </>
         )}
@@ -1107,7 +1076,7 @@ function Brand() {
   );
 }
 
-/* Grid: 3 columns (availability can span 2 for tutors) */
+/* Grid */
 const bodyGrid3: React.CSSProperties = {
   width: "100%",
   maxWidth: 1280,
@@ -1205,25 +1174,53 @@ const ghostButton: React.CSSProperties = {
 
 const muted: React.CSSProperties = { color: "#a5b0a9", fontSize: 12 };
 
-/* === Availability layout (no overlap) === */
-const availGridDays: React.CSSProperties = {
+const miniSuffixBox: React.CSSProperties = {
+  position: "absolute",
+  right: 10,
+  top: "50%",
+  transform: "translateY(-50%)",
+  width: 18,
+  height: 18,
+  borderRadius: 4,
+  border: "1px solid #777",
+  color: "#fff",
+  fontSize: 10,
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-  gap: 12,
+  placeItems: "center",
+  opacity: 0.9,
 };
-const availDayCard: React.CSSProperties = {
-  background: "rgba(0,0,0,0.25)",
-  border: "1px solid rgba(255,255,255,0.12)",
-  borderRadius: 10,
+
+/* === Availability (one day per row) === */
+const availRows: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr",
+  gap: 10,
+};
+const dayRow: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "100px 1fr",
+  gap: 10,
+  alignItems: "start",
   padding: 10,
+  borderRadius: 10,
+  border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(255,255,255,0.03)",
+};
+const dayHead: React.CSSProperties = {
+  fontWeight: 700,
+  fontSize: 12,
+  color: "#fff",
+  paddingTop: 6,
+};
+const rangesWrap: React.CSSProperties = {
   display: "grid",
   gap: 8,
 };
 const rangeRowGrid: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(120px,1fr) 20px minmax(120px,1fr) auto",
+  gridTemplateColumns: "minmax(140px,1fr) 24px minmax(140px,1fr) auto",
   alignItems: "center",
-  gap: 6,
+  gap: 8,
 };
 const timeInput: React.CSSProperties = { ...input, width: "100%", padding: "8px 10px" };
 const smallAddBtn: React.CSSProperties = { ...ghostButton, padding: "6px 8px", fontSize: 12, width: "fit-content" };
