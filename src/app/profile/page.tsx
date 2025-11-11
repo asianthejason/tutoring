@@ -723,7 +723,7 @@ export default function ProfileSettingsPage() {
         ) : (
           /* ===== Student layout =====
              Left: Profile + Change Password (same card)
-             Middle: Hours & Payments (one package per row)
+             Middle: Hours & Payments (one package per row, price on right, slashed list price)
              Right: Purchase History
           */
           <>
@@ -847,10 +847,13 @@ export default function ProfileSettingsPage() {
                 </div>
               </div>
 
+              {/* UPDATED: price on right + slashed list price */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginBottom: 12 }}>
                 {STUDENT_PACKAGES.map((p) => {
                   const selected = selectedPkg.id === p.id;
                   const perHour = (p.price / p.hours).toFixed(2);
+                  const listPrice = 55 * p.hours;
+                  const showSlash = p.hours > 1;
                   return (
                     <button
                       key={p.id}
@@ -860,14 +863,33 @@ export default function ProfileSettingsPage() {
                         borderRadius: 10,
                         border: selected ? "1px solid #6ecf9a" : "1px solid #444",
                         background: selected ? "rgba(110,207,154,0.12)" : "rgba(255,255,255,0.03)",
-                        textAlign: "left",
                         color: "#fff",
                         cursor: "pointer",
                       }}
                     >
-                      <div style={{ fontWeight: 700 }}>{p.label}</div>
-                      <div style={{ opacity: 0.9 }}>{fmtUsd(p.price)}</div>
-                      <div style={{ fontSize: 12, opacity: 0.8 }}>${perHour}/hr</div>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                        {/* Left: name + $/hr */}
+                        <div style={{ textAlign: "left" }}>
+                          <div style={{ fontWeight: 700 }}>{p.label}</div>
+                          <div style={{ fontSize: 12, opacity: 0.8 }}>${perHour}/hr</div>
+                        </div>
+
+                        {/* Right: price block (with optional slashed list price) */}
+                        <div style={{ textAlign: "right", display: "grid", gap: 2 }}>
+                          {showSlash && (
+                            <div
+                              style={{
+                                fontSize: 12,
+                                opacity: 0.6,
+                                textDecoration: "line-through",
+                              }}
+                            >
+                              {fmtUsd(listPrice)}
+                            </div>
+                          )}
+                          <div style={{ fontWeight: 800 }}>{fmtUsd(p.price)}</div>
+                        </div>
+                      </div>
                     </button>
                   );
                 })}
