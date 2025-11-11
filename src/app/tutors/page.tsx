@@ -38,7 +38,7 @@ type TutorDoc = {
   email?: string;
   roomId?: string;
   availability?: Availability;
-  timezone?: string; // tutor tz (IANA)
+  timezone?: string; // IANA
 };
 
 type Booking = {
@@ -49,9 +49,9 @@ type Booking = {
   studentId: string;
   studentName?: string;
   studentEmail?: string;
-  startTime: number;
+  startTime: number; // ms epoch
   durationMin: number;
-  endTime?: number;
+  endTime?: number;  // ms epoch
   roomId?: string;
   createdAt?: any;
 };
@@ -62,7 +62,6 @@ type StudentPrefs = {
 };
 
 // ---------- helpers ----------
-
 function tsToMs(v: unknown): number | undefined {
   if (!v) return undefined;
   if (v instanceof Timestamp) return v.toMillis();
@@ -94,41 +93,23 @@ const DAY_MS = 24 * ONE_HOUR;
 
 function startOfWeek(d: Date) {
   const copy = new Date(d);
-  const day = copy.getDay(); // 0 Sun .. 6 Sat
-  const diff = day === 0 ? -6 : 1 - day; // Monday start
+  const day = copy.getDay(); // Sun=0..Sat=6
+  const diff = day === 0 ? -6 : 1 - day; // Monday
   copy.setDate(copy.getDate() + diff);
   copy.setHours(0, 0, 0, 0);
   return copy;
 }
-
 function addDays(d: Date, days: number) {
   const c = new Date(d);
   c.setDate(c.getDate() + days);
   return c;
 }
-
 function hmToMinutes(hhmm: string): number {
   const [h, m] = hhmm.split(":").map((x) => parseInt(x, 10));
   return h * 60 + m;
 }
 
-function fmtDateInTZ(ms: number, tz: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    timeZone: tz,
-  }).format(ms);
-}
-function fmtTimeInTZ(ms: number, tz: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone: tz,
-  }).format(ms);
-}
-
-// robust tz math (handles DST correctly)
+// robust tz math (handles DST)
 function getTzOffsetMs(tz: string, ms: number): number {
   const dtf = new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
@@ -157,6 +138,22 @@ function wallTimeToUTC(y: number, m: number, d: number, H: number, M: number, tz
   const offset = getTzOffsetMs(tz, guess);
   return guess - offset;
 }
+
+function fmtDateInTZ(ms: number, tz: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: tz,
+  }).format(ms);
+}
+function fmtTimeInTZ(ms: number, tz: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: tz,
+  }).format(ms);
+}
 function hm24InTZ(ms: number, tz: string): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
     hour: "2-digit",
@@ -177,7 +174,6 @@ function getStudentSelectedTZ(stu: StudentPrefs | undefined): string {
 }
 
 // ---------- component ----------
-
 export default function TutorsLobbyPage() {
   const router = useRouter();
 
@@ -189,7 +185,7 @@ export default function TutorsLobbyPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [activeTutor, setActiveTutor] = useState<(TutorDoc & { uid: string }) | null>(null);
 
-  // week (Mon..Sun)
+  // week
   const [activeWeekStart, setActiveWeekStart] = useState<Date>(startOfWeek(new Date()));
 
   // bookings
@@ -202,12 +198,12 @@ export default function TutorsLobbyPage() {
 
   // booking form
   const [formVisible, setFormVisible] = useState(false);
-  const [formDate, setFormDate] = useState<Date | null>(null); // anchor date (device local calendar)
-  const [formStartHM, setFormStartHM] = useState("18:00"); // 24h HH:mm (student tz)
+  const [formDate, setFormDate] = useState<Date | null>(null);
+  const [formStartHM, setFormStartHM] = useState<string>(""); // always one of options (or "")
   const [formDuration, setFormDuration] = useState<number>(60);
   const [formRepeatCount, setFormRepeatCount] = useState<number>(0);
   const [formBusy, setFormBusy] = useState(false);
-  const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null); // <-- robust selection by column
+  const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
 
   // debugging
   const [debug, setDebug] = useState(false);
@@ -260,7 +256,7 @@ export default function TutorsLobbyPage() {
     setFormVisible(false);
     setFormRepeatCount(0);
     setFormDuration(60);
-    setFormStartHM("18:00");
+    setFormStartHM("");
     setSelectedDayIdx(null);
 
     const week0 = startOfWeek(new Date());
@@ -361,14 +357,12 @@ export default function TutorsLobbyPage() {
     setActiveWeekStart(prev);
     await refreshWeekBookings(activeTutor.uid, prev);
   }, [activeTutor, activeWeekStart, refreshWeekBookings]);
-
   const goNextWeek = useCallback(async () => {
     if (!activeTutor) return;
     const next = addDays(activeWeekStart, 7);
     setActiveWeekStart(next);
     await refreshWeekBookings(activeTutor.uid, next);
   }, [activeTutor, activeWeekStart, refreshWeekBookings]);
-
   const jumpToThisWeek = useCallback(async () => {
     if (!activeTutor) return;
     const nowW = startOfWeek(new Date());
@@ -376,11 +370,11 @@ export default function TutorsLobbyPage() {
     await refreshWeekBookings(activeTutor.uid, nowW);
   }, [activeTutor, refreshWeekBookings]);
 
-  // ---------- build availability blocks ----------
+  // ---------- availability blocks ----------
   type AbsRange = { startMs: number; endMs: number };
   type SlotBlock = {
-    dayHeader: string; // "Mon, Nov 10"
-    dayDate: Date;     // anchor (device local)
+    dayHeader: string;
+    dayDate: Date;
     ranges: AbsRange[];
     past: boolean;
   };
@@ -425,7 +419,7 @@ export default function TutorsLobbyPage() {
     return blocks;
   }, [activeTutor, activeWeekStart, studentTZ]);
 
-  // ---------- start-time options (depend on duration & selected day) ----------
+  // ---------- start-time options (depend on duration & selected column) ----------
   const formStartOptions = useMemo(() => {
     if (!activeTutor || selectedDayIdx === null) return [];
     const now = Date.now();
@@ -437,7 +431,7 @@ export default function TutorsLobbyPage() {
     const options: { value: string; label: string }[] = [];
     for (const r of block.ranges) {
       for (let t = r.startMs; t + durMs <= r.endMs; t += 15 * 60000) {
-        if (t <= now) continue; // only future starts
+        if (t <= now) continue; // future only
         const value = hm24InTZ(t, studentTZ);
         const label = fmtTimeInTZ(t, studentTZ);
         if (!options.some((o) => o.value === value)) options.push({ value, label });
@@ -445,6 +439,17 @@ export default function TutorsLobbyPage() {
     }
     return options;
   }, [activeTutor, selectedDayIdx, slotBlocks, studentTZ, formDuration]);
+
+  // **NEW**: keep formStartHM in sync with available options
+  useEffect(() => {
+    if (!formVisible) return;
+    if (formStartOptions.length === 0) {
+      setFormStartHM("");
+      return;
+    }
+    const exists = formStartOptions.some((o) => o.value === formStartHM);
+    if (!exists) setFormStartHM(formStartOptions[0].value);
+  }, [formVisible, formStartOptions, formStartHM]);
 
   // ---------- booking helpers ----------
   function findContainingRange(msStart: number, msEnd: number, ranges: AbsRange[]) {
@@ -464,12 +469,12 @@ export default function TutorsLobbyPage() {
 
   const openFormForDay = useCallback((d: Date, dayIdx: number) => {
     setFormDate(d);
-    setSelectedDayIdx(dayIdx); // <-- anchor on column
-    setFormStartHM("18:00");
-    setFormDuration(60);
+    setSelectedDayIdx(dayIdx);
     setFormRepeatCount(0);
+    setFormDuration(60);
     setFormVisible(true);
     setDebugMsg("");
+    // startHM will auto-snap in useEffect once options compute
   }, []);
 
   const submitBooking = useCallback(async () => {
@@ -488,6 +493,8 @@ export default function TutorsLobbyPage() {
       if (role !== "student") throw new Error("Only student accounts can book a session.");
 
       const dur = Number(formDuration || 60);
+      if (!formStartHM) throw new Error("Select a start time.");
+
       const chosenStart = studentWallToUTC(formDate, formStartHM, studentTZ);
       const chosenEnd = chosenStart + dur * 60000;
 
@@ -496,7 +503,6 @@ export default function TutorsLobbyPage() {
       const ranges = block?.ranges ?? [];
       const containing = findContainingRange(chosenStart, chosenEnd, ranges);
 
-      // DEBUG output
       if (debug) {
         // eslint-disable-next-line no-console
         console.log("[booking-debug]", {
@@ -526,11 +532,10 @@ export default function TutorsLobbyPage() {
         );
         throw new Error("Selected time is outside the tutor’s availability.");
       }
-
       if (chosenStart <= Date.now()) throw new Error("Selected time is in the past.");
       if (hasTutorConflict(chosenStart, chosenEnd)) throw new Error("That time conflicts with another booking.");
 
-      // weekly repeats
+      // repeats
       const repeats = Math.max(0, Math.min(12, formRepeatCount || 0));
       const occurrences: { start: number; end: number }[] = [];
       for (let i = 0; i <= repeats; i++) {
@@ -547,7 +552,6 @@ export default function TutorsLobbyPage() {
           const cur = await tx.get(bookingRef);
           if (cur.exists()) throw new Error("This time was just booked.");
 
-          // overlap guard (belt & suspenders)
           const qRef = query(collection(db, "bookings"), where("tutorId", "==", activeTutor.uid));
           const snap = await getDocs(qRef);
           snap.forEach((ds) => {
@@ -635,7 +639,7 @@ export default function TutorsLobbyPage() {
     [activeTutor, activeWeekStart, refreshWeekBookings, refreshMyUpcomingWithTutor]
   );
 
-  // tutor list cards
+  // tutor cards
   const cards = useMemo(() => {
     return tutors.map((t) => {
       const d = deriveStatusLabel(t);
@@ -773,7 +777,6 @@ export default function TutorsLobbyPage() {
   }, [tutors, router, openTutorModal]);
 
   // ---------- UI ----------
-
   return (
     <main
       style={{
@@ -922,7 +925,7 @@ export default function TutorsLobbyPage() {
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
-              width: "min(1220px, 97vw)",
+              width: "min(1220px, 97vw)", // 7 columns w/out scroll
               maxHeight: "92vh",
               overflow: "hidden",
               borderRadius: 12,
@@ -1113,7 +1116,7 @@ export default function TutorsLobbyPage() {
                           style={inputStyle}
                         >
                           {formStartOptions.length === 0 ? (
-                            <option value="18:00">18:00</option>
+                            <option value="">No times available</option>
                           ) : (
                             formStartOptions.map((opt) => (
                               <option key={opt.value} value={opt.value}>
@@ -1158,7 +1161,7 @@ export default function TutorsLobbyPage() {
                       <div style={{ display: "flex", gap: 8 }}>
                         <button
                           onClick={submitBooking}
-                          disabled={formBusy || !formDate || selectedDayIdx === null}
+                          disabled={formBusy || !formDate || selectedDayIdx === null || !formStartHM}
                           style={{
                             padding: "8px 12px",
                             borderRadius: 10,
@@ -1167,7 +1170,10 @@ export default function TutorsLobbyPage() {
                             color: "#fff",
                             fontSize: 14,
                             fontWeight: 600,
-                            cursor: formBusy || !formDate || selectedDayIdx === null ? "not-allowed" : "pointer",
+                            cursor:
+                              formBusy || !formDate || selectedDayIdx === null || !formStartHM
+                                ? "not-allowed"
+                                : "pointer",
                           }}
                         >
                           {formBusy ? "Booking…" : "Book"}
@@ -1205,10 +1211,22 @@ export default function TutorsLobbyPage() {
                           <div>Student TZ: {studentTZ}</div>
                           <div>Tutor TZ: {activeTutor?.timezone || "(default/unknown)"}</div>
                           <div>Selected column: {selectedDayIdx ?? "-"}</div>
-                          <div>Start HM (student tz): {formStartHM}</div>
+                          <div>Start HM (student tz): {formStartHM || "(none)"}</div>
                           <div>Duration (min): {formDuration}</div>
                           <div>Start options shown: {formStartOptions.length}</div>
-                          {debugMsg && <div style={{ color: "#fbbf24" }}>Note: {debugMsg}</div>}
+                          {selectedDayIdx !== null && (
+                            <>
+                              <div style={{ marginTop: 6, opacity: 0.8 }}>Ranges (local):</div>
+                              <ul style={{ margin: 0, paddingLeft: 16 }}>
+                                {slotBlocks[selectedDayIdx]?.ranges.map((r, i) => (
+                                  <li key={i}>
+                                    {fmtTimeInTZ(r.startMs, studentTZ)}–{fmtTimeInTZ(r.endMs, studentTZ)}
+                                  </li>
+                                ))}
+                              </ul>
+                            </>
+                          )}
+                          {debugMsg && <div style={{ color: "#fbbf24", marginTop: 6 }}>Note: {debugMsg}</div>}
                         </div>
                       )}
                     </div>
@@ -1225,7 +1243,7 @@ export default function TutorsLobbyPage() {
                   }}
                 >
                   <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>
-                    My upcoming sessions with {activeTutor.displayName}
+                    My upcoming sessions with {activeTutor?.displayName}
                   </div>
                   {myUpcomingWithTutor.length === 0 ? (
                     <div style={{ fontSize: 12, opacity: 0.7 }}>None scheduled.</div>
@@ -1320,7 +1338,6 @@ const navButtonStyle: React.CSSProperties = {
   fontSize: 12,
   cursor: "pointer",
 };
-
 const inputStyle: React.CSSProperties = {
   width: "100%",
   marginTop: 6,
