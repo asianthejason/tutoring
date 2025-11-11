@@ -51,7 +51,7 @@ type Booking = {
   studentEmail?: string;
   startTime: number; // ms epoch
   durationMin: number;
-  endTime?: number;  // ms epoch
+  endTime?: number; // ms epoch
   roomId?: string;
   createdAt?: any;
 };
@@ -139,6 +139,20 @@ function wallTimeToUTC(y: number, m: number, d: number, H: number, M: number, tz
   return guess - offset;
 }
 
+// NEW: extract Y/M/D *in a given timezone* for a timestamp
+function getYMDInTZ(ms: number, tz: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(ms);
+  const year = Number(parts.find((p) => p.type === "year")?.value || "1970");
+  const month = Number(parts.find((p) => p.type === "month")?.value || "01") - 1; // 0-based
+  const day = Number(parts.find((p) => p.type === "day")?.value || "01");
+  return { year, month, day };
+}
+
 function fmtDateInTZ(ms: number, tz: string) {
   return new Intl.DateTimeFormat(undefined, {
     weekday: "short",
@@ -198,7 +212,7 @@ export default function TutorsLobbyPage() {
 
   // booking form
   const [formVisible, setFormVisible] = useState(false);
-  const [formDate, setFormDate] = useState<Date | null>(null);
+  const [formDate, setFormDate] = useState<Date | null>(null); // column date anchor
   const [formStartHM, setFormStartHM] = useState<string>(""); // always one of options (or "")
   const [formDuration, setFormDuration] = useState<number>(60);
   const [formRepeatCount, setFormRepeatCount] = useState<number>(0);
@@ -394,14 +408,12 @@ export default function TutorsLobbyPage() {
 
       const abs: AbsRange[] = rangesDef
         .map((r) => {
-          const y = dayDateLocal.getFullYear();
-          const m = dayDateLocal.getMonth();
-          const d = dayDateLocal.getDate();
+          const { year, month, day } = getYMDInTZ(+dayDateLocal, tutorTZ);
           const s = hmToMinutes(r.start);
           const e = hmToMinutes(r.end);
           if (e <= s) return null;
-          const sMs = wallTimeToUTC(y, m, d, Math.floor(s / 60), s % 60, tutorTZ);
-          const eMs = wallTimeToUTC(y, m, d, Math.floor(e / 60), e % 60, tutorTZ);
+          const sMs = wallTimeToUTC(year, month, day, Math.floor(s / 60), s % 60, tutorTZ);
+          const eMs = wallTimeToUTC(year, month, day, Math.floor(e / 60), e % 60, tutorTZ);
           return { startMs: sMs, endMs: eMs };
         })
         .filter(Boolean) as AbsRange[];
@@ -440,7 +452,7 @@ export default function TutorsLobbyPage() {
     return options;
   }, [activeTutor, selectedDayIdx, slotBlocks, studentTZ, formDuration]);
 
-  // **NEW**: keep formStartHM in sync with available options
+  // keep formStartHM in sync with available options
   useEffect(() => {
     if (!formVisible) return;
     if (formStartOptions.length === 0) {
@@ -462,9 +474,12 @@ export default function TutorsLobbyPage() {
       return msStart < bEnd && msEnd > bStart;
     });
   }
-  function studentWallToUTC(date: Date, hm24: string, tz: string): number {
+
+  // FIXED: convert student's selected day/time using Y/M/D in the student's TZ
+  function studentWallToUTC(dateAnchor: Date, hm24: string, tz: string): number {
+    const { year, month, day } = getYMDInTZ(+dateAnchor, tz);
     const [H, M] = hm24.split(":").map((x) => parseInt(x, 10));
-    return wallTimeToUTC(date.getFullYear(), date.getMonth(), date.getDate(), H, M, tz);
+    return wallTimeToUTC(year, month, day, H, M, tz);
   }
 
   const openFormForDay = useCallback((d: Date, dayIdx: number) => {
@@ -498,33 +513,9 @@ export default function TutorsLobbyPage() {
       const chosenStart = studentWallToUTC(formDate, formStartHM, studentTZ);
       const chosenEnd = chosenStart + dur * 60000;
 
-      // look at the exact selected column
       const block = slotBlocks[selectedDayIdx];
       const ranges = block?.ranges ?? [];
       const containing = findContainingRange(chosenStart, chosenEnd, ranges);
-
-      if (debug) {
-        // eslint-disable-next-line no-console
-        console.log("[booking-debug]", {
-          studentTZ,
-          tutorTZ: activeTutor.timezone || "(tutor tz default)",
-          selectedDayIdx,
-          formDate,
-          startHM: formStartHM,
-          durMin: dur,
-          chosenStartUTC: chosenStart,
-          chosenEndUTC: chosenEnd,
-          chosenStartLocal: fmtTimeInTZ(chosenStart, studentTZ),
-          chosenEndLocal: fmtTimeInTZ(chosenEnd, studentTZ),
-          rangesUTC: ranges.map((r) => ({ start: r.startMs, end: r.endMs })),
-          rangesLocal: ranges.map((r) => ({
-            start: fmtTimeInTZ(r.startMs, studentTZ),
-            end: fmtTimeInTZ(r.endMs, studentTZ),
-          })),
-          contains: !!containing,
-          tutorConflicts: hasTutorConflict(chosenStart, chosenEnd),
-        });
-      }
 
       if (!containing) {
         setDebugMsg(
@@ -605,7 +596,6 @@ export default function TutorsLobbyPage() {
     activeWeekStart,
     refreshWeekBookings,
     refreshMyUpcomingWithTutor,
-    debug,
   ]);
 
   const cancelBooking = useCallback(
