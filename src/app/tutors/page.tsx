@@ -38,7 +38,7 @@ type TutorDoc = {
   email?: string;
   roomId?: string;
   availability?: Availability;
-  timezone?: string; // tutor's timezone (IANA)
+  timezone?: string; // tutor tz (IANA)
 };
 
 type Booking = {
@@ -49,9 +49,9 @@ type Booking = {
   studentId: string;
   studentName?: string;
   studentEmail?: string;
-  startTime: number; // ms epoch
+  startTime: number;
   durationMin: number;
-  endTime?: number;  // ms epoch
+  endTime?: number;
   roomId?: string;
   createdAt?: any;
 };
@@ -94,8 +94,8 @@ const DAY_MS = 24 * ONE_HOUR;
 
 function startOfWeek(d: Date) {
   const copy = new Date(d);
-  const day = copy.getDay(); // 0=Sun..6=Sat
-  const diff = day === 0 ? -6 : 1 - day; // Monday
+  const day = copy.getDay(); // 0 Sun .. 6 Sat
+  const diff = day === 0 ? -6 : 1 - day; // Monday start
   copy.setDate(copy.getDate() + diff);
   copy.setHours(0, 0, 0, 0);
   return copy;
@@ -112,13 +112,23 @@ function hmToMinutes(hhmm: string): number {
   return h * 60 + m;
 }
 
-function minutesToHM(mins: number) {
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+function fmtDateInTZ(ms: number, tz: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: tz,
+  }).format(ms);
+}
+function fmtTimeInTZ(ms: number, tz: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: tz,
+  }).format(ms);
 }
 
-/** Get the timezone offset (in ms) for `tz` at instant `ms`. */
+// robust tz math (handles DST correctly)
 function getTzOffsetMs(tz: string, ms: number): number {
   const dtf = new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
@@ -140,35 +150,13 @@ function getTzOffsetMs(tz: string, ms: number): number {
     Number(map.minute),
     Number(map.second)
   );
-  // If ms shows the above wall-time in `tz`, then:
-  // asUTC = ms + offset  =>  offset = asUTC - ms
   return asUTC - ms;
 }
-
-/** Convert a wall time in `tz` to UTC ms robustly (handles DST without drift). */
 function wallTimeToUTC(y: number, m: number, d: number, H: number, M: number, tz: string): number {
   const guess = Date.UTC(y, m, d, H, M, 0, 0);
   const offset = getTzOffsetMs(tz, guess);
   return guess - offset;
 }
-
-function fmtDateInTZ(ms: number, tz: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    timeZone: tz,
-  }).format(ms);
-}
-
-function fmtTimeInTZ(ms: number, tz: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone: tz,
-  }).format(ms);
-}
-
 function hm24InTZ(ms: number, tz: string): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
     hour: "2-digit",
@@ -180,7 +168,6 @@ function hm24InTZ(ms: number, tz: string): string {
   const mm = parts.find((p) => p.type === "minute")?.value ?? "00";
   return `${hh}:${mm}`;
 }
-
 function getStudentSelectedTZ(stu: StudentPrefs | undefined): string {
   return (
     (stu?.timezone && typeof stu.timezone === "string" && stu.timezone) ||
@@ -198,32 +185,37 @@ export default function TutorsLobbyPage() {
   const [tutors, setTutors] = useState<TutorRow[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // modal + tutor
+  // modal/tutor
   const [modalOpen, setModalOpen] = useState(false);
   const [activeTutor, setActiveTutor] = useState<(TutorDoc & { uid: string }) | null>(null);
 
-  // week view (Mon..Sun)
+  // week (Mon..Sun)
   const [activeWeekStart, setActiveWeekStart] = useState<Date>(startOfWeek(new Date()));
 
-  // bookings/conflicts
+  // bookings
   const [bookedThisWeek, setBookedThisWeek] = useState<Booking[]>([]);
   const [myUpcomingWithTutor, setMyUpcomingWithTutor] = useState<Booking[]>([]);
 
-  // student prefs
+  // student prefs / tz
   const [studentPrefs, setStudentPrefs] = useState<StudentPrefs | undefined>(undefined);
   const studentTZ = getStudentSelectedTZ(studentPrefs);
 
   // booking form
   const [formVisible, setFormVisible] = useState(false);
-  const [formDate, setFormDate] = useState<Date | null>(null);
-  const [formStartHM, setFormStartHM] = useState("18:00"); // 24h HH:mm
+  const [formDate, setFormDate] = useState<Date | null>(null); // anchor date (device local calendar)
+  const [formStartHM, setFormStartHM] = useState("18:00"); // 24h HH:mm (student tz)
   const [formDuration, setFormDuration] = useState<number>(60);
   const [formRepeatCount, setFormRepeatCount] = useState<number>(0);
   const [formBusy, setFormBusy] = useState(false);
+  const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null); // <-- robust selection by column
+
+  // debugging
+  const [debug, setDebug] = useState(false);
+  const [debugMsg, setDebugMsg] = useState<string>("");
 
   const [toast, setToast] = useState("");
 
-  // --- load ALL tutors ---
+  // load all tutors
   useEffect(() => {
     const qRef = query(collection(db, "users"), where("role", "==", "tutor"));
     const unsub = onSnapshot(
@@ -261,18 +253,19 @@ export default function TutorsLobbyPage() {
     return () => unsub();
   }, []);
 
-  // --- open modal ---
+  // open modal
   const openTutorModal = useCallback(async (tutorId: string) => {
     setToast("");
+    setDebugMsg("");
     setFormVisible(false);
     setFormRepeatCount(0);
     setFormDuration(60);
     setFormStartHM("18:00");
+    setSelectedDayIdx(null);
 
     const week0 = startOfWeek(new Date());
     setActiveWeekStart(week0);
 
-    // tutor doc
     const tSnap = await getDoc(doc(db, "users", tutorId));
     const t = (tSnap.exists() ? (tSnap.data() as TutorDoc) : {}) as TutorDoc;
     const tutor: TutorDoc & { uid: string } = {
@@ -286,7 +279,6 @@ export default function TutorsLobbyPage() {
     };
     setActiveTutor(tutor);
 
-    // student prefs
     const u = auth.currentUser;
     if (u) {
       const sSnap = await getDoc(doc(db, "users", u.uid));
@@ -295,7 +287,6 @@ export default function TutorsLobbyPage() {
       setStudentPrefs(undefined);
     }
 
-    // conflicts & upcoming
     await refreshWeekBookings(tutorId, week0);
     await refreshMyUpcomingWithTutor(tutorId);
 
@@ -385,11 +376,11 @@ export default function TutorsLobbyPage() {
     await refreshWeekBookings(activeTutor.uid, nowW);
   }, [activeTutor, refreshWeekBookings]);
 
-  // ---------- build availability blocks for this week ----------
+  // ---------- build availability blocks ----------
   type AbsRange = { startMs: number; endMs: number };
   type SlotBlock = {
     dayHeader: string; // "Mon, Nov 10"
-    dayDate: Date;     // anchor date (local device calendar)
+    dayDate: Date;     // anchor (device local)
     ranges: AbsRange[];
     past: boolean;
   };
@@ -424,7 +415,7 @@ export default function TutorsLobbyPage() {
       abs.sort((a, b) => a.startMs - b.startMs);
 
       blocks.push({
-        dayHeader: fmtDateInTZ(+dayDateLocal, studentTZ), // ONLY day+date
+        dayHeader: fmtDateInTZ(+dayDateLocal, studentTZ),
         dayDate: dayDateLocal,
         ranges: abs,
         past: abs.length > 0 && abs.every((r) => r.endMs <= now),
@@ -434,25 +425,26 @@ export default function TutorsLobbyPage() {
     return blocks;
   }, [activeTutor, activeWeekStart, studentTZ]);
 
-  // ---------- start-time options for chosen day ----------
+  // ---------- start-time options (depend on duration & selected day) ----------
   const formStartOptions = useMemo(() => {
-    if (!activeTutor || !formDate) return [];
-    const options: { value: string; label: string }[] = [];
+    if (!activeTutor || selectedDayIdx === null) return [];
     const now = Date.now();
-
-    const block = slotBlocks.find((b) => b.dayDate.toDateString() === formDate.toDateString());
+    const block = slotBlocks[selectedDayIdx];
     if (!block) return [];
 
+    const durMs = (Number(formDuration) || 60) * 60000;
+
+    const options: { value: string; label: string }[] = [];
     for (const r of block.ranges) {
-      for (let t = r.startMs; t + 30 * 60000 <= r.endMs; t += 15 * 60000) {
+      for (let t = r.startMs; t + durMs <= r.endMs; t += 15 * 60000) {
         if (t <= now) continue; // only future starts
-        const value = hm24InTZ(t, studentTZ); // value = "HH:mm" (student tz)
+        const value = hm24InTZ(t, studentTZ);
         const label = fmtTimeInTZ(t, studentTZ);
         if (!options.some((o) => o.value === value)) options.push({ value, label });
       }
     }
     return options;
-  }, [activeTutor, formDate, slotBlocks, studentTZ]);
+  }, [activeTutor, selectedDayIdx, slotBlocks, studentTZ, formDuration]);
 
   // ---------- booking helpers ----------
   function findContainingRange(msStart: number, msEnd: number, ranges: AbsRange[]) {
@@ -470,18 +462,22 @@ export default function TutorsLobbyPage() {
     return wallTimeToUTC(date.getFullYear(), date.getMonth(), date.getDate(), H, M, tz);
   }
 
-  const openFormForDay = useCallback((d: Date) => {
+  const openFormForDay = useCallback((d: Date, dayIdx: number) => {
     setFormDate(d);
+    setSelectedDayIdx(dayIdx); // <-- anchor on column
     setFormStartHM("18:00");
     setFormDuration(60);
     setFormRepeatCount(0);
     setFormVisible(true);
+    setDebugMsg("");
   }, []);
 
   const submitBooking = useCallback(async () => {
-    if (!activeTutor || !formDate) return;
+    if (!activeTutor || !formDate || selectedDayIdx === null) return;
     setToast("");
     setFormBusy(true);
+    setDebugMsg("");
+
     try {
       const user = auth.currentUser;
       if (!user) throw new Error("Please sign in as a student to book.");
@@ -491,21 +487,50 @@ export default function TutorsLobbyPage() {
       const role = (stuData.role as Role) || "student";
       if (role !== "student") throw new Error("Only student accounts can book a session.");
 
-      // absolute start/end from student's tz & chosen date (robust conversion)
-      const chosenStart = studentWallToUTC(formDate, formStartHM, studentTZ);
       const dur = Number(formDuration || 60);
+      const chosenStart = studentWallToUTC(formDate, formStartHM, studentTZ);
       const chosenEnd = chosenStart + dur * 60000;
 
-      // inside availability?
-      const block = slotBlocks.find((b) => b.dayDate.toDateString() === formDate.toDateString());
+      // look at the exact selected column
+      const block = slotBlocks[selectedDayIdx];
       const ranges = block?.ranges ?? [];
-      if (!findContainingRange(chosenStart, chosenEnd, ranges))
+      const containing = findContainingRange(chosenStart, chosenEnd, ranges);
+
+      // DEBUG output
+      if (debug) {
+        // eslint-disable-next-line no-console
+        console.log("[booking-debug]", {
+          studentTZ,
+          tutorTZ: activeTutor.timezone || "(tutor tz default)",
+          selectedDayIdx,
+          formDate,
+          startHM: formStartHM,
+          durMin: dur,
+          chosenStartUTC: chosenStart,
+          chosenEndUTC: chosenEnd,
+          chosenStartLocal: fmtTimeInTZ(chosenStart, studentTZ),
+          chosenEndLocal: fmtTimeInTZ(chosenEnd, studentTZ),
+          rangesUTC: ranges.map((r) => ({ start: r.startMs, end: r.endMs })),
+          rangesLocal: ranges.map((r) => ({
+            start: fmtTimeInTZ(r.startMs, studentTZ),
+            end: fmtTimeInTZ(r.endMs, studentTZ),
+          })),
+          contains: !!containing,
+          tutorConflicts: hasTutorConflict(chosenStart, chosenEnd),
+        });
+      }
+
+      if (!containing) {
+        setDebugMsg(
+          "Validator: selected start/end not fully contained in any availability range for the selected column."
+        );
         throw new Error("Selected time is outside the tutor’s availability.");
+      }
 
       if (chosenStart <= Date.now()) throw new Error("Selected time is in the past.");
       if (hasTutorConflict(chosenStart, chosenEnd)) throw new Error("That time conflicts with another booking.");
 
-      // prepare occurrences (weekly repeats)
+      // weekly repeats
       const repeats = Math.max(0, Math.min(12, formRepeatCount || 0));
       const occurrences: { start: number; end: number }[] = [];
       for (let i = 0; i <= repeats; i++) {
@@ -514,7 +539,6 @@ export default function TutorsLobbyPage() {
         occurrences.push({ start, end });
       }
 
-      // write each via transaction (race-safe)
       for (const occ of occurrences) {
         const bookingId = `${activeTutor.uid}_${occ.start}`;
         const bookingRef = doc(db, "bookings", bookingId);
@@ -523,7 +547,7 @@ export default function TutorsLobbyPage() {
           const cur = await tx.get(bookingRef);
           if (cur.exists()) throw new Error("This time was just booked.");
 
-          // overlap guard
+          // overlap guard (belt & suspenders)
           const qRef = query(collection(db, "bookings"), where("tutorId", "==", activeTutor.uid));
           const snap = await getDocs(qRef);
           snap.forEach((ds) => {
@@ -568,6 +592,7 @@ export default function TutorsLobbyPage() {
   }, [
     activeTutor,
     formDate,
+    selectedDayIdx,
     formStartHM,
     formDuration,
     formRepeatCount,
@@ -576,6 +601,7 @@ export default function TutorsLobbyPage() {
     activeWeekStart,
     refreshWeekBookings,
     refreshMyUpcomingWithTutor,
+    debug,
   ]);
 
   const cancelBooking = useCallback(
@@ -609,8 +635,7 @@ export default function TutorsLobbyPage() {
     [activeTutor, activeWeekStart, refreshWeekBookings, refreshMyUpcomingWithTutor]
   );
 
-  // ---------- tutor cards ----------
-
+  // tutor list cards
   const cards = useMemo(() => {
     return tutors.map((t) => {
       const d = deriveStatusLabel(t);
@@ -652,9 +677,7 @@ export default function TutorsLobbyPage() {
               <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>
                 {t.displayName || "Tutor"}
               </div>
-              <div style={{ fontSize: 12, color: "rgba(255,255,255,0.6)", maxWidth: 260 }}>
-                {t.email}
-              </div>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,0.6)", maxWidth: 260 }}>{t.email}</div>
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -723,15 +746,6 @@ export default function TutorsLobbyPage() {
                 cursor: canJoin ? "pointer" : "not-allowed",
                 minWidth: 120,
               }}
-              title={
-                !t.roomId
-                  ? "Tutor does not have a room configured"
-                  : canJoin
-                  ? "Enter this tutor’s room"
-                  : deriveStatusLabel(t).label === "Busy"
-                  ? "They’re helping someone—use queue on the dashboard"
-                  : "Tutor is offline right now"
-              }
             >
               {canJoin ? "Join Room" : deriveStatusLabel(t).label === "Busy" ? "Join Queue" : "Join (offline)"}
             </button>
@@ -908,7 +922,7 @@ export default function TutorsLobbyPage() {
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
-              width: "min(1220px, 97vw)", // 7 days without scroll
+              width: "min(1220px, 97vw)",
               maxHeight: "92vh",
               overflow: "hidden",
               borderRadius: 12,
@@ -963,6 +977,13 @@ export default function TutorsLobbyPage() {
                 <button onClick={goNextWeek} style={navButtonStyle}>Next →</button>
                 <button onClick={jumpToThisWeek} style={navButtonStyle}>This week</button>
                 <button
+                  onClick={() => setDebug((d) => !d)}
+                  style={{ ...navButtonStyle, background: debug ? "#374151" : "#1f2937" }}
+                  title="Toggle debug panel"
+                >
+                  {debug ? "Debug: ON" : "Debug"}
+                </button>
+                <button
                   onClick={() => {
                     setModalOpen(false);
                     setActiveTutor(null);
@@ -992,7 +1013,7 @@ export default function TutorsLobbyPage() {
                 <div
                   style={{
                     display: "grid",
-                    gridTemplateColumns: "repeat(7, 1fr)", // 7 columns in view
+                    gridTemplateColumns: "repeat(7, 1fr)",
                     gap: 8,
                   }}
                 >
@@ -1010,7 +1031,6 @@ export default function TutorsLobbyPage() {
                         minHeight: 160,
                       }}
                     >
-                      {/* Header: ONLY day + date */}
                       <div style={{ fontSize: 12.5, fontWeight: 700 }}>{b.dayHeader}</div>
 
                       {b.ranges.length === 0 ? (
@@ -1022,7 +1042,7 @@ export default function TutorsLobbyPage() {
                             return (
                               <button
                                 key={i}
-                                onClick={() => !isPast && openFormForDay(b.dayDate)}
+                                onClick={() => !isPast && openFormForDay(b.dayDate, idx)}
                                 disabled={isPast}
                                 style={{
                                   padding: "6px 8px",
@@ -1039,7 +1059,6 @@ export default function TutorsLobbyPage() {
                                 }}
                                 title={isPast ? "This block is in the past" : "Pick a start time & duration"}
                               >
-                                {/* Chip text: ONLY time range */}
                                 {fmtTimeInTZ(r.startMs, studentTZ)}–{fmtTimeInTZ(r.endMs, studentTZ)}
                               </button>
                             );
@@ -1139,7 +1158,7 @@ export default function TutorsLobbyPage() {
                       <div style={{ display: "flex", gap: 8 }}>
                         <button
                           onClick={submitBooking}
-                          disabled={formBusy || !formDate}
+                          disabled={formBusy || !formDate || selectedDayIdx === null}
                           style={{
                             padding: "8px 12px",
                             borderRadius: 10,
@@ -1148,7 +1167,7 @@ export default function TutorsLobbyPage() {
                             color: "#fff",
                             fontSize: 14,
                             fontWeight: 600,
-                            cursor: formBusy || !formDate ? "not-allowed" : "pointer",
+                            cursor: formBusy || !formDate || selectedDayIdx === null ? "not-allowed" : "pointer",
                           }}
                         >
                           {formBusy ? "Booking…" : "Book"}
@@ -1168,6 +1187,30 @@ export default function TutorsLobbyPage() {
                           Cancel
                         </button>
                       </div>
+
+                      {/* DEBUG PANEL */}
+                      {debug && (
+                        <div
+                          style={{
+                            marginTop: 8,
+                            padding: 8,
+                            borderRadius: 8,
+                            border: "1px dashed rgba(255,255,255,0.25)",
+                            background: "rgba(255,255,255,0.03)",
+                            fontSize: 12,
+                            lineHeight: 1.35,
+                          }}
+                        >
+                          <div style={{ fontWeight: 700, marginBottom: 4 }}>Debug</div>
+                          <div>Student TZ: {studentTZ}</div>
+                          <div>Tutor TZ: {activeTutor?.timezone || "(default/unknown)"}</div>
+                          <div>Selected column: {selectedDayIdx ?? "-"}</div>
+                          <div>Start HM (student tz): {formStartHM}</div>
+                          <div>Duration (min): {formDuration}</div>
+                          <div>Start options shown: {formStartOptions.length}</div>
+                          {debugMsg && <div style={{ color: "#fbbf24" }}>Note: {debugMsg}</div>}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
