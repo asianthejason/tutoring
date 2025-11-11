@@ -526,103 +526,89 @@ export default function ProfileSettingsPage() {
         {headerRight}
       </header>
 
-      {/* 3-column grid always. For narrow screens it gracefully stacks. */}
+      {/* Grid: 3 columns. For tutors we span availability across cols 2-3. */}
       <section style={bodyGrid3}>
-        {/* Column 1: Profile (both roles) */}
-        <Card>
-          <CardTitle>Profile</CardTitle>
+        {role === "tutor" ? (
+          <>
+            {/* Col 1, Row 1: Profile */}
+            <Card style={{ gridColumn: "1 / span 1" }}>
+              <CardTitle>Profile</CardTitle>
 
-          <Field label="Email">
-            <input disabled value={email} style={input} />
-          </Field>
+              <Field label="Email">
+                <input disabled value={email} style={input} />
+              </Field>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <Field label="First name">
-              <input value={firstName} onChange={(e) => setFirstName(e.target.value)} style={input} />
-            </Field>
-            <Field label="Last name">
-              <input value={lastName} onChange={(e) => setLastName(e.target.value)} style={input} />
-            </Field>
-          </div>
-
-          <Field label="Display name">
-            <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} style={input} />
-          </Field>
-
-          {role === "student" && (
-            <Field label="Grade level">
-              <select value={gradeLevel} onChange={(e) => setGradeLevel(e.target.value)} style={select}>
-                <option value="">Select…</option>
-                {[
-                  "Grade 4","Grade 5","Grade 6","Grade 7","Grade 8","Grade 9",
-                  "Grade 10","Grade 11","Grade 12","IB / AP"
-                ].map((g) => (
-                  <option key={g} value={g}>{g}</option>
-                ))}
-              </select>
-            </Field>
-          )}
-
-          <Field label="Birthday">
-            <div style={{ position: "relative" }}>
-              <input
-                type="date"
-                value={birthday}
-                onChange={(e) => setBirthday(e.target.value)}
-                style={{ ...input, paddingRight: 36 }}
-              />
-              <div
-                aria-hidden
-                style={{
-                  position: "absolute",
-                  right: 10,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  width: 18,
-                  height: 18,
-                  borderRadius: 4,
-                  border: "1px solid #777",
-                  color: "#fff",
-                  fontSize: 10,
-                  display: "grid",
-                  placeItems: "center",
-                  opacity: 0.9,
-                }}
-              >
-                ⌚
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <Field label="First name">
+                  <input value={firstName} onChange={(e) => setFirstName(e.target.value)} style={input} />
+                </Field>
+                <Field label="Last name">
+                  <input value={lastName} onChange={(e) => setLastName(e.target.value)} style={input} />
+                </Field>
               </div>
-            </div>
-          </Field>
 
-          <Field label="Country of residence">
-            <select value={country} onChange={(e) => setCountry(e.target.value)} style={select}>
-              <option value="">Select a country…</option>
-              {COUNTRIES.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
-          </Field>
+              <Field label="Display name">
+                <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} style={input} />
+              </Field>
 
-          <Field label={`Timezone (Current time: ${currentTime || "—"})`}>
-            <input
-              value={timezone}
-              onChange={(e) => setTimezone(e.target.value)}
-              style={input}
-              placeholder="America/Edmonton"
-              list="tzlist"
-            />
-            <datalist id="tzlist">
-              <option value="America/Edmonton" />
-              <option value="America/Denver" />
-              <option value="America/Chicago" />
-              <option value="America/Los_Angeles" />
-              <option value="America/New_York" />
-              <option value="UTC" />
-            </datalist>
-          </Field>
+              <Field label="Birthday">
+                <div style={{ position: "relative" }}>
+                  <input
+                    type="date"
+                    value={birthday}
+                    onChange={(e) => setBirthday(e.target.value)}
+                    style={{ ...input, paddingRight: 36 }}
+                  />
+                  <div
+                    aria-hidden
+                    style={{
+                      position: "absolute",
+                      right: 10,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      width: 18,
+                      height: 18,
+                      borderRadius: 4,
+                      border: "1px solid #777",
+                      color: "#fff",
+                      fontSize: 10,
+                      display: "grid",
+                      placeItems: "center",
+                      opacity: 0.9,
+                    }}
+                  >
+                    ⌚
+                  </div>
+                </div>
+              </Field>
 
-          {role === "tutor" && (
-            <>
+              <Field label="Country of residence">
+                <select value={country} onChange={(e) => setCountry(e.target.value)} style={select}>
+                  <option value="">Select a country…</option>
+                  {COUNTRIES.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </Field>
+
+              <Field label={`Timezone (Current time: ${currentTime || "—"})`}>
+                <input
+                  value={timezone}
+                  onChange={(e) => setTimezone(e.target.value)}
+                  style={input}
+                  placeholder="America/Edmonton"
+                  list="tzlist"
+                />
+                <datalist id="tzlist">
+                  <option value="America/Edmonton" />
+                  <option value="America/Denver" />
+                  <option value="America/Chicago" />
+                  <option value="America/Los_Angeles" />
+                  <option value="America/New_York" />
+                  <option value="UTC" />
+                </datalist>
+              </Field>
+
               <CardSubTitle>Tutor Details</CardSubTitle>
 
               <Field label="PayPal email (for payouts)">
@@ -643,259 +629,382 @@ export default function ProfileSettingsPage() {
                   placeholder="Write a short introduction students will see…"
                 />
               </Field>
-            </>
-          )}
 
-          <div style={row}>
-            {role === "tutor" ? (
-              <button onClick={saveTutorDetails} style={primaryBtn} disabled={saving}>
-                Save Tutor Details
-              </button>
-            ) : (
-              <button onClick={saveStudentProfile} style={primaryBtn} disabled={saving}>
-                Save Student Profile
-              </button>
-            )}
-            {saveMsg && <div style={muted}>{saveMsg}</div>}
-          </div>
-        </Card>
-
-        {/* Column 2: Change Password (always) */}
-        <Card>
-          <CardTitle>Change Password</CardTitle>
-          <Field label="Current password">
-            <input
-              type="password"
-              value={currPw}
-              onChange={(e) => setCurrPw(e.target.value)}
-              style={input}
-              placeholder="Enter your current password"
-            />
-          </Field>
-          <Field label="New password">
-            <input
-              type="password"
-              value={newPw}
-              onChange={(e) => setNewPw(e.target.value)}
-              style={input}
-              placeholder="At least 6 characters"
-            />
-          </Field>
-          <div style={row}>
-            <button onClick={handleChangePassword} style={primaryBtn}>
-              Update Password
-            </button>
-            {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
-          </div>
-        </Card>
-
-        {/* Column 3: Students = Payments | Tutors = Availability */}
-        {role === "student" ? (
-          <Card>
-            <CardTitle>Hours & Payments</CardTitle>
-
-            {/* BIG balance pill */}
-            <div style={balanceWrap}>
-              <div style={{ fontSize: 12, opacity: 0.85 }}>Current balance</div>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                <span style={{ fontSize: 34, fontWeight: 800, letterSpacing: "-0.02em" }}>
-                  {balanceH}
-                  <span style={{ fontSize: 16, marginLeft: 4, opacity: 0.9 }}>h</span>
-                </span>
-                <span style={{ fontSize: 28, fontWeight: 700 }}>
-                  {balanceM}
-                  <span style={{ fontSize: 14, marginLeft: 4, opacity: 0.9 }}>m</span>
-                </span>
+              <div style={row}>
+                <button onClick={saveTutorDetails} style={primaryBtn} disabled={saving}>
+                  Save Tutor Details
+                </button>
+                {saveMsg && <div style={muted}>{saveMsg}</div>}
               </div>
-            </div>
+            </Card>
 
-            {/* package cards */}
-            <div style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 10,
-              marginBottom: 12,
-            }}>
-              {STUDENT_PACKAGES.map((p) => {
-                const selected = selectedPkg.id === p.id;
-                const perHour = (p.price / p.hours).toFixed(2);
-                return (
-                  <button
-                    key={p.id}
-                    onClick={() => setSelectedPkg(p)}
+            {/* Cols 2-3, Row 1: Availability (double width) */}
+            <Card style={{ gridColumn: "2 / span 2" }}>
+              <CardTitle>Tutor Availability</CardTitle>
+              <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
+                Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or more
+                ranges per day (24-hour format).
+              </div>
+
+              <div style={availGridDays}>
+                {DAYS.map(({ key, label }) => (
+                  <div key={key} style={availDayCard}>
+                    <div style={{ fontSize: 12, color: "#fff", marginBottom: 8, fontWeight: 700 }}>{label}</div>
+
+                    {(availability[key] ?? []).length === 0 && (
+                      <div style={{ ...muted, marginBottom: 6 }}>No ranges</div>
+                    )}
+
+                    {(availability[key] ?? []).map((r, i) => (
+                      <div key={i} style={rangeRowGrid}>
+                        <input
+                          type="time"
+                          value={r.start}
+                          onChange={(e) => updateRange(key, i, "start", e.target.value)}
+                          style={timeInput}
+                        />
+                        <span style={{ color: "#888", textAlign: "center" }}>–</span>
+                        <input
+                          type="time"
+                          value={r.end}
+                          onChange={(e) => updateRange(key, i, "end", e.target.value)}
+                          style={timeInput}
+                        />
+                        <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+
+                    <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
+                      + Add time
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div style={row}>
+                <button onClick={saveTutorDetails} style={primaryBtn} disabled={saving}>
+                  Save Tutor Details & Availability
+                </button>
+                {saveMsg && <div style={muted}>{saveMsg}</div>}
+              </div>
+            </Card>
+
+            {/* Col 1, Row 2: Change Password (stacked under Profile) */}
+            <Card style={{ gridColumn: "1 / span 1" }}>
+              <CardTitle>Change Password</CardTitle>
+              <Field label="Current password">
+                <input
+                  type="password"
+                  value={currPw}
+                  onChange={(e) => setCurrPw(e.target.value)}
+                  style={input}
+                  placeholder="Enter your current password"
+                />
+              </Field>
+              <Field label="New password">
+                <input
+                  type="password"
+                  value={newPw}
+                  onChange={(e) => setNewPw(e.target.value)}
+                  style={input}
+                  placeholder="At least 6 characters"
+                />
+              </Field>
+              <div style={row}>
+                <button onClick={handleChangePassword} style={primaryBtn}>
+                  Update Password
+                </button>
+                {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
+              </div>
+            </Card>
+          </>
+        ) : (
+          /* ===== Student layout (unchanged 3 columns) ===== */
+          <>
+            {/* Col 1: Profile */}
+            <Card>
+              <CardTitle>Profile</CardTitle>
+
+              <Field label="Email">
+                <input disabled value={email} style={input} />
+              </Field>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <Field label="First name">
+                  <input value={firstName} onChange={(e) => setFirstName(e.target.value)} style={input} />
+                </Field>
+                <Field label="Last name">
+                  <input value={lastName} onChange={(e) => setLastName(e.target.value)} style={input} />
+                </Field>
+              </div>
+
+              <Field label="Display name">
+                <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} style={input} />
+              </Field>
+
+              <Field label="Grade level">
+                <select value={gradeLevel} onChange={(e) => setGradeLevel(e.target.value)} style={select}>
+                  <option value="">Select…</option>
+                  {[
+                    "Grade 4","Grade 5","Grade 6","Grade 7","Grade 8","Grade 9",
+                    "Grade 10","Grade 11","Grade 12","IB / AP"
+                  ].map((g) => (
+                    <option key={g} value={g}>{g}</option>
+                  ))}
+                </select>
+              </Field>
+
+              <Field label="Birthday">
+                <div style={{ position: "relative" }}>
+                  <input
+                    type="date"
+                    value={birthday}
+                    onChange={(e) => setBirthday(e.target.value)}
+                    style={{ ...input, paddingRight: 36 }}
+                  />
+                  <div
+                    aria-hidden
                     style={{
-                      padding: 12,
-                      borderRadius: 10,
-                      border: selected ? "1px solid #6ecf9a" : "1px solid #444",
-                      background: selected ? "rgba(110,207,154,0.12)" : "rgba(255,255,255,0.03)",
-                      textAlign: "left",
+                      position: "absolute",
+                      right: 10,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      width: 18,
+                      height: 18,
+                      borderRadius: 4,
+                      border: "1px solid #777",
                       color: "#fff",
-                      cursor: "pointer",
+                      fontSize: 10,
+                      display: "grid",
+                      placeItems: "center",
+                      opacity: 0.9,
                     }}
                   >
-                    <div style={{ fontWeight: 700 }}>{p.label}</div>
-                    <div style={{ opacity: 0.9 }}>{fmtUsd(p.price)}</div>
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>${perHour}/hr</div>
-                  </button>
-                );
-              })}
-            </div>
+                    ⌚
+                  </div>
+                </div>
+              </Field>
 
-            <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
-              Selected: <strong>{selectedPkg.hours}h</strong> for{" "}
-              <strong>{fmtUsd(selectedPkg.price)}</strong> (${(selectedPkg.price/selectedPkg.hours).toFixed(2)}/hr)
-            </div>
+              <Field label="Country of residence">
+                <select value={country} onChange={(e) => setCountry(e.target.value)} style={select}>
+                  <option value="">Select a country…</option>
+                  {COUNTRIES.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </Field>
 
-            {/* Stripe card-only form */}
-            {!STRIPE_PK ? (
-              <div style={{ ...muted, marginBottom: 10 }}>
-                Stripe key missing. Set <code>NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY</code>.
+              <Field label={`Timezone (Current time: ${currentTime || "—"})`}>
+                <input
+                  value={timezone}
+                  onChange={(e) => setTimezone(e.target.value)}
+                  style={input}
+                  placeholder="America/Edmonton"
+                  list="tzlist"
+                />
+                <datalist id="tzlist">
+                  <option value="America/Edmonton" />
+                  <option value="America/Denver" />
+                  <option value="America/Chicago" />
+                  <option value="America/Los_Angeles" />
+                  <option value="America/New_York" />
+                  <option value="UTC" />
+                </datalist>
+              </Field>
+
+              <div style={row}>
+                <button onClick={saveStudentProfile} style={primaryBtn} disabled={saving}>
+                  Save Student Profile
+                </button>
+                {saveMsg && <div style={muted}>{saveMsg}</div>}
               </div>
-            ) : (
-              <>
-                <Field label="Cardholder name">
-                  <input
-                    value={cardholder}
-                    onChange={(e) => setCardholder(e.target.value)}
-                    style={input}
-                    placeholder="Name on card"
-                  />
-                </Field>
+            </Card>
 
-                <Elements stripe={stripePromise!} options={{ appearance: { theme: "night" } }}>
-                  <StripeConfirmSection
-                    confirmNow={confirmNow}
-                    params={confirmParams}
-                    cardholder={cardholder}
-                    onDone={(ok, payload) => {
-                      if (ok && isPaymentSuccess(payload)) {
-                        onCardPaymentSucceeded(payload.hours, payload.paymentId);
-                      } else {
-                        const msg = (payload as PaymentError)?.message || "Payment failed.";
-                        setPayMsg(msg);
-                        setPayBusy(false);
-                      }
-                    }}
-                  />
-                </Elements>
-              </>
-            )}
+            {/* Col 2: Change Password */}
+            <Card>
+              <CardTitle>Change Password</CardTitle>
+              <Field label="Current password">
+                <input
+                  type="password"
+                  value={currPw}
+                  onChange={(e) => setCurrPw(e.target.value)}
+                  style={input}
+                  placeholder="Enter your current password"
+                />
+              </Field>
+              <Field label="New password">
+                <input
+                  type="password"
+                  value={newPw}
+                  onChange={(e) => setNewPw(e.target.value)}
+                  style={input}
+                  placeholder="At least 6 characters"
+                />
+              </Field>
+              <div style={row}>
+                <button onClick={handleChangePassword} style={primaryBtn}>
+                  Update Password
+                </button>
+                {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
+              </div>
+            </Card>
 
-            {/* Pay button */}
-            <div style={{ marginTop: 12 }}>
-              <button
-                style={{ ...primaryBtn, width: "100%", opacity: payBusy ? 0.7 : 1 }}
-                onClick={handleCardPay}
-                disabled={payBusy || !STRIPE_PK}
-              >
-                {payBusy ? "Processing…" : `Pay ${fmtUsd(selectedPkg.price)}`}
-              </button>
-            </div>
+            {/* Col 3: Hours & Payments */}
+            <Card>
+              <CardTitle>Hours & Payments</CardTitle>
 
-            {payMsg && <div style={{ ...muted, marginTop: 8 }}>{payMsg}</div>}
+              {/* BIG balance pill */}
+              <div style={balanceWrap}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Current balance</div>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                  <span style={{ fontSize: 34, fontWeight: 800, letterSpacing: "-0.02em" }}>
+                    {balanceH}
+                    <span style={{ fontSize: 16, marginLeft: 4, opacity: 0.9 }}>h</span>
+                  </span>
+                  <span style={{ fontSize: 28, fontWeight: 700 }}>
+                    {balanceM}
+                    <span style={{ fontSize: 14, marginLeft: 4, opacity: 0.9 }}>m</span>
+                  </span>
+                </div>
+              </div>
 
-            {/* Purchase history */}
-            <div style={{ marginTop: 16 }}>
-              <CardSubTitle>Purchase history</CardSubTitle>
-              {purchases.length === 0 ? (
-                <div style={{ ...muted, marginTop: 6 }}>No purchases yet.</div>
-              ) : (
-                <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 12px", display: "grid", gap: 8 }}>
-                  {purchases.map((p) => (
-                    <li
+              {/* package cards */}
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 10,
+                marginBottom: 12,
+              }}>
+                {STUDENT_PACKAGES.map((p) => {
+                  const selected = selectedPkg.id === p.id;
+                  const perHour = (p.price / p.hours).toFixed(2);
+                  return (
+                    <button
                       key={p.id}
+                      onClick={() => setSelectedPkg(p)}
                       style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        padding: "10px 12px",
-                        borderRadius: 8,
-                        border: "1px solid rgba(255,255,255,0.12)",
-                        background: "rgba(255,255,255,0.03)",
+                        padding: 12,
+                        borderRadius: 10,
+                        border: selected ? "1px solid #6ecf9a" : "1px solid #444",
+                        background: selected ? "rgba(110,207,154,0.12)" : "rgba(255,255,255,0.03)",
+                        textAlign: "left",
+                        color: "#fff",
+                        cursor: "pointer",
                       }}
                     >
-                      <div style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
-                        <span style={{ fontWeight: 700 }}>{p.hours}h</span>
-                        <span style={{ ...muted }}>• {p.method}</span>
-                      </div>
-                      <div style={{ textAlign: "right" }}>
-                        <div>{fmtUsd(p.amountUsd)}</div>
-                        <div style={{ ...muted, fontSize: 11 }}>{fmtDate(p.createdAt || null)}</div>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
+                      <div style={{ fontWeight: 700 }}>{p.label}</div>
+                      <div style={{ opacity: 0.9 }}>{fmtUsd(p.price)}</div>
+                      <div style={{ fontSize: 12, opacity: 0.8 }}>${perHour}/hr</div>
+                    </button>
+                  );
+                })}
+              </div>
 
-              {historyHasMore && uid && (
-                <button
-                  style={{ ...ghostButton, width: "100%" }}
-                  disabled={historyBusy}
-                  onClick={() => loadHistoryPage(uid, false)}
-                  title="Load more purchases"
-                >
-                  {historyBusy ? "Loading…" : "Load more"}
-                </button>
-              )}
-            </div>
+              <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
+                Selected: <strong>{selectedPkg.hours}h</strong> for{" "}
+                <strong>{fmtUsd(selectedPkg.price)}</strong> (${(selectedPkg.price/selectedPkg.hours).toFixed(2)}/hr)
+              </div>
 
-            <div style={{ ...muted, marginTop: 10 }}>
-              After a successful payment, purchased minutes will be added to your balance automatically.
-            </div>
-          </Card>
-        ) : (
-          <Card>
-            <CardTitle>Tutor Availability</CardTitle>
-            <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
-              Times are saved in your timezone (<strong>{timezone || "UTC"}</strong>). Add one or more
-              ranges per day (24-hour format).
-            </div>
-
-            {/* Availability day grid */}
-            <div style={availGridDays}>
-              {DAYS.map(({ key, label }) => (
-                <div key={key} style={availDayCard}>
-                  <div style={{ fontSize: 12, color: "#fff", marginBottom: 8, fontWeight: 700 }}>{label}</div>
-
-                  {(availability[key] ?? []).length === 0 && (
-                    <div style={{ ...muted, marginBottom: 6 }}>No ranges</div>
-                  )}
-
-                  {(availability[key] ?? []).map((r, i) => (
-                    <div key={i} style={rangeRowGrid}>
-                      <input
-                        type="time"
-                        value={r.start}
-                        onChange={(e) => updateRange(key, i, "start", e.target.value)}
-                        style={timeInput}
-                      />
-                      <span style={{ color: "#888", textAlign: "center" }}>–</span>
-                      <input
-                        type="time"
-                        value={r.end}
-                        onChange={(e) => updateRange(key, i, "end", e.target.value)}
-                        style={timeInput}
-                      />
-                      <button onClick={() => removeRange(key, i)} style={smallGhostBtn}>
-                        Remove
-                      </button>
-                    </div>
-                  ))}
-
-                  <button onClick={() => addTimeRange(key)} style={smallAddBtn}>
-                    + Add time
-                  </button>
+              {/* Stripe card-only form */}
+              {!STRIPE_PK ? (
+                <div style={{ ...muted, marginBottom: 10 }}>
+                  Stripe key missing. Set <code>NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY</code>.
                 </div>
-              ))}
-            </div>
+              ) : (
+                <>
+                  <Field label="Cardholder name">
+                    <input
+                      value={cardholder}
+                      onChange={(e) => setCardholder(e.target.value)}
+                      style={input}
+                      placeholder="Name on card"
+                    />
+                  </Field>
 
-            <div style={row}>
-              <button onClick={saveTutorDetails} style={primaryBtn} disabled={saving}>
-                Save Tutor Details & Availability
-              </button>
-              {saveMsg && <div style={muted}>{saveMsg}</div>}
-            </div>
-          </Card>
+                  <Elements stripe={stripePromise!} options={{ appearance: { theme: "night" } }}>
+                    <StripeConfirmSection
+                      confirmNow={confirmNow}
+                      params={confirmParams}
+                      cardholder={cardholder}
+                      onDone={(ok, payload) => {
+                        if (ok && isPaymentSuccess(payload)) {
+                          onCardPaymentSucceeded(payload.hours, payload.paymentId);
+                        } else {
+                          const msg = (payload as PaymentError)?.message || "Payment failed.";
+                          setPayMsg(msg);
+                          setPayBusy(false);
+                        }
+                      }}
+                    />
+                  </Elements>
+                </>
+              )}
+
+              {/* Pay button */}
+              <div style={{ marginTop: 12 }}>
+                <button
+                  style={{ ...primaryBtn, width: "100%", opacity: payBusy ? 0.7 : 1 }}
+                  onClick={handleCardPay}
+                  disabled={payBusy || !STRIPE_PK}
+                >
+                  {payBusy ? "Processing…" : `Pay ${fmtUsd(selectedPkg.price)}`}
+                </button>
+              </div>
+
+              {payMsg && <div style={{ ...muted, marginTop: 8 }}>{payMsg}</div>}
+
+              {/* Purchase history */}
+              <div style={{ marginTop: 16 }}>
+                <CardSubTitle>Purchase history</CardSubTitle>
+                {purchases.length === 0 ? (
+                  <div style={{ ...muted, marginTop: 6 }}>No purchases yet.</div>
+                ) : (
+                  <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 12px", display: "grid", gap: 8 }}>
+                    {purchases.map((p) => (
+                      <li
+                        key={p.id}
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          padding: "10px 12px",
+                          borderRadius: 8,
+                          border: "1px solid rgba(255,255,255,0.12)",
+                          background: "rgba(255,255,255,0.03)",
+                        }}
+                      >
+                        <div style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
+                          <span style={{ fontWeight: 700 }}>{p.hours}h</span>
+                          <span style={{ ...muted }}>• {p.method}</span>
+                        </div>
+                        <div style={{ textAlign: "right" }}>
+                          <div>{fmtUsd(p.amountUsd)}</div>
+                          <div style={{ ...muted, fontSize: 11 }}>{fmtDate(p.createdAt || null)}</div>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {historyHasMore && uid && (
+                  <button
+                    style={{ ...ghostButton, width: "100%" }}
+                    disabled={historyBusy}
+                    onClick={() => loadHistoryPage(uid, false)}
+                    title="Load more purchases"
+                  >
+                    {historyBusy ? "Loading…" : "Load more"}
+                  </button>
+                )}
+              </div>
+
+              <div style={{ ...muted, marginTop: 10 }}>
+                After a successful payment, purchased minutes will be added to your balance automatically.
+              </div>
+            </Card>
+          </>
         )}
       </section>
     </main>
@@ -998,18 +1107,18 @@ function Brand() {
   );
 }
 
-/* === 3-column grid (restores tutor layout) === */
+/* Grid: 3 columns (availability can span 2 for tutors) */
 const bodyGrid3: React.CSSProperties = {
   width: "100%",
   maxWidth: 1280,
   margin: "0 auto",
   display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(320px, 1fr))",
+  gridTemplateColumns: "repeat(3, minmax(300px, 1fr))",
   gap: 16,
 };
 
 /* Card + Field styling */
-function Card({ children }: { children: React.ReactNode }) {
+function Card({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
   return (
     <div
       style={{
@@ -1024,6 +1133,7 @@ function Card({ children }: { children: React.ReactNode }) {
         flexDirection: "column",
         gap: 12,
         minHeight: 120,
+        ...style,
       }}
     >
       {children}
