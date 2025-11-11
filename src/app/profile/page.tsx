@@ -125,7 +125,6 @@ function guessTimezone() {
   }
 }
 function allTimezones(): string[] {
-  // Modern browsers: full IANA list
   try {
     // @ts-ignore
     if (Intl.supportedValuesOf) {
@@ -134,7 +133,6 @@ function allTimezones(): string[] {
       if (Array.isArray(tzs) && tzs.length > 0) return tzs;
     }
   } catch {}
-  // Fallback (curated common set)
   return [
     "UTC",
     // Americas
@@ -359,7 +357,7 @@ export default function ProfileSettingsPage() {
       await setDoc(
         doc(db, "users", uid),
         {
-          displayName: displayName.trim() || email.split("@")[0],
+          displayName: displayName.trim() || email.split("@")?.[0],
           timezone: timezone || guessTimezone(),
           firstName: firstName.trim(),
           lastName: lastName.trim(),
@@ -561,7 +559,7 @@ export default function ProfileSettingsPage() {
       <section style={bodyGrid3}>
         {role === "tutor" ? (
           <>
-            {/* Col 1: Profile */}
+            {/* Col 1: Profile + Change Password in SAME card */}
             <Card style={{ gridColumn: "1 / span 1" }}>
               <CardTitle>Profile</CardTitle>
 
@@ -642,9 +640,37 @@ export default function ProfileSettingsPage() {
                 </button>
                 {saveMsg && <div style={muted}>{saveMsg}</div>}
               </div>
+
+              {/* --- Horizontal rule & Change Password inside same card --- */}
+              <hr style={hr} />
+              <CardSubTitle>Change Password</CardSubTitle>
+              <Field label="Current password">
+                <input
+                  type="password"
+                  value={currPw}
+                  onChange={(e) => setCurrPw(e.target.value)}
+                  style={input}
+                  placeholder="Enter your current password"
+                />
+              </Field>
+              <Field label="New password">
+                <input
+                  type="password"
+                  value={newPw}
+                  onChange={(e) => setNewPw(e.target.value)}
+                  style={input}
+                  placeholder="At least 6 characters"
+                />
+              </Field>
+              <div style={row}>
+                <button onClick={handleChangePassword} style={primaryBtn}>
+                  Update Password
+                </button>
+                {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
+              </div>
             </Card>
 
-            {/* Cols 2-3: Availability (double width; each day its own row) */}
+            {/* Cols 2-3: Availability (double width; one day per row) */}
             <Card style={{ gridColumn: "2 / span 2" }}>
               <CardTitle>Tutor Availability</CardTitle>
               <div style={{ fontSize: 12, color: "#bbb", marginBottom: 10 }}>
@@ -693,40 +719,15 @@ export default function ProfileSettingsPage() {
                 {saveMsg && <div style={muted}>{saveMsg}</div>}
               </div>
             </Card>
-
-            {/* Col 1: Change Password under Profile */}
-            <Card style={{ gridColumn: "1 / span 1" }}>
-              <CardTitle>Change Password</CardTitle>
-              <Field label="Current password">
-                <input
-                  type="password"
-                  value={currPw}
-                  onChange={(e) => setCurrPw(e.target.value)}
-                  style={input}
-                  placeholder="Enter your current password"
-                />
-              </Field>
-              <Field label="New password">
-                <input
-                  type="password"
-                  value={newPw}
-                  onChange={(e) => setNewPw(e.target.value)}
-                  style={input}
-                  placeholder="At least 6 characters"
-                />
-              </Field>
-              <div style={row}>
-                <button onClick={handleChangePassword} style={primaryBtn}>
-                  Update Password
-                </button>
-                {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
-              </div>
-            </Card>
           </>
         ) : (
-          /* ===== Student layout (left: Profile + Password, middle: Payments, right: History) ===== */
+          /* ===== Student layout =====
+             Left: Profile + Change Password (same card)
+             Middle: Hours & Payments (one package per row)
+             Right: Purchase History
+          */
           <>
-            {/* Col 1: Profile */}
+            {/* Col 1: Profile + Change Password in SAME card */}
             <Card style={{ gridColumn: "1 / span 1" }}>
               <CardTitle>Profile</CardTitle>
 
@@ -791,11 +792,17 @@ export default function ProfileSettingsPage() {
                   ))}
                 </select>
               </Field>
-            </Card>
 
-            {/* Col 1 (stacked): Change Password */}
-            <Card style={{ gridColumn: "1 / span 1" }}>
-              <CardTitle>Change Password</CardTitle>
+              <div style={{ ...row, marginTop: 6 }}>
+                <button onClick={saveStudentProfile} style={primaryBtn} disabled={saving}>
+                  Save Student Profile
+                </button>
+                {saveMsg && <div style={muted}>{saveMsg}</div>}
+              </div>
+
+              {/* --- Horizontal rule & Change Password inside same card --- */}
+              <hr style={hr} />
+              <CardSubTitle>Change Password</CardSubTitle>
               <Field label="Current password">
                 <input
                   type="password"
@@ -820,20 +827,12 @@ export default function ProfileSettingsPage() {
                 </button>
                 {pwMessage && <div style={{ ...muted, maxWidth: 420 }}>{pwMessage}</div>}
               </div>
-
-              <div style={{ ...row, marginTop: 10 }}>
-                <button onClick={saveStudentProfile} style={primaryBtn} disabled={saving}>
-                  Save Student Profile
-                </button>
-                {saveMsg && <div style={muted}>{saveMsg}</div>}
-              </div>
             </Card>
 
-            {/* Col 2: Hours & Payments (package cards each on their own row) */}
+            {/* Col 2: Hours & Payments (package cards one per row) */}
             <Card style={{ gridColumn: "2 / span 1" }}>
               <CardTitle>Hours & Payments</CardTitle>
 
-              {/* BIG balance pill */}
               <div style={balanceWrap}>
                 <div style={{ fontSize: 12, opacity: 0.85 }}>Current balance</div>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
@@ -848,7 +847,6 @@ export default function ProfileSettingsPage() {
                 </div>
               </div>
 
-              {/* package cards: one per row */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginBottom: 12 }}>
                 {STUDENT_PACKAGES.map((p) => {
                   const selected = selectedPkg.id === p.id;
@@ -880,7 +878,6 @@ export default function ProfileSettingsPage() {
                 <strong>{fmtUsd(selectedPkg.price)}</strong> (${(selectedPkg.price/selectedPkg.hours).toFixed(2)}/hr)
               </div>
 
-              {/* Stripe card-only form */}
               {!STRIPE_PK ? (
                 <div style={{ ...muted, marginBottom: 10 }}>
                   Stripe key missing. Set <code>NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY</code>.
@@ -915,7 +912,6 @@ export default function ProfileSettingsPage() {
                 </>
               )}
 
-              {/* Pay button */}
               <div style={{ marginTop: 12 }}>
                 <button
                   style={{ ...primaryBtn, width: "100%", opacity: payBusy ? 0.7 : 1 }}
@@ -929,7 +925,7 @@ export default function ProfileSettingsPage() {
               {payMsg && <div style={{ ...muted, marginTop: 8 }}>{payMsg}</div>}
             </Card>
 
-            {/* Col 3: Purchase history (separate card) */}
+            {/* Col 3: Purchase history */}
             <Card style={{ gridColumn: "3 / span 1" }}>
               <CardTitle>Purchase history</CardTitle>
               {purchases.length === 0 ? (
@@ -1188,6 +1184,14 @@ const miniSuffixBox: React.CSSProperties = {
   display: "grid",
   placeItems: "center",
   opacity: 0.9,
+};
+
+const hr: React.CSSProperties = {
+  width: "100%",
+  border: 0,
+  height: 1,
+  background: "linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,0.18), rgba(255,255,255,0))",
+  margin: "8px 0 4px",
 };
 
 /* === Availability (one day per row) === */
