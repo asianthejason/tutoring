@@ -922,7 +922,6 @@ export default function TutorsLobbyPage() {
 
   /* ===================== UI: Shell ===================== */
   // break 28 days into 4 arrays of 7 for rendering
-  type SlotBlock = ReturnType<typeof useMemo> extends (infer R)[] ? any : never; // ts appeasement (not used here)
   const weeks4 = useMemo(() => {
     const chunks: any[][] = [];
     // slotBlocks is defined earlier; re-derive type inline
