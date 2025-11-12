@@ -20,7 +20,7 @@ import {
 
 type Role = "student" | "tutor" | "admin";
 type DayKey = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
-type TimeRange = { start: string; end: string }; // "HH:mm"
+type TimeRange = { start: string; end: string }; // "HH:mm" (24h)
 type Availability = Record<DayKey, TimeRange[]>;
 
 type TutorRow = {
@@ -91,7 +91,7 @@ function deriveStatusLabel(t: TutorRow) {
 const ONE_HOUR = 60 * 60 * 1000;
 const DAY_MS = 24 * ONE_HOUR;
 
-// Sunday anchor (matches UI leftmost column)
+// Sunday anchor (in the browser’s local tz == student tz)
 function startOfWeekSunday(d: Date) {
   const copy = new Date(d);
   const day = copy.getDay(); // Sun=0..Sat=6
@@ -105,7 +105,7 @@ function addDays(d: Date, days: number) {
   return c;
 }
 
-// --- NEW: availability time sanitizer (round down to nearest 15 min) ---
+// sanitize availability to 15-minute grid (prevents :06, :11, etc)
 function normalizeHM(hhmm: string): string {
   const m = String(hhmm || "").trim().match(/^(\d{1,2}):(\d{1,2})$/);
   let H = 0, M = 0;
@@ -117,14 +117,13 @@ function normalizeHM(hhmm: string): string {
   const pad = (n: number) => (n < 10 ? "0" + n : String(n));
   return `${pad(H)}:${pad(snapped)}`;
 }
-
 function hmToMinutes(hhmm: string): number {
   const norm = normalizeHM(hhmm);
   const [h, m] = norm.split(":").map((x) => parseInt(x, 10));
   return h * 60 + m;
 }
 
-// robust tz math (handles DST) — we keep this but clamp to whole minutes
+// robust tz math
 function getTzOffsetMs(tz: string, ms: number): number {
   const dtf = new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
@@ -180,7 +179,6 @@ function fmtDateInTZ(ms: number, tz: string) {
     weekday: "short",
     month: "short",
     day: "numeric",
-  // keep display in student tz when called with studentTZ
     timeZone: tz,
   }).format(ms);
 }
@@ -208,6 +206,12 @@ function getStudentSelectedTZ(stu: StudentPrefs | undefined): string {
     (stu?.preferredTimezone && typeof stu.preferredTimezone === "string" && stu.preferredTimezone) ||
     Intl.DateTimeFormat().resolvedOptions().timeZone
   );
+}
+
+// NEW: given a Date representing the student column, get the UTC instant of **noon in student tz**.
+function studentDayNoonUTC(dateAnchor: Date, studentTZ: string): number {
+  const { year, month, day } = getYMDInTZ(+dateAnchor, studentTZ);
+  return wallTimeToUTC(year, month, day, 12, 0, studentTZ); // 12:00 local student time -> UTC
 }
 
 // ---------- component ----------
@@ -250,6 +254,17 @@ export default function TutorsLobbyPage() {
     chosenEnd?: number;
     containing?: { startMs: number; endMs: number } | null;
   }>({});
+  const [debugMapRows, setDebugMapRows] = useState<
+    Array<{
+      idx: number;
+      studentDayLabel: string;
+      studentNoonUTC: string;
+      tutorY: number;
+      tutorM: number;
+      tutorD: number;
+      rangesUTC: Array<{ s: string; e: string }>;
+    }>
+  >([]);
 
   const [toast, setToast] = useState("");
 
@@ -300,6 +315,7 @@ export default function TutorsLobbyPage() {
     setFormDuration(60);
     setFormStartHM("");
     setSelectedDayIdx(null);
+    setDebugMapRows([]);
 
     const week0 = startOfWeekSunday(new Date());
     setActiveWeekStart(week0);
@@ -415,9 +431,9 @@ export default function TutorsLobbyPage() {
   // ---------- availability blocks ----------
   type AbsRange = { startMs: number; endMs: number };
   type SlotBlock = {
-    dayHeader: string;
+    dayHeader: string; // label in student tz
     dayDate: Date; // student column anchor
-    ranges: AbsRange[];
+    ranges: AbsRange[]; // absolute UTC
     past: boolean;
   };
 
@@ -430,41 +446,37 @@ export default function TutorsLobbyPage() {
       (["sun", "mon", "tue", "wed", "thu", "fri", "sat"][dow] as DayKey);
 
     const blocks: SlotBlock[] = [];
+    const debugRows: typeof debugMapRows = [];
 
     for (let i = 0; i < 7; i++) {
       const dayDateStudent = addDays(activeWeekStart, i);
 
-      // Map the student-column date to the tutor's weekday
-      const tutorDOW = getWeekdayInTZ(+dayDateStudent, tutorTZ); // 0..6 (Sun..Sat)
+      // 1) Stable mapping: take **student noon** for this column day…
+      const noonUTC = studentDayNoonUTC(dayDateStudent, studentTZ);
+
+      // 2) …see what weekday that corresponds to in the **tutor** tz
+      const tutorDOW = getWeekdayInTZ(noonUTC, tutorTZ); // 0..6 (Sun..Sat)
       const key = dowToKey(tutorDOW);
 
-      // --- SANITIZE EACH RANGE FIRST ---
+      // 3) sanitize ranges first
       const rangesDef = (activeTutor.availability?.[key] || []) as TimeRange[];
       const cleaned = rangesDef
-        .map((r) => ({
-          start: normalizeHM(r.start),
-          end: normalizeHM(r.end),
-        }))
-        .filter((r) => {
-          const s = hmToMinutes(r.start);
-          const e = hmToMinutes(r.end);
-          return e > s; // valid, non-empty
-        });
+        .map((r) => ({ start: normalizeHM(r.start), end: normalizeHM(r.end) }))
+        .filter((r) => hmToMinutes(r.end) > hmToMinutes(r.start));
 
-      // Build absolute UTC ranges using the tutor's Y/M/D for this column
-      const { year, month, day } = getYMDInTZ(+dayDateStudent, tutorTZ);
-      const abs: AbsRange[] = cleaned
-        .map((r) => {
-          const s = hmToMinutes(r.start);
-          const e = hmToMinutes(r.end);
-          const sMs = wallTimeToUTC(year, month, day, Math.floor(s / 60), s % 60, tutorTZ);
-          const eMs = wallTimeToUTC(year, month, day, Math.floor(e / 60), e % 60, tutorTZ);
-          // final clamp to minute boundaries
-          const sClamped = Math.floor(sMs / 60000) * 60000;
-          const eClamped = Math.floor(eMs / 60000) * 60000;
-          return { startMs: sClamped, endMs: eClamped };
-        })
-        .filter((r) => r.endMs > r.startMs);
+      // 4) pick the **tutor Y/M/D** that corresponds to student noon
+      const { year: ty, month: tm, day: td } = getYMDInTZ(noonUTC, tutorTZ);
+
+      // 5) convert each tutor wall-time on that Y/M/D into absolute UTC
+      const abs: AbsRange[] = cleaned.map((r) => {
+        const sMin = hmToMinutes(r.start);
+        const eMin = hmToMinutes(r.end);
+        const sMs = wallTimeToUTC(ty, tm, td, Math.floor(sMin / 60), sMin % 60, tutorTZ);
+        const eMs = wallTimeToUTC(ty, tm, td, Math.floor(eMin / 60), eMin % 60, tutorTZ);
+        const sClamped = Math.floor(sMs / 60000) * 60000;
+        const eClamped = Math.floor(eMs / 60000) * 60000;
+        return { startMs: sClamped, endMs: eClamped };
+      }).filter(r => r.endMs > r.startMs);
 
       abs.sort((a, b) => a.startMs - b.startMs);
 
@@ -474,10 +486,26 @@ export default function TutorsLobbyPage() {
         ranges: abs,
         past: abs.length > 0 && abs.every((r) => r.endMs <= now),
       });
+
+      // collect debug
+      debugRows.push({
+        idx: i,
+        studentDayLabel: fmtDateInTZ(+dayDateStudent, studentTZ),
+        studentNoonUTC: new Date(noonUTC).toISOString(),
+        tutorY: ty,
+        tutorM: tm + 1,
+        tutorD: td,
+        rangesUTC: abs.map((r) => ({
+          s: new Date(r.startMs).toISOString(),
+          e: new Date(r.endMs).toISOString(),
+        })),
+      });
     }
 
+    setDebugMapRows(debugRows);
     return blocks;
-  }, [activeTutor, activeWeekStart, studentTZ]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTutor, activeWeekStart, studentTZ]); // (intentionally not depending on debugMapRows setter)
 
   // ---------- start-time options ----------
   const formStartOptions = useMemo(() => {
@@ -523,7 +551,7 @@ export default function TutorsLobbyPage() {
     });
   }
 
-  // convert student's selected day/time (student wall) → UTC
+  // convert student's selected day/time (student wall) → UTC (using student date parts)
   function studentWallToUTC(dateAnchor: Date, hm24: string, tz: string): number {
     const safeHM = normalizeHM(hm24);
     const { year, month, day } = getYMDInTZ(+dateAnchor, tz);
@@ -1249,6 +1277,7 @@ export default function TutorsLobbyPage() {
                           }}
                         >
                           <div style={{ fontWeight: 700, marginBottom: 4 }}>Debug</div>
+                          <div>Now (UTC): {new Date(Date.now()).toISOString()}</div>
                           <div>Student TZ: {studentTZ}</div>
                           <div>Tutor TZ: {activeTutor?.timezone || "(default/unknown)"}</div>
                           <div>Selected column: {selectedDayIdx ?? "-"}</div>
@@ -1257,11 +1286,11 @@ export default function TutorsLobbyPage() {
 
                           {selectedDayIdx !== null && (
                             <>
-                              <div style={{ marginTop: 6, opacity: 0.8 }}>Ranges (student local):</div>
+                              <div style={{ marginTop: 6, opacity: 0.8 }}>Ranges in selected column:</div>
                               <ul style={{ margin: 0, paddingLeft: 16 }}>
                                 {slotBlocks[selectedDayIdx]?.ranges.map((r, i) => (
                                   <li key={i}>
-                                    {fmtTimeInTZ(r.startMs, studentTZ)}–{fmtTimeInTZ(r.endMs, studentTZ)}
+                                    local: {fmtTimeInTZ(r.startMs, studentTZ)}–{fmtTimeInTZ(r.endMs, studentTZ)}
                                     {"  "}
                                     <span style={{ opacity: 0.7 }}>
                                       [UTC {new Date(r.startMs).toISOString().slice(11, 16)}–
@@ -1284,6 +1313,31 @@ export default function TutorsLobbyPage() {
                               Note: Validator failed containment on these UTC values.
                             </div>
                           )}
+
+                          {/* NEW: day-mapping table for all 7 columns */}
+                          <div style={{ marginTop: 10, opacity: 0.85, fontWeight: 700 }}>
+                            Day mapping (student noon → tutor Y/M/D):
+                          </div>
+                          <ul style={{ margin: 0, paddingLeft: 16 }}>
+                            {debugMapRows.map((row) => (
+                              <li key={row.idx} style={{ marginBottom: 4 }}>
+                                [col {row.idx}] {row.studentDayLabel} · student noon UTC {row.studentNoonUTC} →
+                                tutor YMD {row.tutorY}-{String(row.tutorM).padStart(2, "0")}-
+                                {String(row.tutorD).padStart(2, "0")} · ranges:
+                                <ul style={{ margin: 0, paddingLeft: 16 }}>
+                                  {row.rangesUTC.length === 0 ? (
+                                    <li>(none)</li>
+                                  ) : (
+                                    row.rangesUTC.map((rr, j) => (
+                                      <li key={j}>
+                                        {rr.s.slice(11, 16)}–{rr.e.slice(11, 16)} UTC
+                                      </li>
+                                    ))
+                                  )}
+                                </ul>
+                              </li>
+                            ))}
+                          </ul>
                           {debugMsg && <div style={{ color: "#fbbf24", marginTop: 6 }}>Note: {debugMsg}</div>}
                         </div>
                       )}
