@@ -17,14 +17,15 @@ import {
 } from "firebase/firestore";
 
 type Role = "tutor" | "student" | "admin";
+type RoomMode = "homework" | "session" | null;
 
 type Booking = {
   id: string;
   tutorName?: string;
   tutorEmail?: string;
-  startTime?: number;
+  startTime?: number;     // ms epoch
   durationMin?: number;
-  roomId?: string;
+  roomId?: string;        // tutor's roomId (still stored for back-compat)
 };
 
 type TutorInfo = {
@@ -32,9 +33,26 @@ type TutorInfo = {
   displayName: string;
   email: string;
   roomId: string;
-  status: string; // "waiting" | "busy" | "offline"
+  status: "waiting" | "busy" | "offline";
+  roomMode: RoomMode;
   lastActiveAt?: number;
 };
+
+/** -------- time helpers (match tutor page rules) -------- */
+const GRACE_BEFORE_MIN = 15;
+const GRACE_AFTER_MIN = 15;
+const FRESH_WINDOW_MS = 30_000;
+
+function minutes(n: number) {
+  return n * 60 * 1000;
+}
+function withinJoinWindow(startMs?: number, durationMin?: number) {
+  if (!startMs || !durationMin) return false;
+  const now = Date.now();
+  const windowStart = startMs - minutes(GRACE_BEFORE_MIN);
+  const windowEnd = startMs + minutes(durationMin) + minutes(GRACE_AFTER_MIN);
+  return now >= windowStart && now <= windowEnd;
+}
 
 export default function StudentDashboardPage() {
   const router = useRouter();
@@ -44,11 +62,18 @@ export default function StudentDashboardPage() {
   const [uid, setUid] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState<string>("");
 
-  // upcoming sessions
+  // upcoming sessions (mine)
   const [bookings, setBookings] = useState<Booking[]>([]);
 
-  // live tutors for homework help
+  // live tutors for homework help (only roomMode=homework)
   const [tutors, setTutors] = useState<TutorInfo[]>([]);
+
+  // render tick for potential future countdown badges (optional)
+  const [_tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // ---- auth gate / profile load ----
   useEffect(() => {
@@ -88,7 +113,7 @@ export default function StudentDashboardPage() {
   useEffect(() => {
     if (!uid) return;
 
-    const qRef = query(collection(db, "bookings"), where("studentId", "==", uid), limit(10));
+    const qRef = query(collection(db, "bookings"), where("studentId", "==", uid), limit(20));
 
     const unsub = onSnapshot(
       qRef,
@@ -100,18 +125,13 @@ export default function StudentDashboardPage() {
             id: docSnap.id,
             tutorName: b.tutorName,
             tutorEmail: b.tutorEmail,
-            startTime: b.startTime,
+            startTime: typeof b.startTime === "number" ? b.startTime : (b.startTime?.toMillis?.() ?? undefined),
             durationMin: b.durationMin,
             roomId: b.roomId,
           });
         });
 
-        list.sort((a, b) => {
-          const ta = a.startTime || 0;
-          const tb = b.startTime || 0;
-          return ta - tb;
-        });
-
+        list.sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
         setBookings(list);
       },
       (err) => {
@@ -122,9 +142,14 @@ export default function StudentDashboardPage() {
     return unsub;
   }, [uid]);
 
-  // ---- subscribe to tutors who are actually live ----
+  // ---- subscribe to tutors who are actually live in HOMEWORK HELP mode ----
   useEffect(() => {
-    const tutorsRef = query(collection(db, "users"), where("role", "==", "tutor"));
+    // We filter by role=tutor and roomMode=homework in Firestore, then client-filter status/freshness.
+    const tutorsRef = query(
+      collection(db, "users"),
+      where("role", "==", "tutor"),
+      where("roomMode", "==", "homework")
+    );
 
     const unsub = onSnapshot(
       tutorsRef,
@@ -134,13 +159,14 @@ export default function StudentDashboardPage() {
 
         snap.forEach((docSnap) => {
           const data = docSnap.data() as DocumentData;
-          const status = data.status || "offline";
-          const lastActiveAt = data.lastActiveAt || 0;
-          const isFresh = now - lastActiveAt < 30000; // 30s
 
-          // hide offline or stale tutors
-          if (status === "offline") return;
+          const status = (data.status as TutorInfo["status"]) || "offline";
+          const lastActiveAt = typeof data.lastActiveAt === "number" ? data.lastActiveAt : 0;
+          const isFresh = now - lastActiveAt < FRESH_WINDOW_MS;
+
+          // Only show fresh, live tutors in homework mode
           if (!isFresh) return;
+          if (status === "offline") return;
 
           rows.push({
             uid: docSnap.id,
@@ -148,13 +174,14 @@ export default function StudentDashboardPage() {
             email: data.email || "",
             roomId: data.roomId || "",
             status,
+            roomMode: (data.roomMode as RoomMode) ?? null,
             lastActiveAt,
           });
         });
 
         rows.sort((a, b) => {
-          // waiting (free) first, then busy
-          const order = (s: string) => (s === "waiting" ? 0 : s === "busy" ? 1 : 2);
+          // waiting (free) first, then busy, then by name
+          const order = (s: TutorInfo["status"]) => (s === "waiting" ? 0 : s === "busy" ? 1 : 2);
           const diff = order(a.status) - order(b.status);
           if (diff !== 0) return diff;
           return a.displayName.localeCompare(b.displayName);
@@ -171,13 +198,23 @@ export default function StudentDashboardPage() {
   }, []);
 
   // ---- join live room immediately (waiting tutor) ----
-  const joinRoomNow = useCallback(
+  const joinHomeworkRoom = useCallback(
     (tutorRoomId: string) => {
       if (!tutorRoomId) return;
-      router.push(`/room?roomId=${encodeURIComponent(tutorRoomId)}`);
+      // carry mode=homework so the room page can treat as lobby entry
+      router.push(`/room?mode=homework&roomId=${encodeURIComponent(tutorRoomId)}`);
     },
     [router]
   );
+
+  // ---- join a scheduled 1-on-1 session ----
+  function canJoinBooking(b: Booking) {
+    return withinJoinWindow(b.startTime, b.durationMin || 60);
+  }
+  function joinScheduled(b: Booking) {
+    // We route through bookingId + mode=session so the room can enforce admission logic.
+    router.push(`/room?mode=session&bookingId=${encodeURIComponent(b.id)}`);
+  }
 
   function formatTime(ts?: number) {
     if (!ts) return "-";
@@ -186,21 +223,13 @@ export default function StudentDashboardPage() {
       return d.toLocaleString(undefined, {
         month: "short",
         day: "numeric",
+        weekday: "short",
         hour: "2-digit",
         minute: "2-digit",
       });
     } catch {
       return "-";
     }
-  }
-
-  // allow join button ~15 min before start
-  function canJoinBooking(startTime?: number) {
-    if (!startTime) return false;
-    const now = Date.now();
-    const diffMs = startTime - now;
-    const fifteenMinMs = 15 * 60 * 1000;
-    return diffMs <= fifteenMinMs;
   }
 
   async function handleSignOut() {
@@ -345,7 +374,7 @@ export default function StudentDashboardPage() {
               marginBottom: 12,
             }}
           >
-            Join when your tutor is live (about 10–15 min before start).
+            You can enter your session about {GRACE_BEFORE_MIN} minutes before the scheduled time.
           </div>
 
           {bookings.length === 0 ? (
@@ -356,7 +385,7 @@ export default function StudentDashboardPage() {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "minmax(140px,1fr) minmax(120px,1fr) minmax(100px,auto)",
+                gridTemplateColumns: "minmax(180px,1.3fr) minmax(180px,1fr) minmax(140px,auto)",
                 gap: "12px",
                 fontSize: 13,
                 lineHeight: 1.4,
@@ -394,54 +423,50 @@ export default function StudentDashboardPage() {
               </div>
 
               {bookings.map((b) => {
-                const allowed = canJoinBooking(b.startTime);
-                const handleJoin = () => {
-                  if (!b.roomId) return;
-                  router.push(`/room?roomId=${encodeURIComponent(b.roomId)}`);
-                };
-
+                const allowed = canJoinBooking(b);
                 return (
-                  <>
-                    <div
-                      style={{
-                        fontWeight: 500,
-                        color: "#fff",
-                        wordBreak: "break-word",
-                      }}
-                    >
+                  <div key={b.id} style={{ display: "contents" }}>
+                    <div style={{ fontWeight: 500, color: "#fff", wordBreak: "break-word" }}>
                       {b.tutorName || "Tutor"}
-                      <div
-                        style={{
-                          fontSize: 11,
-                          lineHeight: 1.3,
-                          color: "rgba(255,255,255,0.6)",
-                        }}
-                      >
+                      <div style={{ fontSize: 11, lineHeight: 1.3, color: "rgba(255,255,255,0.6)" }}>
                         {b.tutorEmail || "-"}
                       </div>
                     </div>
 
-                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.85)" }}>
                       {formatTime(b.startTime)} ({b.durationMin || 60} min)
                     </div>
 
-                    <div>
+                    <div style={{ display: "flex", gap: 8 }}>
                       <button
                         style={allowed ? primaryCtaStyleSmall : ghostButtonStyleDisabled}
                         disabled={!allowed}
-                        onClick={allowed ? handleJoin : undefined}
+                        onClick={allowed ? () => joinScheduled(b) : undefined}
+                        title={allowed ? "Enter your 1-on-1 session" : "Opens ~15 min before start"}
                       >
                         {allowed ? "Join Now" : "Not Live Yet"}
                       </button>
+
+                      {/* handy copy link */}
+                      <button
+                        style={ghostButtonStyle}
+                        onClick={() => {
+                          const url = `${window.location.origin}/room?mode=session&bookingId=${encodeURIComponent(b.id)}`;
+                          navigator.clipboard.writeText(url).catch(() => {});
+                        }}
+                        title="Copy your session link"
+                      >
+                        Copy Link
+                      </button>
                     </div>
-                  </>
+                  </div>
                 );
               })}
             </div>
           )}
         </div>
 
-        {/* RIGHT: Homework Help Lobby */}
+        {/* RIGHT: Homework Help Lobby (only tutors in roomMode=homework) */}
         <div
           style={{
             background:
@@ -461,13 +486,13 @@ export default function StudentDashboardPage() {
         >
           <div style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.3 }}>Live Homework Help</div>
           <div style={{ fontSize: 12, lineHeight: 1.4, color: "rgba(255,255,255,0.6)" }}>
-            Click “Join Room” if the tutor is <b>Waiting</b>.
-            If they’re <b>Busy</b>, please check back shortly.
+            You’ll only see tutors who are currently in their <b>Homework Help</b> room. If they’re <b>Busy</b>,
+            check back in a moment.
           </div>
 
           {tutors.length === 0 ? (
             <div style={{ paddingTop: 8, fontSize: 13, color: "rgba(255,255,255,0.6)" }}>
-              No tutors are live right now.
+              No tutors are live in Homework Help right now.
             </div>
           ) : (
             <div style={{ display: "grid", gap: 12 }}>
@@ -539,15 +564,8 @@ export default function StudentDashboardPage() {
                         >
                           {pill.label}
                         </div>
-                        <div
-                          style={{
-                            fontSize: 11,
-                            lineHeight: 1.4,
-                            color: "rgba(255,255,255,0.6)",
-                          }}
-                        >
-                          {/* No queue display anymore */}
-                          &nbsp;
+                        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.6)" }}>
+                          {tutor.roomMode === "homework" ? "Homework Help" : "—"}
                         </div>
                       </div>
                     </div>
@@ -555,7 +573,7 @@ export default function StudentDashboardPage() {
                     {/* actions */}
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                       {isWaiting && tutor.roomId && (
-                        <button style={primaryCtaStyleSmall} onClick={() => joinRoomNow(tutor.roomId)}>
+                        <button style={primaryCtaStyleSmall} onClick={() => joinHomeworkRoom(tutor.roomId)}>
                           Join Room
                         </button>
                       )}
@@ -594,12 +612,13 @@ export default function StudentDashboardPage() {
           textAlign: "center",
         }}
       >
-        <div style={{ color: "rgba(255,255,255,0.8)", fontWeight: 500, marginBottom: 6 }}>
+        <div style={{ color: "rgba(255,255,255,0.85)", fontWeight: 500, marginBottom: 6 }}>
           Stuck on homework right now?
         </div>
 
         <div style={{ marginBottom: 12 }}>
-          If a tutor is <b>Waiting</b>, you can jump straight in. If they’re <b>Busy</b>, check back soon.
+          If a tutor is <b>Waiting</b> in the Homework Help list, you can jump straight in. If they’re <b>Busy</b>,
+          check back soon.
         </div>
 
         <div
@@ -620,7 +639,7 @@ export default function StudentDashboardPage() {
             paddingBottom: 16,
           }}
         >
-          Online math tutoring for grades 4–12
+          Online math & computer science tutoring
         </div>
       </footer>
     </main>
@@ -662,7 +681,7 @@ const primaryCtaStyleSmall: React.CSSProperties = {
   textAlign: "center",
 };
 
-function statusPillColors(status: string) {
+function statusPillColors(status: TutorInfo["status"]) {
   switch (status) {
     case "waiting":
       return { bg: "#1f3b24", border: "#3a6", text: "#6ecf9a", label: "Waiting" };

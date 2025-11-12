@@ -1,7 +1,7 @@
 // src/app/dashboard/tutor/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut, User as FirebaseUser } from "firebase/auth";
@@ -9,6 +9,7 @@ import {
   doc,
   getDoc,
   updateDoc,
+  setDoc,
   collection,
   query,
   where,
@@ -18,6 +19,7 @@ import {
 } from "firebase/firestore";
 
 type Role = "tutor" | "student" | "admin";
+type RoomMode = "homework" | "session" | null;
 
 type Booking = {
   id: string;
@@ -27,6 +29,39 @@ type Booking = {
   durationMin?: number;
   roomId?: string;
 };
+
+const GRACE_BEFORE_MIN = 15;
+const GRACE_AFTER_MIN = 15;
+
+function minutes(n: number) {
+  return n * 60 * 1000;
+}
+
+function withinJoinWindow(startMs?: number, durationMin?: number) {
+  if (!startMs || !durationMin) return false;
+  const now = Date.now();
+  const windowStart = startMs - minutes(GRACE_BEFORE_MIN);
+  const windowEnd = startMs + minutes(durationMin) + minutes(GRACE_AFTER_MIN);
+  return now >= windowStart && now <= windowEnd;
+}
+
+function untilWindowOpensMs(startMs?: number) {
+  if (!startMs) return null;
+  const openAt = startMs - minutes(GRACE_BEFORE_MIN);
+  const delta = openAt - Date.now();
+  return delta > 0 ? delta : 0;
+}
+
+function formatCountdown(ms: number) {
+  const m = Math.floor(ms / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  if (m <= 0 && s <= 0) return "now";
+  if (m <= 0) return `${s}s`;
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${h}h ${mm}m`;
+}
 
 export default function TutorDashboardPage() {
   const router = useRouter();
@@ -40,8 +75,13 @@ export default function TutorDashboardPage() {
   const [roomId, setRoomId] = useState<string>("");
   const [status, setStatus] = useState<string>("offline"); // "waiting" | "busy" | "offline"
 
+  // live mode signals
+  const [roomMode, setRoomMode] = useState<RoomMode>(null);
+  const [currentBookingId, setCurrentBookingId] = useState<string | null>(null);
+
   // sessions
   const [bookings, setBookings] = useState<Booking[]>([]);
+  const [tick, setTick] = useState(0); // for countdown rerender
 
   // --- Auth gate / load basic tutor data ---
   useEffect(() => {
@@ -75,12 +115,27 @@ export default function TutorDashboardPage() {
       setDisplayName(data.displayName || (fbUser.email || "").split("@")[0] || "Tutor");
       setRoomId(data.roomId || "");
       setStatus(data.status || "offline");
+      setRoomMode((data.roomMode as RoomMode) ?? null);
+      setCurrentBookingId(typeof data.currentBookingId === "string" ? data.currentBookingId : null);
 
       setCheckingAuth(false);
     });
 
     return () => unsub();
   }, [router]);
+
+  // --- Subscribe to my user doc for live status/mode updates ---
+  useEffect(() => {
+    if (!uid) return;
+    const unsub = onSnapshot(doc(db, "users", uid), (snap) => {
+      const d = snap.data() || {};
+      setStatus(d.status || "offline");
+      setRoomMode((d.roomMode as RoomMode) ?? null);
+      setCurrentBookingId(typeof d.currentBookingId === "string" ? d.currentBookingId : null);
+      setRoomId(d.roomId || "");
+    });
+    return () => unsub();
+  }, [uid]);
 
   // --- On dashboard (not /room), force status "offline" once we know uid+role ---
   useEffect(() => {
@@ -110,7 +165,8 @@ export default function TutorDashboardPage() {
   useEffect(() => {
     if (!uid) return;
 
-    const qRef = query(collection(db, "bookings"), where("tutorId", "==", uid), limit(10));
+    // NOTE: your schema uses "tutorId" in this page (we'll keep it consistent here).
+    const qRef = query(collection(db, "bookings"), where("tutorId", "==", uid), limit(20));
 
     const unsub = onSnapshot(
       qRef,
@@ -122,7 +178,7 @@ export default function TutorDashboardPage() {
             id: docSnap.id,
             studentName: b.studentName,
             studentEmail: b.studentEmail,
-            startTime: b.startTime,
+            startTime: typeof b.startTime === "number" ? b.startTime : (b.startTime?.toMillis?.() ?? undefined),
             durationMin: b.durationMin,
             roomId: b.roomId,
           });
@@ -144,6 +200,12 @@ export default function TutorDashboardPage() {
     return unsub;
   }, [uid]);
 
+  // small ticker for countdown labels
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
   // helpers
   function formatTime(ts?: number) {
     if (!ts) return "-";
@@ -152,6 +214,7 @@ export default function TutorDashboardPage() {
       return d.toLocaleString(undefined, {
         month: "short",
         day: "numeric",
+        weekday: "short",
         hour: "2-digit",
         minute: "2-digit",
       });
@@ -165,7 +228,7 @@ export default function TutorDashboardPage() {
       case "waiting":
         return { bg: "#1f3b24", border: "#3a6", text: "#6ecf9a", label: "Waiting" };
       case "busy":
-        return { bg: "#3b2f16", border: "#d4a23c", text: "#ffd277", label: "Busy (helping)" };
+        return { bg: "#3b2f16", border: "#d4a23c", text: "#ffd277", label: "Busy (in session)" };
       default:
         return { bg: "#442424", border: "#a66", text: "#ff8b8b", label: "Offline" };
     }
@@ -174,6 +237,42 @@ export default function TutorDashboardPage() {
   async function handleSignOut() {
     await signOut(auth).catch(() => {});
     router.replace("/auth");
+  }
+
+  // --- write helpers for room mode ---
+  async function setRoomMeta(mode: RoomMode, bookingId?: string | null) {
+    if (!uid) return;
+    const patch: Record<string, any> = {
+      roomMode: mode ?? null,
+      lastActiveAt: Date.now(),
+    };
+    if (typeof bookingId !== "undefined") patch.currentBookingId = bookingId;
+    await setDoc(doc(db, "users", uid), patch, { merge: true }).catch(() => {});
+  }
+
+  // Actions
+  async function openHomeworkHelp() {
+    if (!roomId) return router.push("/room?mode=homework"); // room page will pick tutor's roomId from profile
+    await setRoomMeta("homework", null);
+    router.push(`/room?mode=homework`);
+  }
+
+  async function startSession(b: Booking) {
+    if (!b?.id) return;
+    await setRoomMeta("session", b.id);
+    router.push(`/room?mode=session&bookingId=${encodeURIComponent(b.id)}`);
+  }
+
+  function joinEnabled(b: Booking) {
+    return withinJoinWindow(b.startTime, b.durationMin || 60);
+  }
+
+  function joinCtaLabel(b: Booking) {
+    if (joinEnabled(b)) return "Start Session";
+    const ms = untilWindowOpensMs(b.startTime);
+    if (ms === null) return "Start Session";
+    if (ms === 0) return "Start Session";
+    return `Opens in ${formatCountdown(ms)}`;
   }
 
   if (checkingAuth) {
@@ -195,6 +294,36 @@ export default function TutorDashboardPage() {
   }
 
   const statusUI = statusColors(status || "offline");
+
+  // small live banner describing current mode (if any)
+  const modeBanner =
+    roomMode ? (
+      <div
+        style={{
+          marginTop: 8,
+          fontSize: 12,
+          lineHeight: 1.4,
+          color: "rgba(255,255,255,0.85)",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
+        <span
+          style={{
+            padding: "4px 8px",
+            borderRadius: 999,
+            border: "1px solid rgba(255,255,255,0.2)",
+            background: roomMode === "session" ? "rgba(212,162,60,0.15)" : "rgba(80,200,120,0.15)",
+          }}
+        >
+          {roomMode === "session" ? "1-on-1 Session mode" : "Homework Help mode"}
+        </span>
+        {roomMode === "session" && currentBookingId ? (
+          <span style={{ opacity: 0.8 }}>Booking: {currentBookingId}</span>
+        ) : null}
+      </div>
+    ) : null;
 
   return (
     <main
@@ -239,20 +368,16 @@ export default function TutorDashboardPage() {
         >
           <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>Apex Tutoring</div>
           <div style={{ fontSize: 11, opacity: 0.7 }}>Tutor Dashboard</div>
+          {modeBanner}
         </div>
 
-        {/* right actions — Home first, then Enter Room, Profile, Sign out */}
+        {/* right actions — Home, Open Homework Help, Profile, Sign out */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button style={ghostButtonStyle} onClick={() => router.push("/")}>
             Home
           </button>
-          <button
-            style={ghostButtonStyle}
-            onClick={() => {
-              router.push("/room");
-            }}
-          >
-            Enter My Room
+          <button style={ghostButtonStyle} onClick={openHomeworkHelp}>
+            Open Homework Help Room
           </button>
           <button style={ghostButtonStyle} onClick={() => router.push("/profile")}>
             Profile
@@ -315,9 +440,9 @@ export default function TutorDashboardPage() {
               <div
                 style={{
                   borderRadius: 8,
-                  backgroundColor: statusUI.bg,
-                  border: `1px solid ${statusUI.border}`,
-                  color: statusUI.text,
+                  backgroundColor: statusColors(status || "offline").bg,
+                  border: `1px solid ${statusColors(status || "offline").border}`,
+                  color: statusColors(status || "offline").text,
                   fontSize: 12,
                   lineHeight: 1.2,
                   fontWeight: 500,
@@ -325,15 +450,18 @@ export default function TutorDashboardPage() {
                   textAlign: "center",
                 }}
               >
-                {statusUI.label}
+                {statusColors(status || "offline").label}
               </div>
             </div>
           </div>
 
           <div style={{ fontSize: 11, lineHeight: 1.4, color: "rgba(255,255,255,0.5)" }}>
-            Status is automatic: <b>Waiting</b> (you’re in your room with no student),
-            <b> Busy</b> (in your room with a student), and <b>Offline</b> (not in your room or
-            logged out). Open <span style={{ color: "#9cf" }}>Enter My Room</span> to go live.
+            Status is automatic inside the room:
+            {" "}
+            <b>Waiting</b> (in room, no student) · <b>Busy</b> (with student) · <b>Offline</b> (not in room).
+            {" "}
+            Use <span style={{ color: "#9cf" }}>Open Homework Help Room</span> or a session’s{" "}
+            <span style={{ color: "#9cf" }}>Start Session</span>.
           </div>
         </div>
 
@@ -370,7 +498,7 @@ export default function TutorDashboardPage() {
               marginBottom: 12,
             }}
           >
-            These are scheduled lessons you’ve agreed to.
+            You can enter a session up to {GRACE_BEFORE_MIN} minutes before the start time.
           </div>
 
           {bookings.length === 0 ? (
@@ -381,7 +509,7 @@ export default function TutorDashboardPage() {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "minmax(140px,1fr) minmax(120px,1fr) minmax(100px,auto)",
+                gridTemplateColumns: "minmax(200px,1.4fr) minmax(180px,1fr) minmax(140px,auto)",
                 gap: "12px",
                 fontSize: 13,
                 lineHeight: 1.4,
@@ -415,16 +543,14 @@ export default function TutorDashboardPage() {
                   paddingBottom: 4,
                 }}
               >
-                Join
+                Action
               </div>
 
               {bookings.map((b) => {
-                const joinHandler = () => {
-                  router.push("/room");
-                };
-
+                const enabled = joinEnabled(b);
+                const label = joinCtaLabel(b);
                 return (
-                  <>
+                  <div key={b.id} style={{ display: "contents" }}>
                     <div style={{ fontWeight: 500, color: "#fff", wordBreak: "break-word" }}>
                       {b.studentName || "Student"}
                       <div style={{ fontSize: 11, lineHeight: 1.3, color: "rgba(255,255,255,0.6)" }}>
@@ -432,16 +558,38 @@ export default function TutorDashboardPage() {
                       </div>
                     </div>
 
-                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.8)" }}>
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.85)" }}>
                       {formatTime(b.startTime)} ({b.durationMin || 60} min)
                     </div>
 
-                    <div>
-                      <button style={primaryCtaStyleSmall} onClick={joinHandler}>
-                        Join Session
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <button
+                        style={{
+                          ...primaryCtaStyleSmall,
+                          opacity: enabled ? 1 : 0.6,
+                          cursor: enabled ? "pointer" : "not-allowed",
+                          minWidth: 130,
+                        }}
+                        disabled={!enabled}
+                        onClick={() => startSession(b)}
+                        title={enabled ? "Enter your 1-on-1 session" : "Available 15 min before start"}
+                      >
+                        {label}
+                      </button>
+
+                      {/* fallback deep link you can copy/share with your student */}
+                      <button
+                        style={ghostButtonStyle}
+                        onClick={() => {
+                          const url = `${window.location.origin}/room?mode=session&bookingId=${encodeURIComponent(b.id)}`;
+                          navigator.clipboard.writeText(url).catch(() => {});
+                        }}
+                        title="Copy student join link"
+                      >
+                        Copy Link
                       </button>
                     </div>
-                  </>
+                  </div>
                 );
               })}
             </div>
@@ -464,11 +612,12 @@ export default function TutorDashboardPage() {
         }}
       >
         <div style={{ color: "rgba(255,255,255,0.8)", fontWeight: 500, marginBottom: 6 }}>
-          You’re visible to students when you’re in your room as <b>Waiting</b> or <b>Busy</b>.
+          You’re visible to students in the Homework Help list only when your room is open in{" "}
+          <b>Homework Help</b> mode.
         </div>
 
         <div style={{ marginBottom: 12 }}>
-          Open <b>Enter My Room</b> to go live. Leave the room (or log out) to be <b>Offline</b>.
+          Use <b>Open Homework Help Room</b> for drop-ins, or <b>Start Session</b> for scheduled students.
         </div>
 
         <div

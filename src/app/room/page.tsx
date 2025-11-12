@@ -18,6 +18,7 @@ import { onAuthStateChanged, signOut } from "firebase/auth";
 import { doc, getDoc, setDoc, updateDoc, onSnapshot } from "firebase/firestore";
 
 type Role = "tutor" | "student" | "admin";
+type RoomMode = "homework" | "session";
 
 type TokenResp = {
   token: string;
@@ -26,6 +27,7 @@ type TokenResp = {
   identity: string;
   role: Role;
   name: string;
+  bookingId?: string;
 };
 
 type StrokePoint = { x: number; y: number };
@@ -52,7 +54,7 @@ const isStudentId = (id?: string | null) => !!id && id.toLowerCase().startsWith(
 const isTutorId = (id?: string | null) => !!id && id.toLowerCase().startsWith("tutor");
 const isObserverId = (id?: string | null) => !!id && id.toLowerCase().startsWith("admin");
 
-// ---------- status helper ----------
+// ---------- status / presence helpers ----------
 async function setTutorStatus(uid: string, status: "offline" | "waiting" | "busy") {
   try {
     await setDoc(
@@ -60,6 +62,23 @@ async function setTutorStatus(uid: string, status: "offline" | "waiting" | "busy
       { status, statusUpdatedAt: Date.now(), lastActiveAt: Date.now() },
       { merge: true }
     );
+  } catch {}
+}
+
+async function writeRoomMode(
+  uid: string,
+  mode: RoomMode | null,
+  currentBookingId?: string | null
+) {
+  const patch: Record<string, any> = {
+    roomMode: mode ?? null,
+    lastActiveAt: Date.now(),
+  };
+  if (typeof currentBookingId !== "undefined") {
+    patch.currentBookingId = currentBookingId;
+  }
+  try {
+    await setDoc(doc(db, "users", uid), patch, { merge: true });
   } catch {}
 }
 
@@ -74,7 +93,11 @@ export default function RoomPage() {
 
   const [sessionRoomId, setSessionRoomId] = useState<string>("");
 
-  // allow manual override via ?name= only as a last resort
+  // Query params: mode & bookingId
+  const modeFromQP = (qp("mode", "") || "").toLowerCase() as RoomMode | "";
+  const bookingIdFromQP = qp("bookingId", "") || "";
+
+  // allow manual name override via ?name=
   const nameFromQP = qp("name", "");
 
   // ---------- BASIC UI ----------
@@ -183,7 +206,6 @@ export default function RoomPage() {
         (user.email ? user.email.split("@")[0] : "") ||
         (r === "tutor" ? "Tutor" : "Student");
 
-      // allow ?name= override only if it's non-empty
       setProfileName(nameFromQP && nameFromQP.trim() ? nameFromQP.trim() : displayName);
 
       const tutorRoomIdFromDoc = typeof data?.roomId === "string" ? data.roomId : "";
@@ -652,12 +674,32 @@ export default function RoomPage() {
       return;
     }
 
+    // Resolve the intended mode from query (defaults: tutors → homework; others don’t set)
+    const intendedMode: RoomMode | null =
+      lockedRole === "tutor"
+        ? (modeFromQP === "session" ? "session" : "homework")
+        : null;
+
+    const intendedBookingId = lockedRole === "tutor" ? (bookingIdFromQP || null) : (bookingIdFromQP || "");
+
     let room: Room | null = null;
     let hb: any = null; // heartbeat interval id
     let byeHandler: (() => void) | null = null;
 
     (async () => {
       try {
+        // If tutor, write roomMode before joining (so students see correct state instantly)
+        if (lockedRole === "tutor") {
+          const tutorUid = auth.currentUser?.uid || null;
+          if (tutorUid) {
+            await writeRoomMode(tutorUid, intendedMode, intendedMode === "session" ? intendedBookingId : null);
+            // In session mode, set Busy preemptively so we never leak into homework-help lists
+            if (intendedMode === "session") {
+              await setTutorStatus(tutorUid, "busy");
+            }
+          }
+        }
+
         const idToken = await auth.currentUser?.getIdToken();
 
         const bodyPayload: any = {
@@ -665,6 +707,8 @@ export default function RoomPage() {
           name: profileName || (lockedRole === "tutor" ? "Tutor" : "Student"),
           roomId: sessionRoomId,
         };
+        // Always pass bookingId if we have one (students/admins may join with a link)
+        if (bookingIdFromQP) bodyPayload.bookingId = bookingIdFromQP;
 
         const res = await fetch("/api/rooms/token", {
           method: "POST",
@@ -721,25 +765,35 @@ export default function RoomPage() {
 
         syncLocalAVFlags(roomInstance.localParticipant);
 
+        // Status banner text
+        const bannerMode =
+          lockedRole === "tutor"
+            ? intendedMode
+            : (modeFromQP === "session" ? "session" : modeFromQP === "homework" ? "homework" : undefined);
         if (lockedRole === "admin") setStatus(`Observer mode in ${sessionRoomId} (mic/cam off)`);
-        else if (lockedRole === "tutor") setStatus("Tutor connected. Use Hear/Speak. Click a feed to view its whiteboard.");
-        else setStatus("Connected as Student. Click feeds to view boards.");
+        else if (lockedRole === "tutor")
+          setStatus(
+            bannerMode === "session"
+              ? "Tutor connected — Session mode (only booked student may enter)."
+              : "Tutor connected — Homework Help mode."
+          );
+        else
+          setStatus(
+            bannerMode === "session"
+              ? "Connected as Student — Session mode."
+              : "Connected as Student — Homework Help."
+          );
 
-        // ---------- NEW: presence heartbeat for ALL roles ----------
+        // ---------- presence heartbeat for ALL roles ----------
         const uid = auth.currentUser?.uid || null;
-
         const touchPresence = async () => {
           if (!uid) return;
           try {
             await updateDoc(doc(db, "users", uid), { lastActiveAt: Date.now() });
           } catch {}
         };
-
-        // prime + keep-alive
         await touchPresence();
         hb = setInterval(touchPresence, 15_000);
-
-        // also bump on occupancy and lifecycle changes
         roomInstance.on(RoomEvent.ParticipantConnected, touchPresence);
         roomInstance.on(RoomEvent.ParticipantDisconnected, touchPresence);
         roomInstance.on(RoomEvent.Connected, touchPresence);
@@ -760,8 +814,13 @@ export default function RoomPage() {
 
           const tutorUid = auth.currentUser?.uid || null;
 
+          // In homework mode, status follows occupancy; in session mode, force busy regardless.
           const writeFromOccupancy = async () => {
             if (!tutorUid) return;
+            if (intendedMode === "session") {
+              await setTutorStatus(tutorUid, "busy");
+              return;
+            }
             const hasStudent = Array.from(roomInstance.remoteParticipants.values()).some((p) => isStudentId(p.identity));
             await setTutorStatus(tutorUid, hasStudent ? "busy" : "waiting");
           };
@@ -807,7 +866,14 @@ export default function RoomPage() {
               const studentsNow = rosterSnapshot();
               await setDoc(
                 sessionRef,
-                { active: true, students: studentsNow, studentsCount: studentsNow.length, updatedAt: Date.now() },
+                {
+                  active: true,
+                  students: studentsNow,
+                  studentsCount: studentsNow.length,
+                  updatedAt: Date.now(),
+                  mode: intendedMode ?? "homework",
+                  currentBookingId: intendedMode === "session" ? intendedBookingId || null : null,
+                },
                 { merge: true }
               );
             } catch {}
@@ -827,14 +893,21 @@ export default function RoomPage() {
           roomInstance.on(RoomEvent.ParticipantDisconnected, writeFromOccupancyToSession);
           roomInstance.on(RoomEvent.Connected, writeFromOccupancyToSession);
 
+          // On close/disconnect, clear roomMode & booking id, and set offline
           byeHandler = () => {
-            if (tutorUid) setTutorStatus(tutorUid, "offline").catch(() => {});
+            if (tutorUid) {
+              writeRoomMode(tutorUid, null, null).catch(() => {});
+              setTutorStatus(tutorUid, "offline").catch(() => {});
+            }
             markSessionInactive().catch(() => {});
           };
           window.addEventListener("beforeunload", byeHandler);
           roomInstance.once(RoomEvent.Disconnected, () => {
             markSessionInactive().catch(() => {});
-            if (tutorUid) setTutorStatus(tutorUid, "offline").catch(() => {});
+            if (tutorUid) {
+              writeRoomMode(tutorUid, null, null).catch(() => {});
+              setTutorStatus(tutorUid, "offline").catch(() => {});
+            }
             if (byeHandler) window.removeEventListener("beforeunload", byeHandler);
           });
         }
@@ -859,7 +932,7 @@ export default function RoomPage() {
       } catch {}
       room?.disconnect();
     };
-  }, [authed, lockedRole, sessionRoomId, profileName, resizeCanvas]);
+  }, [authed, lockedRole, sessionRoomId, profileName, resizeCanvas, modeFromQP, bookingIdFromQP]);
 
   // ---------- ROSTER / TILES ----------
   function refreshTilesAndRoster(room: Room) {
@@ -1268,7 +1341,9 @@ export default function RoomPage() {
   function copyInviteLink() {
     if (!sessionRoomId) return;
     const origin = typeof window !== "undefined" ? window.location.origin : "";
-    const link = `${origin}/room?roomId=${encodeURIComponent(sessionRoomId)}`;
+    const link = `${origin}/room?roomId=${encodeURIComponent(sessionRoomId)}${
+      modeFromQP ? `&mode=${encodeURIComponent(modeFromQP)}` : ""
+    }${bookingIdFromQP ? `&bookingId=${encodeURIComponent(bookingIdFromQP)}` : ""}`;
     navigator.clipboard.writeText(link).catch(() => {});
   }
 
@@ -1286,6 +1361,18 @@ export default function RoomPage() {
       ? "Observer"
       : "…"
     : "…";
+
+  const currentBannerMode: "Homework Help" | "1-on-1 Session" | null = (() => {
+    const m = (modeFromQP || "") as string;
+    if (lockedRole === "tutor") {
+      if (m === "session") return "1-on-1 Session";
+      return "Homework Help";
+    }
+    if (m === "session") return "1-on-1 Session";
+    if (m === "homework") return "Homework Help";
+    return null;
+  })();
+
   const editable = canCurrentUserEditBoard();
   const inviteLinkUI =
     lockedRole === "tutor" && sessionRoomId ? (
@@ -1307,7 +1394,9 @@ export default function RoomPage() {
         }}
       >
         <div style={{ flex: "1 1 auto", minWidth: 0 }}>
-          <div style={{ fontWeight: 500, marginBottom: 4 }}>Invite your student:</div>
+          <div style={{ fontWeight: 500, marginBottom: 4 }}>
+            {currentBannerMode ? `${currentBannerMode} invite:` : "Invite your student:"}
+          </div>
           <div
             style={{
               fontFamily: "monospace",
@@ -1317,9 +1406,19 @@ export default function RoomPage() {
               color: "#9cf",
             }}
           >
-            {typeof window !== "undefined" ? `${window.location.origin}/room?roomId=${sessionRoomId}` : `/room?roomId=${sessionRoomId}`}
+            {typeof window !== "undefined"
+              ? `${window.location.origin}/room?roomId=${sessionRoomId}${
+                  modeFromQP ? `&mode=${modeFromQP}` : ""
+                }${bookingIdFromQP ? `&bookingId=${bookingIdFromQP}` : ""}`
+              : `/room?roomId=${sessionRoomId}${modeFromQP ? `&mode=${modeFromQP}` : ""}${
+                  bookingIdFromQP ? `&bookingId=${bookingIdFromQP}` : ""
+                }`}
           </div>
-          <div style={{ opacity: 0.7, marginTop: 4 }}>Give them this link. They’ll log in and automatically join you.</div>
+          <div style={{ opacity: 0.7, marginTop: 4 }}>
+            {modeFromQP === "session"
+              ? "Only the booked student can enter during the session window."
+              : "Anyone can drop in for Homework Help."}
+          </div>
         </div>
         <button onClick={copyInviteLink} style={ghostButtonStyle}>
           Copy link
@@ -1364,7 +1463,9 @@ export default function RoomPage() {
       >
         <div style={{ color: "#fff", display: "flex", flexDirection: "column", lineHeight: 1.2 }}>
           <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>Apex Tutoring</div>
-          <div style={{ fontSize: 11, opacity: 0.7 }}>Tutoring Room ({roleLabel})</div>
+          <div style={{ fontSize: 11, opacity: 0.7 }}>
+            Tutoring Room ({roleLabel}){currentBannerMode ? ` — ${currentBannerMode}` : ""}
+          </div>
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
