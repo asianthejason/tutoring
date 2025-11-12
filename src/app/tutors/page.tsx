@@ -20,7 +20,7 @@ import {
 
 type Role = "student" | "tutor" | "admin";
 type DayKey = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
-type TimeRange = { start: string; end: string }; // "HH:mm" (24h)
+type TimeRange = { start: string; end: string }; // "HH:mm"
 type Availability = Record<DayKey, TimeRange[]>;
 
 type TutorRow = {
@@ -224,11 +224,11 @@ export default function TutorsLobbyPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [activeTutor, setActiveTutor] = useState<(TutorDoc & { uid: string }) | null>(null);
 
-  // week (SUNDAY anchor)
+  // page anchor week (SUNDAY) — we render 4 consecutive weeks from this start
   const [activeWeekStart, setActiveWeekStart] = useState<Date>(startOfWeekSunday(new Date()));
 
-  // bookings
-  const [bookedThisWeek, setBookedThisWeek] = useState<Booking[]>([]);
+  // bookings over the visible 4-week window
+  const [bookedInRange, setBookedInRange] = useState<Booking[]>([]);
   const [myUpcomingWithTutor, setMyUpcomingWithTutor] = useState<Booking[]>([]);
 
   // student prefs / tz
@@ -242,7 +242,7 @@ export default function TutorsLobbyPage() {
   const [formDuration, setFormDuration] = useState<number>(60);
   const [formRepeatCount, setFormRepeatCount] = useState<number>(0);
   const [formBusy, setFormBusy] = useState(false);
-  const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
+  const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null); // 0..27
 
   // time ticker for live "past" greying (updates every minute)
   const [nowMs, setNowMs] = useState<number>(Date.now());
@@ -250,26 +250,6 @@ export default function TutorsLobbyPage() {
     const id = setInterval(() => setNowMs(Date.now()), 60_000);
     return () => clearInterval(id);
   }, []);
-
-  // debugging
-  const [debug, setDebug] = useState(false);
-  const [debugMsg, setDebugMsg] = useState<string>("");
-  const [debugNumbers, setDebugNumbers] = useState<{
-    chosenStart?: number;
-    chosenEnd?: number;
-    containing?: { startMs: number; endMs: number } | null;
-  }>({});
-  const [debugMapRows, setDebugMapRows] = useState<
-    Array<{
-      idx: number;
-      studentDayLabel: string;
-      studentNoonUTC: string;
-      tutorY: number;
-      tutorM: number;
-      tutorD: number;
-      rangesUTC: Array<{ s: string; e: string }>;
-    }>
-  >([]);
 
   const [toast, setToast] = useState("");
 
@@ -314,13 +294,11 @@ export default function TutorsLobbyPage() {
   // open modal
   const openTutorModal = useCallback(async (tutorId: string) => {
     setToast("");
-    setDebugMsg("");
     setFormVisible(false);
     setFormRepeatCount(0);
     setFormDuration(60);
     setFormStartHM("");
     setSelectedDayIdx(null);
-    setDebugMapRows([]);
 
     const week0 = startOfWeekSunday(new Date());
     setActiveWeekStart(week0);
@@ -346,14 +324,14 @@ export default function TutorsLobbyPage() {
       setStudentPrefs(undefined);
     }
 
-    await refreshWeekBookings(tutorId, week0);
+    await refreshBookingsRange(tutorId, week0);
     await refreshMyUpcomingWithTutor(tutorId);
 
     setModalOpen(true);
   }, []);
 
-  const refreshWeekBookings = useCallback(async (tutorId: string, weekStart: Date) => {
-    const weekEndMs = +addDays(weekStart, 7);
+  const refreshBookingsRange = useCallback(async (tutorId: string, rangeStart: Date) => {
+    const rangeEndMs = +addDays(rangeStart, 28);
     const qRef = query(collection(db, "bookings"), where("tutorId", "==", tutorId));
     const snap = await getDocs(qRef);
     const rows: Booking[] = [];
@@ -361,7 +339,7 @@ export default function TutorsLobbyPage() {
       const d = ds.data() as any;
       const st = Number(d.startTime || 0);
       const et = Number(d.endTime || st + Number(d.durationMin || 60) * 60000);
-      if (st < weekEndMs && et >= +weekStart) {
+      if (st < rangeEndMs && et >= +rangeStart) {
         rows.push({
           id: ds.id,
           tutorId: d.tutorId,
@@ -377,7 +355,7 @@ export default function TutorsLobbyPage() {
         });
       }
     });
-    setBookedThisWeek(rows);
+    setBookedInRange(rows);
   }, []);
 
   const refreshMyUpcomingWithTutor = useCallback(async (tutorId: string) => {
@@ -413,25 +391,27 @@ export default function TutorsLobbyPage() {
     setMyUpcomingWithTutor(mine);
   }, []);
 
-  // week nav
-  const goPrevWeek = useCallback(async () => {
+  // page nav (jump by 4 weeks)
+  const goPrevPage = useCallback(async () => {
     if (!activeTutor) return;
-    const prev = addDays(activeWeekStart, -7);
+    const prev = addDays(activeWeekStart, -28);
     setActiveWeekStart(prev);
-    await refreshWeekBookings(activeTutor.uid, prev);
-  }, [activeTutor, activeWeekStart, refreshWeekBookings]);
-  const goNextWeek = useCallback(async () => {
+    await refreshBookingsRange(activeTutor.uid, prev);
+  }, [activeTutor, activeWeekStart, refreshBookingsRange]);
+
+  const goNextPage = useCallback(async () => {
     if (!activeTutor) return;
-    const next = addDays(activeWeekStart, 7);
+    const next = addDays(activeWeekStart, 28);
     setActiveWeekStart(next);
-    await refreshWeekBookings(activeTutor.uid, next);
-  }, [activeTutor, activeWeekStart, refreshWeekBookings]);
+    await refreshBookingsRange(activeTutor.uid, next);
+  }, [activeTutor, activeWeekStart, refreshBookingsRange]);
+
   const jumpToThisWeek = useCallback(async () => {
     if (!activeTutor) return;
     const nowW = startOfWeekSunday(new Date());
     setActiveWeekStart(nowW);
-    await refreshWeekBookings(activeTutor.uid, nowW);
-  }, [activeTutor, refreshWeekBookings]);
+    await refreshBookingsRange(activeTutor.uid, nowW);
+  }, [activeTutor, refreshBookingsRange]);
 
   // ---------- availability blocks ----------
   type AbsRange = { startMs: number; endMs: number };
@@ -441,6 +421,7 @@ export default function TutorsLobbyPage() {
     ranges: AbsRange[]; // absolute UTC
   };
 
+  // 28 consecutive days (4 weeks) starting from activeWeekStart
   const slotBlocks: SlotBlock[] = useMemo(() => {
     if (!activeTutor) return [];
     const tutorTZ = activeTutor.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -449,12 +430,10 @@ export default function TutorsLobbyPage() {
       (["sun", "mon", "tue", "wed", "thu", "fri", "sat"][dow] as DayKey);
 
     const blocks: SlotBlock[] = [];
-    const debugRows: typeof debugMapRows = [];
 
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 28; i++) {
       const dayDateStudent = addDays(activeWeekStart, i);
 
-      // stable mapping using "student noon"
       const noonUTC = studentDayNoonUTC(dayDateStudent, studentTZ);
       const tutorDOW = getWeekdayInTZ(noonUTC, tutorTZ); // 0..6
       const key = dowToKey(tutorDOW);
@@ -485,25 +464,8 @@ export default function TutorsLobbyPage() {
         dayDate: dayDateStudent,
         ranges: abs,
       });
-
-      // debug map
-      debugRows.push({
-        idx: i,
-        studentDayLabel: fmtDateInTZ(+dayDateStudent, studentTZ),
-        studentNoonUTC: new Date(noonUTC).toISOString(),
-        tutorY: ty,
-        tutorM: tm + 1,
-        tutorD: td,
-        rangesUTC: abs.map((r) => ({
-          s: new Date(r.startMs).toISOString(),
-          e: new Date(r.endMs).toISOString(),
-        })),
-      });
     }
-
-    setDebugMapRows(debugRows);
     return blocks;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTutor, activeWeekStart, studentTZ]);
 
   // Helper: booking overlap
@@ -518,7 +480,7 @@ export default function TutorsLobbyPage() {
     if (!block) return [];
 
     const durMs = (Number(formDuration) || 60) * 60000;
-    const bookings = bookedThisWeek.map((b) => ({
+    const bookings = bookedInRange.map((b) => ({
       start: b.startTime,
       end: b.endTime || b.startTime + b.durationMin * 60000,
     }));
@@ -536,7 +498,7 @@ export default function TutorsLobbyPage() {
       }
     }
     return options;
-  }, [activeTutor, selectedDayIdx, slotBlocks, studentTZ, formDuration, bookedThisWeek, nowMs]);
+  }, [activeTutor, selectedDayIdx, slotBlocks, studentTZ, formDuration, bookedInRange, nowMs]);
 
   // keep formStartHM in sync with available options
   useEffect(() => {
@@ -556,7 +518,7 @@ export default function TutorsLobbyPage() {
     return ranges.find((r) => msStart >= r.startMs && msEnd <= r.endMs);
   }
   function hasTutorConflict(msStart: number, msEnd: number): boolean {
-    return bookedThisWeek.some((b) => {
+    return bookedInRange.some((b) => {
       const bStart = b.startTime;
       const bEnd = b.endTime || b.startTime + b.durationMin * 60000;
       return msStart < bEnd && msEnd > bStart;
@@ -576,16 +538,12 @@ export default function TutorsLobbyPage() {
     setFormRepeatCount(0);
     setFormDuration(60);
     setFormVisible(true);
-    setDebugMsg("");
-    setDebugNumbers({});
   }, []);
 
   const submitBooking = useCallback(async () => {
     if (!activeTutor || !formDate || selectedDayIdx === null) return;
     setToast("");
     setFormBusy(true);
-    setDebugMsg("");
-    setDebugNumbers({});
 
     try {
       const user = auth.currentUser;
@@ -606,14 +564,7 @@ export default function TutorsLobbyPage() {
       const ranges = block?.ranges ?? [];
       const containing = findContainingRange(chosenStart, chosenEnd, ranges);
 
-      setDebugNumbers({ chosenStart, chosenEnd, containing: containing ?? null });
-
-      if (!containing) {
-        setDebugMsg(
-          "Validator: selected start/end not fully contained in any availability range for the selected column."
-        );
-        throw new Error("Selected time is outside the tutor’s availability.");
-      }
+      if (!containing) throw new Error("Selected time is outside the tutor’s availability.");
       if (chosenStart <= Date.now()) throw new Error("Selected time is in the past.");
       if (hasTutorConflict(chosenStart, chosenEnd)) throw new Error("That time conflicts with another booking.");
 
@@ -666,7 +617,7 @@ export default function TutorsLobbyPage() {
       }
 
       setToast(repeats ? `Booked ✓ ${repeats + 1} sessions (weekly).` : "Booked ✓");
-      await refreshWeekBookings(activeTutor.uid, activeWeekStart);
+      await refreshBookingsRange(activeTutor.uid, activeWeekStart);
       await refreshMyUpcomingWithTutor(activeTutor.uid);
       setFormVisible(false);
     } catch (e: any) {
@@ -685,7 +636,7 @@ export default function TutorsLobbyPage() {
     slotBlocks,
     studentTZ,
     activeWeekStart,
-    refreshWeekBookings,
+    refreshBookingsRange,
     refreshMyUpcomingWithTutor,
   ]);
 
@@ -709,7 +660,7 @@ export default function TutorsLobbyPage() {
         });
 
         setToast("Session canceled.");
-        await refreshWeekBookings(activeTutor!.uid, activeWeekStart);
+        await refreshBookingsRange(activeTutor!.uid, activeWeekStart);
         await refreshMyUpcomingWithTutor(activeTutor!.uid);
       } catch (e: any) {
         setToast(e?.message || "Unable to cancel.");
@@ -717,7 +668,7 @@ export default function TutorsLobbyPage() {
         setTimeout(() => setToast(""), 2500);
       }
     },
-    [activeTutor, activeWeekStart, refreshWeekBookings, refreshMyUpcomingWithTutor]
+    [activeTutor, activeWeekStart, refreshBookingsRange, refreshMyUpcomingWithTutor]
   );
 
   // tutor cards
@@ -847,7 +798,7 @@ export default function TutorsLobbyPage() {
                 fontWeight: 500,
                 cursor: "pointer",
               }}
-              title="See weekly availability and book"
+              title="See availability & book"
             >
               View Availability
             </button>
@@ -858,6 +809,15 @@ export default function TutorsLobbyPage() {
   }, [tutors, router, openTutorModal]);
 
   // ---------- UI ----------
+  // break 28 days into 4 arrays of 7 for rendering
+  const weeks4 = useMemo(() => {
+    const chunks: SlotBlock[][] = [];
+    for (let w = 0; w < 4; w++) {
+      chunks.push(slotBlocks.slice(w * 7, w * 7 + 7));
+    }
+    return chunks;
+  }, [slotBlocks]);
+
   return (
     <main
       style={{
@@ -998,7 +958,7 @@ export default function TutorsLobbyPage() {
           onClick={() => {
             setModalOpen(false);
             setActiveTutor(null);
-            setBookedThisWeek([]);
+            setBookedInRange([]);
             setMyUpcomingWithTutor([]);
             setFormVisible(false);
           }}
@@ -1040,8 +1000,8 @@ export default function TutorsLobbyPage() {
               </div>
 
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <button style={navButtonStyle} onClick={goPrevWeek}>
-                  ← Prev
+                <button style={navButtonStyle} onClick={goPrevPage}>
+                  ← Prev 4 weeks
                 </button>
                 <div
                   style={{
@@ -1052,32 +1012,32 @@ export default function TutorsLobbyPage() {
                     background: "rgba(255,255,255,0.06)",
                   }}
                 >
-                  Week of{" "}
+                  From{" "}
                   {new Intl.DateTimeFormat(undefined, {
                     month: "short",
                     day: "numeric",
                     year: "numeric",
                     timeZone: studentTZ,
-                  }).format(activeWeekStart)}
+                  }).format(activeWeekStart)}{" "}
+                  to{" "}
+                  {new Intl.DateTimeFormat(undefined, {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                    timeZone: studentTZ,
+                  }).format(addDays(activeWeekStart, 27))}
                 </div>
-                <button style={navButtonStyle} onClick={goNextWeek}>
-                  Next →
+                <button style={navButtonStyle} onClick={goNextPage}>
+                  Next 4 weeks →
                 </button>
                 <button style={navButtonStyle} onClick={jumpToThisWeek}>
                   This week
                 </button>
                 <button
-                  onClick={() => setDebug((d) => !d)}
-                  style={{ ...navButtonStyle, background: debug ? "#374151" : "#1f2937" }}
-                  title="Toggle debug panel"
-                >
-                  {debug ? "Debug: ON" : "Debug"}
-                </button>
-                <button
                   onClick={() => {
                     setModalOpen(false);
                     setActiveTutor(null);
-                    setBookedThisWeek([]);
+                    setBookedInRange([]);
                     setMyUpcomingWithTutor([]);
                     setFormVisible(false);
                   }}
@@ -1098,133 +1058,167 @@ export default function TutorsLobbyPage() {
 
             {/* body */}
             <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", minHeight: 380 }}>
-              {/* left: 7-day grid */}
-              <div style={{ padding: 12, borderRight: "1px solid rgba(255,255,255,0.12)" }}>
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(7, 1fr)",
-                    gap: 8,
-                  }}
-                >
-                  {slotBlocks.map((b, idx) => {
-                    // helper: build small timeline pieces for each base availability range
-                    type Piece = { startMs: number; endMs: number; kind: "past" | "booked" | "free" };
-                    const piecesAll: Piece[] = [];
+              {/* left: 4 weeks (scrollable) */}
+              <div
+                style={{
+                  padding: 12,
+                  borderRight: "1px solid rgba(255,255,255,0.12)",
+                  maxHeight: "calc(92vh - 120px)",
+                  overflowY: "auto",
+                  gap: 12,
+                  display: "flex",
+                  flexDirection: "column",
+                }}
+              >
+                {weeks4.map((week, wIdx) => (
+                  <div key={wIdx} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        opacity: 0.85,
+                        padding: "4px 6px",
+                        borderRadius: 8,
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        background: "rgba(255,255,255,0.04)",
+                        width: "fit-content",
+                      }}
+                    >
+                      Week of{" "}
+                      {new Intl.DateTimeFormat(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                        timeZone: studentTZ,
+                      }).format(addDays(activeWeekStart, wIdx * 7))}
+                    </div>
 
-                    for (const r of b.ranges) {
-                      // collect booked overlaps clamped to r
-                      const booked = bookedThisWeek
-                        .map((bk) => ({
-                          start: bk.startTime,
-                          end: bk.endTime || bk.startTime + bk.durationMin * 60000,
-                        }))
-                        .map((bk) => ({
-                          start: Math.max(bk.start, r.startMs),
-                          end: Math.min(bk.end, r.endMs),
-                        }))
-                        .filter((bk) => bk.end > bk.start);
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(7, 1fr)",
+                        gap: 8,
+                      }}
+                    >
+                      {week.map((b, idxWithin) => {
+                        const idx = wIdx * 7 + idxWithin;
 
-                      const cutSet = new Set<number>([r.startMs, r.endMs]);
-                      // "now" cut inside range
-                      if (nowMs > r.startMs && nowMs < r.endMs) cutSet.add(nowMs);
-                      for (const bk of booked) {
-                        cutSet.add(bk.start);
-                        cutSet.add(bk.end);
-                      }
-                      const pts = Array.from(cutSet).sort((a, b2) => a - b2);
-                      for (let i2 = 0; i2 < pts.length - 1; i2++) {
-                        const s = pts[i2],
-                          e = pts[i2 + 1];
-                        if (e <= s) continue;
-                        const isBooked = booked.some((bk) => s < bk.end && e > bk.start);
-                        let kind: Piece["kind"] = isBooked ? "booked" : s < nowMs && e <= nowMs ? "past" : "free";
-                        piecesAll.push({ startMs: s, endMs: e, kind });
-                      }
-                    }
+                        // piece segmentation for availability vs booked vs past
+                        type Piece = { startMs: number; endMs: number; kind: "past" | "booked" | "free" };
+                        const piecesAll: Piece[] = [];
 
-                    return (
-                      <div
-                        key={idx}
-                        style={{
-                          background: "rgba(255,255,255,0.06)",
-                          border: "1px solid rgba(255,255,255,0.12)",
-                          borderRadius: 10,
-                          padding: 8,
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: 6,
-                          minHeight: 160,
-                        }}
-                      >
-                        <div style={{ fontSize: 12.5, fontWeight: 700 }}>{b.dayHeader}</div>
+                        for (const r of b.ranges) {
+                          const booked = bookedInRange
+                            .map((bk) => ({
+                              start: bk.startTime,
+                              end: bk.endTime || bk.startTime + bk.durationMin * 60000,
+                            }))
+                            .map((bk) => ({
+                              start: Math.max(bk.start, r.startMs),
+                              end: Math.min(bk.end, r.endMs),
+                            }))
+                            .filter((bk) => bk.end > bk.start);
 
-                        {b.ranges.length === 0 ? (
-                          <div style={{ fontSize: 12, opacity: 0.6 }}>No availability</div>
-                        ) : piecesAll.length === 0 ? (
-                          <div style={{ fontSize: 12, opacity: 0.6 }}>No bookable time</div>
-                        ) : (
-                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                            {piecesAll.map((p, i) => {
-                              const label = `${fmtTimeInTZ(p.startMs, studentTZ)}–${fmtTimeInTZ(
-                                p.endMs,
-                                studentTZ
-                              )}`;
-                              const isClickable = p.kind === "free" && p.startMs > nowMs;
-                              return (
-                                <button
-                                  key={i}
-                                  onClick={() => isClickable && openFormForDay(b.dayDate, idx)}
-                                  disabled={!isClickable}
-                                  style={{
-                                    padding: "6px 8px",
-                                    borderRadius: 8,
-                                    textAlign: "left",
-                                    fontSize: 12,
-                                    lineHeight: 1.2,
-                                    cursor: isClickable ? "pointer" : "not-allowed",
-                                    border:
-                                      p.kind === "free"
-                                        ? "1px solid #4ade80"
-                                        : p.kind === "booked"
-                                        ? "1px solid #885555"
-                                        : "1px solid rgba(255,255,255,0.15)",
-                                    background:
-                                      p.kind === "free"
-                                        ? "linear-gradient(180deg, rgba(34,197,94,0.25), rgba(34,197,94,0.15))"
-                                        : p.kind === "booked"
-                                        ? "linear-gradient(180deg, rgba(120,120,120,0.25), rgba(120,120,120,0.15))"
-                                        : "rgba(255,255,255,0.05)",
-                                    color:
-                                      p.kind === "free"
-                                        ? "#eafff0"
-                                        : p.kind === "booked"
-                                        ? "rgba(255,255,255,0.85)"
-                                        : "rgba(255,255,255,0.55)",
-                                  }}
-                                  title={
-                                    p.kind === "booked"
-                                      ? "Booked"
-                                      : p.kind === "past"
-                                      ? "This block is in the past"
-                                      : "Pick a start time & duration"
-                                  }
-                                >
-                                  {label}
-                                  {p.kind === "booked" && <span style={{ opacity: 0.8 }}> · Booked</span>}
-                                  {p.kind === "past" && <span style={{ opacity: 0.6 }}> · Past</span>}
-                                </button>
-                              );
-                            })}
+                          const cutSet = new Set<number>([r.startMs, r.endMs]);
+                          if (nowMs > r.startMs && nowMs < r.endMs) cutSet.add(nowMs);
+                          for (const bk of booked) {
+                            cutSet.add(bk.start);
+                            cutSet.add(bk.end);
+                          }
+                          const pts = Array.from(cutSet).sort((a, b2) => a - b2);
+                          for (let i2 = 0; i2 < pts.length - 1; i2++) {
+                            const s = pts[i2],
+                              e = pts[i2 + 1];
+                            if (e <= s) continue;
+                            const isBooked = booked.some((bk) => s < bk.end && e > bk.start);
+                            const kind: Piece["kind"] = isBooked ? "booked" : s < nowMs && e <= nowMs ? "past" : "free";
+                            piecesAll.push({ startMs: s, endMs: e, kind });
+                          }
+                        }
+
+                        return (
+                          <div
+                            key={idx}
+                            style={{
+                              background: "rgba(255,255,255,0.06)",
+                              border: "1px solid rgba(255,255,255,0.12)",
+                              borderRadius: 10,
+                              padding: 8,
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 6,
+                              minHeight: 160,
+                            }}
+                          >
+                            <div style={{ fontSize: 12.5, fontWeight: 700 }}>{b.dayHeader}</div>
+
+                            {b.ranges.length === 0 ? (
+                              <div style={{ fontSize: 12, opacity: 0.6 }}>No availability</div>
+                            ) : piecesAll.length === 0 ? (
+                              <div style={{ fontSize: 12, opacity: 0.6 }}>No bookable time</div>
+                            ) : (
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                {piecesAll.map((p, i) => {
+                                  const label = `${fmtTimeInTZ(p.startMs, studentTZ)}–${fmtTimeInTZ(
+                                    p.endMs,
+                                    studentTZ
+                                  )}`;
+                                  const isClickable = p.kind === "free" && p.startMs > nowMs;
+                                  return (
+                                    <button
+                                      key={i}
+                                      onClick={() => isClickable && openFormForDay(b.dayDate, idx)}
+                                      disabled={!isClickable}
+                                      style={{
+                                        padding: "6px 8px",
+                                        borderRadius: 8,
+                                        textAlign: "left",
+                                        fontSize: 12,
+                                        lineHeight: 1.2,
+                                        cursor: isClickable ? "pointer" : "not-allowed",
+                                        border:
+                                          p.kind === "free"
+                                            ? "1px solid #4ade80"
+                                            : p.kind === "booked"
+                                            ? "1px solid #885555"
+                                            : "1px solid rgba(255,255,255,0.15)",
+                                        background:
+                                          p.kind === "free"
+                                            ? "linear-gradient(180deg, rgba(34,197,94,0.25), rgba(34,197,94,0.15))"
+                                            : p.kind === "booked"
+                                            ? "linear-gradient(180deg, rgba(120,120,120,0.25), rgba(120,120,120,0.15))"
+                                            : "rgba(255,255,255,0.05)",
+                                        color:
+                                          p.kind === "free"
+                                            ? "#eafff0"
+                                            : p.kind === "booked"
+                                            ? "rgba(255,255,255,0.85)"
+                                            : "rgba(255,255,255,0.55)",
+                                      }}
+                                      title={
+                                        p.kind === "booked"
+                                          ? "Booked"
+                                          : p.kind === "past"
+                                          ? "This block is in the past"
+                                          : "Pick a start time & duration"
+                                      }
+                                    >
+                                      {label}
+                                      {p.kind === "booked" && <span style={{ opacity: 0.8 }}> · Booked</span>}
+                                      {p.kind === "past" && <span style={{ opacity: 0.6 }}> · Past</span>}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
               </div>
 
-              {/* right: booking form & my bookings */}
+              {/* right: booking form & my bookings (scrollable) */}
               <div
                 style={{
                   padding: 12,
@@ -1232,7 +1226,7 @@ export default function TutorsLobbyPage() {
                   flexDirection: "column",
                   gap: 12,
                   maxHeight: "calc(92vh - 120px)",
-                  overflowY: "auto", // <-- scrollable panel
+                  overflowY: "auto",
                 }}
               >
                 {/* Booking form */}
@@ -1294,7 +1288,6 @@ export default function TutorsLobbyPage() {
                           onChange={(e) => setFormDuration(Math.max(60, parseInt(e.target.value, 10)))}
                           style={inputStyle}
                         >
-                          {/* No 30-minute option */}
                           <option value="60">60 minutes</option>
                           <option value="90">90 minutes</option>
                           <option value="120">120 minutes</option>
@@ -1353,85 +1346,6 @@ export default function TutorsLobbyPage() {
                           Cancel
                         </button>
                       </div>
-
-                      {/* DEBUG PANEL */}
-                      {debug && (
-                        <div
-                          style={{
-                            marginTop: 8,
-                            padding: 8,
-                            borderRadius: 8,
-                            border: "1px dashed rgba(255,255,255,0.25)",
-                            background: "rgba(255,255,255,0.03)",
-                            fontSize: 12,
-                            lineHeight: 1.35,
-                          }}
-                        >
-                          <div style={{ fontWeight: 700, marginBottom: 4 }}>Debug</div>
-                          <div>Now (UTC): {new Date(nowMs).toISOString()}</div>
-                          <div>Student TZ: {studentTZ}</div>
-                          <div>Tutor TZ: {activeTutor?.timezone || "(default/unknown)"}</div>
-                          <div>Selected column: {selectedDayIdx ?? "-"}</div>
-                          <div>
-                            Start HM (student tz): {formStartHM || "(none)"} · Duration: {Math.max(60, formDuration)} min
-                          </div>
-                          <div>Start options shown: {formStartOptions.length}</div>
-
-                          {selectedDayIdx !== null && (
-                            <>
-                              <div style={{ marginTop: 6, opacity: 0.8 }}>Ranges in selected column:</div>
-                              <ul style={{ margin: 0, paddingLeft: 16 }}>
-                                {slotBlocks[selectedDayIdx]?.ranges.map((r, i) => (
-                                  <li key={i}>
-                                    local: {fmtTimeInTZ(r.startMs, studentTZ)}–{fmtTimeInTZ(r.endMs, studentTZ)}{" "}
-                                    <span style={{ opacity: 0.7 }}>
-                                      [UTC {new Date(r.startMs).toISOString().slice(11, 16)}–
-                                      {new Date(r.endMs).toISOString().slice(11, 16)}]
-                                    </span>
-                                  </li>
-                                ))}
-                              </ul>
-                            </>
-                          )}
-
-                          {"chosenStart" in debugNumbers && (
-                            <div style={{ marginTop: 6 }}>
-                              Chosen UTC: {new Date(debugNumbers.chosenStart!).toISOString()} →{" "}
-                              {new Date(debugNumbers.chosenEnd!).toISOString()}
-                            </div>
-                          )}
-                          {"containing" in debugNumbers && debugNumbers.containing === null && (
-                            <div style={{ color: "#fbbf24", marginTop: 6 }}>
-                              Note: Validator failed containment on these UTC values.
-                            </div>
-                          )}
-
-                          <div style={{ marginTop: 10, opacity: 0.85, fontWeight: 700 }}>
-                            Day mapping (student noon → tutor Y/M/D):
-                          </div>
-                          <ul style={{ margin: 0, paddingLeft: 16 }}>
-                            {debugMapRows.map((row) => (
-                              <li key={row.idx} style={{ marginBottom: 4 }}>
-                                [col {row.idx}] {row.studentDayLabel} · student noon UTC {row.studentNoonUTC} → tutor YMD{" "}
-                                {row.tutorY}-{String(row.tutorM).padStart(2, "0")}-{String(row.tutorD).padStart(2, "0")} ·
-                                ranges:
-                                <ul style={{ margin: 0, paddingLeft: 16 }}>
-                                  {row.rangesUTC.length === 0 ? (
-                                    <li>(none)</li>
-                                  ) : (
-                                    row.rangesUTC.map((rr, j) => (
-                                      <li key={j}>
-                                        {rr.s.slice(11, 16)}–{rr.e.slice(11, 16)} UTC
-                                      </li>
-                                    ))
-                                  )}
-                                </ul>
-                              </li>
-                            ))}
-                          </ul>
-                          {debugMsg && <div style={{ color: "#fbbf24", marginTop: 6 }}>Note: {debugMsg}</div>}
-                        </div>
-                      )}
                     </div>
                   )}
                 </div>
