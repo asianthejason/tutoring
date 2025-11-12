@@ -51,7 +51,7 @@ type Booking = {
   studentEmail?: string;
   startTime: number; // ms epoch
   durationMin: number;
-  endTime?: number;  // ms epoch
+  endTime?: number; // ms epoch
   roomId?: string;
   createdAt?: any;
 };
@@ -91,7 +91,6 @@ function deriveStatusLabel(t: TutorRow) {
 const ONE_HOUR = 60 * 60 * 1000;
 const DAY_MS = 24 * ONE_HOUR;
 
-// Sunday anchor (in the browser’s local tz == student tz)
 function startOfWeekSunday(d: Date) {
   const copy = new Date(d);
   const day = copy.getDay(); // Sun=0..Sat=6
@@ -105,10 +104,11 @@ function addDays(d: Date, days: number) {
   return c;
 }
 
-// sanitize availability to 15-minute grid (prevents :06, :11, etc)
+// sanitize availability to 15-minute grid
 function normalizeHM(hhmm: string): string {
   const m = String(hhmm || "").trim().match(/^(\d{1,2}):(\d{1,2})$/);
-  let H = 0, M = 0;
+  let H = 0,
+    M = 0;
   if (m) {
     H = Math.max(0, Math.min(23, parseInt(m[1], 10) || 0));
     M = Math.max(0, Math.min(59, parseInt(m[2], 10) || 0));
@@ -207,11 +207,9 @@ function getStudentSelectedTZ(stu: StudentPrefs | undefined): string {
     Intl.DateTimeFormat().resolvedOptions().timeZone
   );
 }
-
-// NEW: given a Date representing the student column, get the UTC instant of **noon in student tz**.
 function studentDayNoonUTC(dateAnchor: Date, studentTZ: string): number {
   const { year, month, day } = getYMDInTZ(+dateAnchor, studentTZ);
-  return wallTimeToUTC(year, month, day, 12, 0, studentTZ); // 12:00 local student time -> UTC
+  return wallTimeToUTC(year, month, day, 12, 0, studentTZ);
 }
 
 // ---------- component ----------
@@ -246,8 +244,15 @@ export default function TutorsLobbyPage() {
   const [formBusy, setFormBusy] = useState(false);
   const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
 
+  // time ticker for live "past" greying (updates every minute)
+  const [nowMs, setNowMs] = useState<number>(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   // debugging
-  const [debug, setDebug] = useState(true);
+  const [debug, setDebug] = useState(false);
   const [debugMsg, setDebugMsg] = useState<string>("");
   const [debugNumbers, setDebugNumbers] = useState<{
     chosenStart?: number;
@@ -355,7 +360,7 @@ export default function TutorsLobbyPage() {
     snap.forEach((ds) => {
       const d = ds.data() as any;
       const st = Number(d.startTime || 0);
-      const et = Number(d.endTime || st + (Number(d.durationMin || 60) * 60000));
+      const et = Number(d.endTime || st + Number(d.durationMin || 60) * 60000);
       if (st < weekEndMs && et >= +weekStart) {
         rows.push({
           id: ds.id,
@@ -434,13 +439,11 @@ export default function TutorsLobbyPage() {
     dayHeader: string; // label in student tz
     dayDate: Date; // student column anchor
     ranges: AbsRange[]; // absolute UTC
-    past: boolean;
   };
 
   const slotBlocks: SlotBlock[] = useMemo(() => {
     if (!activeTutor) return [];
     const tutorTZ = activeTutor.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const now = Date.now();
 
     const dowToKey = (dow: number): DayKey =>
       (["sun", "mon", "tue", "wed", "thu", "fri", "sat"][dow] as DayKey);
@@ -451,43 +454,39 @@ export default function TutorsLobbyPage() {
     for (let i = 0; i < 7; i++) {
       const dayDateStudent = addDays(activeWeekStart, i);
 
-      // 1) Stable mapping: take **student noon** for this column day…
+      // stable mapping using "student noon"
       const noonUTC = studentDayNoonUTC(dayDateStudent, studentTZ);
-
-      // 2) …see what weekday that corresponds to in the **tutor** tz
-      const tutorDOW = getWeekdayInTZ(noonUTC, tutorTZ); // 0..6 (Sun..Sat)
+      const tutorDOW = getWeekdayInTZ(noonUTC, tutorTZ); // 0..6
       const key = dowToKey(tutorDOW);
 
-      // 3) sanitize ranges first
       const rangesDef = (activeTutor.availability?.[key] || []) as TimeRange[];
       const cleaned = rangesDef
         .map((r) => ({ start: normalizeHM(r.start), end: normalizeHM(r.end) }))
         .filter((r) => hmToMinutes(r.end) > hmToMinutes(r.start));
 
-      // 4) pick the **tutor Y/M/D** that corresponds to student noon
       const { year: ty, month: tm, day: td } = getYMDInTZ(noonUTC, tutorTZ);
 
-      // 5) convert each tutor wall-time on that Y/M/D into absolute UTC
-      const abs: AbsRange[] = cleaned.map((r) => {
-        const sMin = hmToMinutes(r.start);
-        const eMin = hmToMinutes(r.end);
-        const sMs = wallTimeToUTC(ty, tm, td, Math.floor(sMin / 60), sMin % 60, tutorTZ);
-        const eMs = wallTimeToUTC(ty, tm, td, Math.floor(eMin / 60), eMin % 60, tutorTZ);
-        const sClamped = Math.floor(sMs / 60000) * 60000;
-        const eClamped = Math.floor(eMs / 60000) * 60000;
-        return { startMs: sClamped, endMs: eClamped };
-      }).filter(r => r.endMs > r.startMs);
-
-      abs.sort((a, b) => a.startMs - b.startMs);
+      const abs: AbsRange[] = cleaned
+        .map((r) => {
+          const sMin = hmToMinutes(r.start);
+          const eMin = hmToMinutes(r.end);
+          const sMs = wallTimeToUTC(ty, tm, td, Math.floor(sMin / 60), sMin % 60, tutorTZ);
+          const eMs = wallTimeToUTC(ty, tm, td, Math.floor(eMin / 60), eMin % 60, tutorTZ);
+          return {
+            startMs: Math.floor(sMs / 60000) * 60000,
+            endMs: Math.floor(eMs / 60000) * 60000,
+          };
+        })
+        .filter((r) => r.endMs > r.startMs)
+        .sort((a, b) => a.startMs - b.startMs);
 
       blocks.push({
         dayHeader: fmtDateInTZ(+dayDateStudent, studentTZ),
         dayDate: dayDateStudent,
         ranges: abs,
-        past: abs.length > 0 && abs.every((r) => r.endMs <= now),
       });
 
-      // collect debug
+      // debug map
       debugRows.push({
         idx: i,
         studentDayLabel: fmtDateInTZ(+dayDateStudent, studentTZ),
@@ -504,29 +503,40 @@ export default function TutorsLobbyPage() {
 
     setDebugMapRows(debugRows);
     return blocks;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTutor, activeWeekStart, studentTZ]); // (intentionally not depending on debugMapRows setter)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTutor, activeWeekStart, studentTZ]);
 
-  // ---------- start-time options ----------
+  // Helper: booking overlap
+  function overlaps(start: number, end: number, b: { start: number; end: number }) {
+    return start < b.end && end > b.start;
+  }
+
+  // ---------- start-time options (also hide booked conflicts) ----------
   const formStartOptions = useMemo(() => {
     if (!activeTutor || selectedDayIdx === null) return [];
-    const now = Date.now();
     const block = slotBlocks[selectedDayIdx];
     if (!block) return [];
 
     const durMs = (Number(formDuration) || 60) * 60000;
+    const bookings = bookedThisWeek.map((b) => ({
+      start: b.startTime,
+      end: b.endTime || b.startTime + b.durationMin * 60000,
+    }));
 
     const options: { value: string; label: string }[] = [];
     for (const r of block.ranges) {
       for (let t = r.startMs; t + durMs <= r.endMs; t += 15 * 60000) {
-        if (t <= now) continue; // future only
+        if (t <= nowMs) continue; // future only
+        const hasConflict = bookings.some((bk) => overlaps(t, t + durMs, bk));
+        if (hasConflict) continue;
+
         const value = hm24InTZ(t, studentTZ);
         const label = fmtTimeInTZ(t, studentTZ);
         if (!options.some((o) => o.value === value)) options.push({ value, label });
       }
     }
     return options;
-  }, [activeTutor, selectedDayIdx, slotBlocks, studentTZ, formDuration]);
+  }, [activeTutor, selectedDayIdx, slotBlocks, studentTZ, formDuration, bookedThisWeek, nowMs]);
 
   // keep formStartHM in sync with available options
   useEffect(() => {
@@ -540,18 +550,19 @@ export default function TutorsLobbyPage() {
   }, [formVisible, formStartOptions, formStartHM]);
 
   // ---------- booking helpers ----------
-  function findContainingRange(msStart: number, msEnd: number, ranges: AbsRange[]) {
+  type Range = { startMs: number; endMs: number };
+
+  function findContainingRange(msStart: number, msEnd: number, ranges: Range[]) {
     return ranges.find((r) => msStart >= r.startMs && msEnd <= r.endMs);
   }
   function hasTutorConflict(msStart: number, msEnd: number): boolean {
     return bookedThisWeek.some((b) => {
       const bStart = b.startTime;
-      const bEnd = b.endTime || (b.startTime + b.durationMin * 60000);
+      const bEnd = b.endTime || b.startTime + b.durationMin * 60000;
       return msStart < bEnd && msEnd > bStart;
     });
   }
 
-  // convert student's selected day/time (student wall) → UTC (using student date parts)
   function studentWallToUTC(dateAnchor: Date, hm24: string, tz: string): number {
     const safeHM = normalizeHM(hm24);
     const { year, month, day } = getYMDInTZ(+dateAnchor, tz);
@@ -585,7 +596,7 @@ export default function TutorsLobbyPage() {
       const role = (stuData.role as Role) || "student";
       if (role !== "student") throw new Error("Only student accounts can book a session.");
 
-      const dur = Number(formDuration || 60);
+      const dur = Math.max(60, Number(formDuration || 60)); // enforce ≥60
       if (!formStartHM) throw new Error("Select a start time.");
 
       const chosenStart = studentWallToUTC(formDate, formStartHM, studentTZ);
@@ -595,11 +606,12 @@ export default function TutorsLobbyPage() {
       const ranges = block?.ranges ?? [];
       const containing = findContainingRange(chosenStart, chosenEnd, ranges);
 
-      // expose ground truth in debug
       setDebugNumbers({ chosenStart, chosenEnd, containing: containing ?? null });
 
       if (!containing) {
-        setDebugMsg("Validator: selected start/end not fully contained in any availability range for the selected column.");
+        setDebugMsg(
+          "Validator: selected start/end not fully contained in any availability range for the selected column."
+        );
         throw new Error("Selected time is outside the tutor’s availability.");
       }
       if (chosenStart <= Date.now()) throw new Error("Selected time is in the past.");
@@ -627,7 +639,7 @@ export default function TutorsLobbyPage() {
           snap.forEach((ds) => {
             const d = ds.data() as any;
             const st = Number(d.startTime || 0);
-            const et = Number(d.endTime || (st + (Number(d.durationMin || 60) * 60000)));
+            const et = Number(d.endTime || st + Number(d.durationMin || 60) * 60000);
             if (occ.start < et && occ.end > st) throw new Error("Conflict detected with another booking.");
           });
 
@@ -1028,7 +1040,9 @@ export default function TutorsLobbyPage() {
               </div>
 
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <button onClick={goPrevWeek} style={navButtonStyle}>← Prev</button>
+                <button style={navButtonStyle} onClick={goPrevWeek}>
+                  ← Prev
+                </button>
                 <div
                   style={{
                     padding: "6px 8px",
@@ -1046,8 +1060,12 @@ export default function TutorsLobbyPage() {
                     timeZone: studentTZ,
                   }).format(activeWeekStart)}
                 </div>
-                <button onClick={goNextWeek} style={navButtonStyle}>Next →</button>
-                <button onClick={jumpToThisWeek} style={navButtonStyle}>This week</button>
+                <button style={navButtonStyle} onClick={goNextWeek}>
+                  Next →
+                </button>
+                <button style={navButtonStyle} onClick={jumpToThisWeek}>
+                  This week
+                </button>
                 <button
                   onClick={() => setDebug((d) => !d)}
                   style={{ ...navButtonStyle, background: debug ? "#374151" : "#1f2937" }}
@@ -1089,61 +1107,134 @@ export default function TutorsLobbyPage() {
                     gap: 8,
                   }}
                 >
-                  {slotBlocks.map((b, idx) => (
-                    <div
-                      key={idx}
-                      style={{
-                        background: "rgba(255,255,255,0.06)",
-                        border: "1px solid rgba(255,255,255,0.12)",
-                        borderRadius: 10,
-                        padding: 8,
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 6,
-                        minHeight: 160,
-                      }}
-                    >
-                      <div style={{ fontSize: 12.5, fontWeight: 700 }}>{b.dayHeader}</div>
+                  {slotBlocks.map((b, idx) => {
+                    // helper: build small timeline pieces for each base availability range
+                    type Piece = { startMs: number; endMs: number; kind: "past" | "booked" | "free" };
+                    const piecesAll: Piece[] = [];
 
-                      {b.ranges.length === 0 ? (
-                        <div style={{ fontSize: 12, opacity: 0.6 }}>No availability</div>
-                      ) : (
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                          {b.ranges.map((r, i) => {
-                            const isPast = r.endMs <= Date.now();
-                            return (
-                              <button
-                                key={i}
-                                onClick={() => !isPast && openFormForDay(b.dayDate, idx)}
-                                disabled={isPast}
-                                style={{
-                                  padding: "6px 8px",
-                                  borderRadius: 8,
-                                  textAlign: "left",
-                                  border: isPast ? "1px solid rgba(255,255,255,0.15)" : "1px solid #4ade80",
-                                  background: isPast
-                                    ? "rgba(255,255,255,0.05)"
-                                    : "linear-gradient(180deg, rgba(34,197,94,0.25), rgba(34,197,94,0.15))",
-                                  color: isPast ? "rgba(255,255,255,0.55)" : "#eafff0",
-                                  cursor: isPast ? "not-allowed" : "pointer",
-                                  fontSize: 12,
-                                  lineHeight: 1.2,
-                                }}
-                                title={isPast ? "This block is in the past" : "Pick a start time & duration"}
-                              >
-                                {fmtTimeInTZ(r.startMs, studentTZ)}–{fmtTimeInTZ(r.endMs, studentTZ)}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                    for (const r of b.ranges) {
+                      // collect booked overlaps clamped to r
+                      const booked = bookedThisWeek
+                        .map((bk) => ({
+                          start: bk.startTime,
+                          end: bk.endTime || bk.startTime + bk.durationMin * 60000,
+                        }))
+                        .map((bk) => ({
+                          start: Math.max(bk.start, r.startMs),
+                          end: Math.min(bk.end, r.endMs),
+                        }))
+                        .filter((bk) => bk.end > bk.start);
+
+                      const cutSet = new Set<number>([r.startMs, r.endMs]);
+                      // "now" cut inside range
+                      if (nowMs > r.startMs && nowMs < r.endMs) cutSet.add(nowMs);
+                      for (const bk of booked) {
+                        cutSet.add(bk.start);
+                        cutSet.add(bk.end);
+                      }
+                      const pts = Array.from(cutSet).sort((a, b2) => a - b2);
+                      for (let i2 = 0; i2 < pts.length - 1; i2++) {
+                        const s = pts[i2],
+                          e = pts[i2 + 1];
+                        if (e <= s) continue;
+                        const isBooked = booked.some((bk) => s < bk.end && e > bk.start);
+                        let kind: Piece["kind"] = isBooked ? "booked" : s < nowMs && e <= nowMs ? "past" : "free";
+                        piecesAll.push({ startMs: s, endMs: e, kind });
+                      }
+                    }
+
+                    return (
+                      <div
+                        key={idx}
+                        style={{
+                          background: "rgba(255,255,255,0.06)",
+                          border: "1px solid rgba(255,255,255,0.12)",
+                          borderRadius: 10,
+                          padding: 8,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 6,
+                          minHeight: 160,
+                        }}
+                      >
+                        <div style={{ fontSize: 12.5, fontWeight: 700 }}>{b.dayHeader}</div>
+
+                        {b.ranges.length === 0 ? (
+                          <div style={{ fontSize: 12, opacity: 0.6 }}>No availability</div>
+                        ) : piecesAll.length === 0 ? (
+                          <div style={{ fontSize: 12, opacity: 0.6 }}>No bookable time</div>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            {piecesAll.map((p, i) => {
+                              const label = `${fmtTimeInTZ(p.startMs, studentTZ)}–${fmtTimeInTZ(
+                                p.endMs,
+                                studentTZ
+                              )}`;
+                              const isClickable = p.kind === "free" && p.startMs > nowMs;
+                              return (
+                                <button
+                                  key={i}
+                                  onClick={() => isClickable && openFormForDay(b.dayDate, idx)}
+                                  disabled={!isClickable}
+                                  style={{
+                                    padding: "6px 8px",
+                                    borderRadius: 8,
+                                    textAlign: "left",
+                                    fontSize: 12,
+                                    lineHeight: 1.2,
+                                    cursor: isClickable ? "pointer" : "not-allowed",
+                                    border:
+                                      p.kind === "free"
+                                        ? "1px solid #4ade80"
+                                        : p.kind === "booked"
+                                        ? "1px solid #885555"
+                                        : "1px solid rgba(255,255,255,0.15)",
+                                    background:
+                                      p.kind === "free"
+                                        ? "linear-gradient(180deg, rgba(34,197,94,0.25), rgba(34,197,94,0.15))"
+                                        : p.kind === "booked"
+                                        ? "linear-gradient(180deg, rgba(120,120,120,0.25), rgba(120,120,120,0.15))"
+                                        : "rgba(255,255,255,0.05)",
+                                    color:
+                                      p.kind === "free"
+                                        ? "#eafff0"
+                                        : p.kind === "booked"
+                                        ? "rgba(255,255,255,0.85)"
+                                        : "rgba(255,255,255,0.55)",
+                                  }}
+                                  title={
+                                    p.kind === "booked"
+                                      ? "Booked"
+                                      : p.kind === "past"
+                                      ? "This block is in the past"
+                                      : "Pick a start time & duration"
+                                  }
+                                >
+                                  {label}
+                                  {p.kind === "booked" && <span style={{ opacity: 0.8 }}> · Booked</span>}
+                                  {p.kind === "past" && <span style={{ opacity: 0.6 }}> · Past</span>}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
               {/* right: booking form & my bookings */}
-              <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+              <div
+                style={{
+                  padding: 12,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 12,
+                  maxHeight: "calc(92vh - 120px)",
+                  overflowY: "auto", // <-- scrollable panel
+                }}
+              >
                 {/* Booking form */}
                 <div
                   style={{
@@ -1200,10 +1291,10 @@ export default function TutorsLobbyPage() {
                         Duration
                         <select
                           value={String(formDuration)}
-                          onChange={(e) => setFormDuration(parseInt(e.target.value, 10))}
+                          onChange={(e) => setFormDuration(Math.max(60, parseInt(e.target.value, 10)))}
                           style={inputStyle}
                         >
-                          <option value="30">30 minutes</option>
+                          {/* No 30-minute option */}
                           <option value="60">60 minutes</option>
                           <option value="90">90 minutes</option>
                           <option value="120">120 minutes</option>
@@ -1277,11 +1368,13 @@ export default function TutorsLobbyPage() {
                           }}
                         >
                           <div style={{ fontWeight: 700, marginBottom: 4 }}>Debug</div>
-                          <div>Now (UTC): {new Date(Date.now()).toISOString()}</div>
+                          <div>Now (UTC): {new Date(nowMs).toISOString()}</div>
                           <div>Student TZ: {studentTZ}</div>
                           <div>Tutor TZ: {activeTutor?.timezone || "(default/unknown)"}</div>
                           <div>Selected column: {selectedDayIdx ?? "-"}</div>
-                          <div>Start HM (student tz): {formStartHM || "(none)"} · Duration: {formDuration} min</div>
+                          <div>
+                            Start HM (student tz): {formStartHM || "(none)"} · Duration: {Math.max(60, formDuration)} min
+                          </div>
                           <div>Start options shown: {formStartOptions.length}</div>
 
                           {selectedDayIdx !== null && (
@@ -1290,8 +1383,7 @@ export default function TutorsLobbyPage() {
                               <ul style={{ margin: 0, paddingLeft: 16 }}>
                                 {slotBlocks[selectedDayIdx]?.ranges.map((r, i) => (
                                   <li key={i}>
-                                    local: {fmtTimeInTZ(r.startMs, studentTZ)}–{fmtTimeInTZ(r.endMs, studentTZ)}
-                                    {"  "}
+                                    local: {fmtTimeInTZ(r.startMs, studentTZ)}–{fmtTimeInTZ(r.endMs, studentTZ)}{" "}
                                     <span style={{ opacity: 0.7 }}>
                                       [UTC {new Date(r.startMs).toISOString().slice(11, 16)}–
                                       {new Date(r.endMs).toISOString().slice(11, 16)}]
@@ -1314,16 +1406,15 @@ export default function TutorsLobbyPage() {
                             </div>
                           )}
 
-                          {/* NEW: day-mapping table for all 7 columns */}
                           <div style={{ marginTop: 10, opacity: 0.85, fontWeight: 700 }}>
                             Day mapping (student noon → tutor Y/M/D):
                           </div>
                           <ul style={{ margin: 0, paddingLeft: 16 }}>
                             {debugMapRows.map((row) => (
                               <li key={row.idx} style={{ marginBottom: 4 }}>
-                                [col {row.idx}] {row.studentDayLabel} · student noon UTC {row.studentNoonUTC} →
-                                tutor YMD {row.tutorY}-{String(row.tutorM).padStart(2, "0")}-
-                                {String(row.tutorD).padStart(2, "0")} · ranges:
+                                [col {row.idx}] {row.studentDayLabel} · student noon UTC {row.studentNoonUTC} → tutor YMD{" "}
+                                {row.tutorY}-{String(row.tutorM).padStart(2, "0")}-{String(row.tutorD).padStart(2, "0")} ·
+                                ranges:
                                 <ul style={{ margin: 0, paddingLeft: 16 }}>
                                   {row.rangesUTC.length === 0 ? (
                                     <li>(none)</li>
@@ -1386,7 +1477,8 @@ export default function TutorsLobbyPage() {
                                   day: "numeric",
                                   timeZone: studentTZ,
                                 }).format(b.startTime)}{" "}
-                                • {new Intl.DateTimeFormat(undefined, {
+                                •{" "}
+                                {new Intl.DateTimeFormat(undefined, {
                                   hour: "numeric",
                                   minute: "2-digit",
                                   timeZone: studentTZ,
