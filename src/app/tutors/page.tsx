@@ -91,11 +91,11 @@ function deriveStatusLabel(t: TutorRow) {
 const ONE_HOUR = 60 * 60 * 1000;
 const DAY_MS = 24 * ONE_HOUR;
 
-// ——— anchor the grid to SUNDAY (matches the UI you’re showing) ———
+// Sunday anchor (matches UI leftmost column)
 function startOfWeekSunday(d: Date) {
   const copy = new Date(d);
   const day = copy.getDay(); // Sun=0..Sat=6
-  copy.setDate(copy.getDate() - day); // go back to Sunday
+  copy.setDate(copy.getDate() - day);
   copy.setHours(0, 0, 0, 0);
   return copy;
 }
@@ -104,12 +104,27 @@ function addDays(d: Date, days: number) {
   c.setDate(c.getDate() + days);
   return c;
 }
+
+// --- NEW: availability time sanitizer (round down to nearest 15 min) ---
+function normalizeHM(hhmm: string): string {
+  const m = String(hhmm || "").trim().match(/^(\d{1,2}):(\d{1,2})$/);
+  let H = 0, M = 0;
+  if (m) {
+    H = Math.max(0, Math.min(23, parseInt(m[1], 10) || 0));
+    M = Math.max(0, Math.min(59, parseInt(m[2], 10) || 0));
+  }
+  const snapped = Math.floor(M / 15) * 15; // 00,15,30,45
+  const pad = (n: number) => (n < 10 ? "0" + n : String(n));
+  return `${pad(H)}:${pad(snapped)}`;
+}
+
 function hmToMinutes(hhmm: string): number {
-  const [h, m] = hhmm.split(":").map((x) => parseInt(x, 10));
+  const norm = normalizeHM(hhmm);
+  const [h, m] = norm.split(":").map((x) => parseInt(x, 10));
   return h * 60 + m;
 }
 
-// robust tz math (handles DST)
+// robust tz math (handles DST) — we keep this but clamp to whole minutes
 function getTzOffsetMs(tz: string, ms: number): number {
   const dtf = new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
@@ -165,6 +180,7 @@ function fmtDateInTZ(ms: number, tz: string) {
     weekday: "short",
     month: "short",
     day: "numeric",
+  // keep display in student tz when called with studentTZ
     timeZone: tz,
   }).format(ms);
 }
@@ -219,8 +235,8 @@ export default function TutorsLobbyPage() {
 
   // booking form
   const [formVisible, setFormVisible] = useState(false);
-  const [formDate, setFormDate] = useState<Date | null>(null); // column date anchor (student week)
-  const [formStartHM, setFormStartHM] = useState<string>(""); // always one of options (or "")
+  const [formDate, setFormDate] = useState<Date | null>(null);
+  const [formStartHM, setFormStartHM] = useState<string>("");
   const [formDuration, setFormDuration] = useState<number>(60);
   const [formRepeatCount, setFormRepeatCount] = useState<number>(0);
   const [formBusy, setFormBusy] = useState(false);
@@ -410,7 +426,6 @@ export default function TutorsLobbyPage() {
     const tutorTZ = activeTutor.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
     const now = Date.now();
 
-    // helper: map Sun(0)..Sat(6) -> DayKey (NOTE: our Availability uses keys with 'sun' at the end; create mapping).
     const dowToKey = (dow: number): DayKey =>
       (["sun", "mon", "tue", "wed", "thu", "fri", "sat"][dow] as DayKey);
 
@@ -419,27 +434,37 @@ export default function TutorsLobbyPage() {
     for (let i = 0; i < 7; i++) {
       const dayDateStudent = addDays(activeWeekStart, i);
 
-      // Use the TUTOR'S weekday for this column
+      // Map the student-column date to the tutor's weekday
       const tutorDOW = getWeekdayInTZ(+dayDateStudent, tutorTZ); // 0..6 (Sun..Sat)
       const key = dowToKey(tutorDOW);
 
+      // --- SANITIZE EACH RANGE FIRST ---
       const rangesDef = (activeTutor.availability?.[key] || []) as TimeRange[];
+      const cleaned = rangesDef
+        .map((r) => ({
+          start: normalizeHM(r.start),
+          end: normalizeHM(r.end),
+        }))
+        .filter((r) => {
+          const s = hmToMinutes(r.start);
+          const e = hmToMinutes(r.end);
+          return e > s; // valid, non-empty
+        });
 
-      // Build absolute UTC ranges from tutor wall times on the tutor's Y/M/D that corresponds to this column
+      // Build absolute UTC ranges using the tutor's Y/M/D for this column
       const { year, month, day } = getYMDInTZ(+dayDateStudent, tutorTZ);
-      const abs: AbsRange[] = rangesDef
+      const abs: AbsRange[] = cleaned
         .map((r) => {
           const s = hmToMinutes(r.start);
           const e = hmToMinutes(r.end);
-          if (e <= s) return null;
           const sMs = wallTimeToUTC(year, month, day, Math.floor(s / 60), s % 60, tutorTZ);
           const eMs = wallTimeToUTC(year, month, day, Math.floor(e / 60), e % 60, tutorTZ);
-          // clamp to exact minute to avoid drift
+          // final clamp to minute boundaries
           const sClamped = Math.floor(sMs / 60000) * 60000;
           const eClamped = Math.floor(eMs / 60000) * 60000;
           return { startMs: sClamped, endMs: eClamped };
         })
-        .filter(Boolean) as AbsRange[];
+        .filter((r) => r.endMs > r.startMs);
 
       abs.sort((a, b) => a.startMs - b.startMs);
 
@@ -454,7 +479,7 @@ export default function TutorsLobbyPage() {
     return blocks;
   }, [activeTutor, activeWeekStart, studentTZ]);
 
-  // ---------- start-time options (depend on duration & selected column) ----------
+  // ---------- start-time options ----------
   const formStartOptions = useMemo(() => {
     if (!activeTutor || selectedDayIdx === null) return [];
     const now = Date.now();
@@ -500,8 +525,9 @@ export default function TutorsLobbyPage() {
 
   // convert student's selected day/time (student wall) → UTC
   function studentWallToUTC(dateAnchor: Date, hm24: string, tz: string): number {
+    const safeHM = normalizeHM(hm24);
     const { year, month, day } = getYMDInTZ(+dateAnchor, tz);
-    const [H, M] = hm24.split(":").map((x) => parseInt(x, 10));
+    const [H, M] = safeHM.split(":").map((x) => parseInt(x, 10));
     return wallTimeToUTC(year, month, day, H, M, tz);
   }
 
@@ -1209,7 +1235,7 @@ export default function TutorsLobbyPage() {
                         </button>
                       </div>
 
-                      {/* DEBUG PANEL (now shows the real UTC numbers) */}
+                      {/* DEBUG PANEL */}
                       {debug && (
                         <div
                           style={{
