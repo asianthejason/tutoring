@@ -368,7 +368,7 @@ export default function TutorsLobbyPage() {
     setFormStartHM("");
     setSelectedDayIdx(null);
 
-    const week0 = startOfWeekSunday(new Date()));
+    const week0 = startOfWeekSunday(new Date());
     setActiveWeekStart(week0);
 
     const tSnap = await getDoc(doc(db, "users", tutorId));
