@@ -18,6 +18,7 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 
+/* ===================== Types ===================== */
 type Role = "student" | "tutor" | "admin";
 type DayKey = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
 type TimeRange = { start: string; end: string }; // "HH:mm"
@@ -29,11 +30,11 @@ type TutorRow = {
   email: string;
   roomId: string;
   statusRaw: "waiting" | "busy" | "offline" | string;
-  subjects: string[];
   lastActiveAt?: number;
-  introduction?: string;
   country?: string;
   timezone?: string;
+  introduction?: string; // from tutorIntro
+  availability?: Availability; // needed for card-level filtering
 };
 
 type TutorDoc = {
@@ -42,7 +43,7 @@ type TutorDoc = {
   roomId?: string;
   availability?: Availability;
   timezone?: string; // IANA
-  introduction?: string;
+  tutorIntro?: string; // <- correct field
   country?: string;
   // tolerate legacy key if present in some docs
   countryResidence?: string;
@@ -68,7 +69,7 @@ type StudentPrefs = {
   preferredTimezone?: string;
 };
 
-// ---------- helpers ----------
+/* ===================== Time helpers ===================== */
 function tsToMs(v: unknown): number | undefined {
   if (!v) return undefined;
   if (v instanceof Timestamp) return v.toMillis();
@@ -114,8 +115,7 @@ function addDays(d: Date, days: number) {
 // sanitize availability to 15-minute grid
 function normalizeHM(hhmm: string): string {
   const m = String(hhmm || "").trim().match(/^(\d{1,2}):(\d{1,2})$/);
-  let H = 0,
-    M = 0;
+  let H = 0, M = 0;
   if (m) {
     H = Math.max(0, Math.min(23, parseInt(m[1], 10) || 0));
     M = Math.max(0, Math.min(59, parseInt(m[2], 10) || 0));
@@ -173,8 +173,6 @@ function getYMDInTZ(ms: number, tz: string) {
   const day = Number(parts.find((p) => p.type === "day")?.value || "01");
   return { year, month, day };
 }
-
-// weekday (Sun=0..Sat=6) *in a given timezone* for a timestamp
 function getWeekdayInTZ(ms: number, tz: string): number {
   const { year, month, day } = getYMDInTZ(ms, tz);
   const noonUtc = Date.UTC(year, month, day, 12, 0, 0, 0);
@@ -207,6 +205,10 @@ function hm24InTZ(ms: number, tz: string): string {
   const mm = parts.find((p) => p.type === "minute")?.value ?? "00";
   return `${hh}:${mm}`;
 }
+function weekdayKeyFromDow(dow: number): DayKey {
+  return ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][dow] as DayKey;
+}
+
 function getStudentSelectedTZ(stu: StudentPrefs | undefined): string {
   return (
     (stu?.timezone && typeof stu.timezone === "string" && stu.timezone) ||
@@ -219,11 +221,7 @@ function studentDayNoonUTC(dateAnchor: Date, studentTZ: string): number {
   return wallTimeToUTC(year, month, day, 12, 0, studentTZ);
 }
 
-function weekdayKeyFromDow(dow: number): DayKey {
-  return ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][dow] as DayKey;
-}
-
-// ---------- component ----------
+/* ===================== Component ===================== */
 export default function TutorsLobbyPage() {
   const router = useRouter();
 
@@ -260,10 +258,10 @@ export default function TutorsLobbyPage() {
   const [filterStartHM, setFilterStartHM] = useState<string>("");
   const [filterEndHM, setFilterEndHM] = useState<string>("");
 
-  // pre-fetched bookings near the next selected window to suppress tutors that are booked
-  const [filterBookingsByTutor, setFilterBookingsByTutor] = useState<
-    Record<string, { start: number; end: number }[]>
-  >({});
+  // for booked suppression in filter results
+  const [filterBookingsByTutor, setFilterBookingsByTutor] = useState<Record<string, { start: number; end: number }[]>>(
+    {}
+  );
 
   // time ticker for live "past" greying (modal pieces; updates every minute)
   const [nowMs, setNowMs] = useState<number>(Date.now());
@@ -274,7 +272,7 @@ export default function TutorsLobbyPage() {
 
   const [toast, setToast] = useState("");
 
-  // load all tutors
+  /* ===== Load tutors (with availability + tutorIntro) ===== */
   useEffect(() => {
     const qRef = query(collection(db, "users"), where("role", "==", "tutor"));
     const unsub = onSnapshot(
@@ -289,11 +287,11 @@ export default function TutorsLobbyPage() {
             email: data.email || "",
             roomId: data.roomId || "",
             statusRaw: (data.status as any) || "offline",
-            subjects: Array.isArray(data.subjects) ? data.subjects : [],
             lastActiveAt: tsToMs(data.lastActiveAt),
-            introduction: typeof data.introduction === "string" ? data.introduction : "",
             country: (data.countryResidence as string) || (data.country as string) || "",
             timezone: (data.timezone as string) || undefined,
+            introduction: typeof data.tutorIntro === "string" ? data.tutorIntro : "", // <-- fix
+            availability: (data.availability || undefined) as Availability | undefined, // for filter
           });
         });
         rows.sort((a, b) => {
@@ -324,7 +322,7 @@ export default function TutorsLobbyPage() {
     });
   }, []);
 
-  // open modal
+  /* ===== Modal open: load full tutor doc + bookings ===== */
   const openTutorModal = useCallback(async (tutorId: string) => {
     setToast("");
     setFormVisible(false);
@@ -346,7 +344,7 @@ export default function TutorsLobbyPage() {
       availability:
         (t.availability as Availability) || { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] },
       timezone: t.timezone || undefined,
-      introduction: t.introduction || "",
+      tutorIntro: t.tutorIntro || "", // keep the field as-is for safety
       country: t.country || t.countryResidence || "",
     };
     setActiveTutor(tutor);
@@ -426,7 +424,7 @@ export default function TutorsLobbyPage() {
     setMyUpcomingWithTutor(mine);
   }, []);
 
-  // page nav (jump by 4 weeks)
+  /* ===== Paging controls (modal) ===== */
   const goPrevPage = useCallback(async () => {
     if (!activeTutor) return;
     const prev = addDays(activeWeekStart, -28);
@@ -448,7 +446,7 @@ export default function TutorsLobbyPage() {
     await refreshBookingsRange(activeTutor.uid, nowW);
   }, [activeTutor, refreshBookingsRange]);
 
-  // ---------- availability blocks for modal ----------
+  /* ===== Availability blocks for modal ===== */
   type AbsRange = { startMs: number; endMs: number };
   type SlotBlock = {
     dayHeader: string; // label in student tz
@@ -456,21 +454,17 @@ export default function TutorsLobbyPage() {
     ranges: AbsRange[]; // absolute UTC
   };
 
-  // 28 consecutive days (4 weeks) starting from activeWeekStart
   const slotBlocks: SlotBlock[] = useMemo(() => {
     if (!activeTutor) return [];
     const tutorTZ = activeTutor.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-    const dowToKey = (dow: number): DayKey => weekdayKeyFromDow(dow);
-
     const blocks: SlotBlock[] = [];
-
     for (let i = 0; i < 28; i++) {
       const dayDateStudent = addDays(activeWeekStart, i);
 
       const noonUTC = studentDayNoonUTC(dayDateStudent, studentTZ);
       const tutorDOW = getWeekdayInTZ(noonUTC, tutorTZ); // 0..6
-      const key = dowToKey(tutorDOW);
+      const key = weekdayKeyFromDow(tutorDOW);
 
       const rangesDef = (activeTutor.availability?.[key] || []) as TimeRange[];
       const cleaned = rangesDef
@@ -502,12 +496,11 @@ export default function TutorsLobbyPage() {
     return blocks;
   }, [activeTutor, activeWeekStart, studentTZ]);
 
-  // Helper: booking overlap
   function overlaps(start: number, end: number, b: { start: number; end: number }) {
     return start < b.end && end > b.start;
   }
 
-  // ---------- start-time options (also hide booked conflicts) ----------
+  /* ===== Start-time options for modal ===== */
   const formStartOptions = useMemo(() => {
     if (!activeTutor || selectedDayIdx === null) return [];
     const block = slotBlocks[selectedDayIdx];
@@ -534,7 +527,6 @@ export default function TutorsLobbyPage() {
     return options;
   }, [activeTutor, selectedDayIdx, slotBlocks, studentTZ, formDuration, bookedInRange, nowMs]);
 
-  // keep formStartHM in sync with available options
   useEffect(() => {
     if (!formVisible) return;
     if (formStartOptions.length === 0) {
@@ -545,7 +537,7 @@ export default function TutorsLobbyPage() {
     if (!exists) setFormStartHM(formStartOptions[0].value);
   }, [formVisible, formStartOptions, formStartHM]);
 
-  // ---------- booking helpers (modal) ----------
+  /* ===== Booking helpers (modal) ===== */
   type Range = { startMs: number; endMs: number };
 
   function findContainingRange(msStart: number, msEnd: number, ranges: Range[]) {
@@ -705,7 +697,9 @@ export default function TutorsLobbyPage() {
     [activeTutor, activeWeekStart, refreshBookingsRange, refreshMyUpcomingWithTutor]
   );
 
-  // ---------- discovery filter helpers ----------
+  /* ===================== Discovery filter ===================== */
+
+  // Convert the student's selected weekday/time window to the *next upcoming occurrence* in UTC.
   function computeNextOccurrenceUTC(
     dayDow: number,
     startHM: string,
@@ -716,31 +710,33 @@ export default function TutorsLobbyPage() {
     const eHM = normalizeHM(endHM);
     if (hmToMinutes(eHM) <= hmToMinutes(sHM)) return null;
 
-    const base = startOfWeekSunday(new Date()); // this week
+    const base = startOfWeekSunday(new Date()); // this week (student tz reference)
     const target = addDays(base, dayDow);
     const { year, month, day } = getYMDInTZ(+target, tz);
     const [sH, sM] = sHM.split(":").map((x) => parseInt(x, 10));
     const [eH, eM] = eHM.split(":").map((x) => parseInt(x, 10));
     const start = wallTimeToUTC(year, month, day, sH, sM, tz);
-
-    // If the chosen time today has already passed, roll forward 7 days.
-    const now = Date.now();
     const endCandidate = wallTimeToUTC(year, month, day, eH, eM, tz);
+
+    const now = Date.now();
+    // if already passed today, roll forward 7 days
     const nextStart = start <= now ? start + 7 * DAY_MS : start;
     const nextEnd = endCandidate <= now ? endCandidate + 7 * DAY_MS : endCandidate;
-
     return { start: nextStart, end: nextEnd };
   }
 
+  // Does tutor's weekly availability cover this UTC window at the next occurrence?
   function tutorCoversWindowWeekly(t: TutorRow, windowStartUTC: number, windowEndUTC: number): boolean {
-    // Check coverage against tutor's weekly availability for the *specific upcoming occurrence*
+    if (!t.availability) return false; // require availability on card list for strict filtering
+
     const tutorTZ = t.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-    // Figure the tutor-local weekday for window start
+
+    // Tutor-local weekday for window start
     const tutorDow = getWeekdayInTZ(windowStartUTC, tutorTZ);
     const key = weekdayKeyFromDow(tutorDow);
-    const ranges = ((t as any).availability?.[key] ??
-      (undefined as any)) as TimeRange[] | undefined; // runtime only when opening modal; in cards we don't have availability
-    if (!ranges || !Array.isArray(ranges)) return true; // If not loaded on card list, we don't block by coverage here.
+
+    const ranges = (t.availability[key] || []) as TimeRange[];
+    if (!ranges.length) return false;
 
     // Convert the UTC window to tutor local HH:mm
     const sHM = hm24InTZ(windowStartUTC, tutorTZ);
@@ -753,7 +749,7 @@ export default function TutorsLobbyPage() {
       .some((r) => sMin >= r.start && eMin <= r.end);
   }
 
-  // When filters change, prefetch bookings near the *next* occurrence to hide booked tutors.
+  // When filters change, prefetch bookings near that next occurrence and store by tutor
   useEffect(() => {
     if (filterDay === null || !filterStartHM || !filterEndHM) {
       setFilterBookingsByTutor({});
@@ -769,7 +765,7 @@ export default function TutorsLobbyPage() {
       // get bookings in a narrow window around the target (±1 day)
       const startQ = occ.start - DAY_MS;
       const endQ = occ.end + DAY_MS;
-      const qRef = query(collection(db, "bookings")); // single-field range not used to avoid index churn
+      const qRef = query(collection(db, "bookings"));
       const snap = await getDocs(qRef);
 
       const map: Record<string, { start: number; end: number }[]> = {};
@@ -787,7 +783,7 @@ export default function TutorsLobbyPage() {
     })().catch((e) => console.error(e));
   }, [filterDay, filterStartHM, filterEndHM, studentTZ]);
 
-  // ---------- tutor cards (with discovery filter + intro/country) ----------
+  // Apply the filter: (1) availability covers window (2) not booked at that time
   const filteredTutors = useMemo(() => {
     if (filterDay === null || !filterStartHM || !filterEndHM) return tutors;
 
@@ -795,18 +791,19 @@ export default function TutorsLobbyPage() {
     if (!occ) return [];
 
     return tutors.filter((t) => {
-      // 1) hide if booked at that next occurrence
+      // Require coverage by availability
+      if (!tutorCoversWindowWeekly(t, occ.start, occ.end)) return false;
+
+      // Hide if already booked for that occurrence
       const bookings = filterBookingsByTutor[t.uid] || [];
       const isBooked = bookings.some((b) => overlaps(occ.start, occ.end, b));
       if (isBooked) return false;
 
-      // 2) if we happen to have availability attached to row (not typical), require coverage
-      // otherwise allow; detailed check happens in modal anyway.
-      // If you want strict coverage check, you can load availability into cards similarly to modal.
       return true;
     });
   }, [tutors, filterDay, filterStartHM, filterEndHM, studentTZ, filterBookingsByTutor]);
 
+  /* ===================== UI: Cards ===================== */
   const cards = useMemo(() => {
     return filteredTutors.map((t) => {
       const d = deriveStatusLabel(t);
@@ -891,7 +888,7 @@ export default function TutorsLobbyPage() {
             </div>
           </div>
 
-          {/* Introduction replaces subjects */}
+          {/* Introduction from tutorIntro */}
           <div style={{ fontSize: 13, color: "rgba(255,255,255,0.8)" }}>
             {t.introduction ? (
               <span style={{ display: "block", whiteSpace: "pre-wrap" }}>{t.introduction}</span>
@@ -923,17 +920,18 @@ export default function TutorsLobbyPage() {
     });
   }, [filteredTutors, openTutorModal]);
 
-  // ---------- UI ----------
+  /* ===================== UI: Shell ===================== */
   // break 28 days into 4 arrays of 7 for rendering
+  type SlotBlock = ReturnType<typeof useMemo> extends (infer R)[] ? any : never; // ts appeasement (not used here)
   const weeks4 = useMemo(() => {
-    const chunks: SlotBlock[][] = [];
+    const chunks: any[][] = [];
+    // slotBlocks is defined earlier; re-derive type inline
     for (let w = 0; w < 4; w++) {
-      chunks.push(slotBlocks.slice(w * 7, w * 7 + 7));
+      chunks.push((slotBlocks as any[]).slice(w * 7, w * 7 + 7));
     }
     return chunks;
   }, [slotBlocks]);
 
-  // options
   const dayOptions = [
     { label: "Sunday", value: 0 },
     { label: "Monday", value: 1 },
@@ -943,13 +941,42 @@ export default function TutorsLobbyPage() {
     { label: "Friday", value: 5 },
     { label: "Saturday", value: 6 },
   ];
-  const timeChoices = Array.from({ length: 24 * 4 }, (_, i) => {
-    const H = Math.floor(i / 4);
-    const M = (i % 4) * 15;
-    const pad = (n: number) => (n < 10 ? "0" + n : String(n));
-    const v = `${pad(H)}:${pad(M)}`;
-    return { value: v, label: new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", timeZone: studentTZ }).format(new Date(wallTimeToUTC(2000, 0, 1, H, M, studentTZ))) };
-  });
+  const inputStyle: React.CSSProperties = {
+    width: "100%",
+    marginTop: 6,
+    padding: "8px 10px",
+    borderRadius: 8,
+    background: "#111",
+    color: "#fff",
+    border: "1px solid #3b3b3b",
+    fontSize: 13,
+  };
+  const navButtonStyle: React.CSSProperties = {
+    padding: "6px 10px",
+    borderRadius: 8,
+    background: "#1f2937",
+    border: "1px solid #3b3b3b",
+    color: "#fff",
+    fontSize: 12,
+    cursor: "pointer",
+  };
+
+  const timeChoices = useMemo(() => {
+    return Array.from({ length: 24 * 4 }, (_, i) => {
+      const H = Math.floor(i / 4);
+      const M = (i % 4) * 15;
+      const pad = (n: number) => (n < 10 ? "0" + n : String(n));
+      const v = `${pad(H)}:${pad(M)}`;
+      return {
+        value: v,
+        label: new Intl.DateTimeFormat(undefined, {
+          hour: "numeric",
+          minute: "2-digit",
+          timeZone: studentTZ,
+        }).format(new Date(wallTimeToUTC(2000, 0, 1, H, M, studentTZ))),
+      };
+    });
+  }, [studentTZ]);
 
   return (
     <main
@@ -1162,513 +1189,608 @@ export default function TutorsLobbyPage() {
         </div>
       </footer>
 
-      {/* Availability Modal (unchanged core logic) */}
+      {/* Availability Modal */}
       {modalOpen && activeTutor && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.9)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 16,
-            zIndex: 50,
-          }}
-          onClick={() => {
+        <AvailabilityModal
+          activeTutor={activeTutor}
+          studentTZ={studentTZ}
+          activeWeekStart={activeWeekStart}
+          setActiveWeekStart={setActiveWeekStart}
+          bookedInRange={bookedInRange}
+          myUpcomingWithTutor={myUpcomingWithTutor}
+          refreshBookingsRange={refreshBookingsRange}
+          refreshMyUpcomingWithTutor={refreshMyUpcomingWithTutor}
+          goPrevPage={goPrevPage}
+          goNextPage={goNextPage}
+          jumpToThisWeek={jumpToThisWeek}
+          close={() => {
             setModalOpen(false);
             setActiveTutor(null);
             setBookedInRange([]);
             setMyUpcomingWithTutor([]);
             setFormVisible(false);
           }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "min(1220px, 97vw)",
-              maxHeight: "92vh",
-              overflow: "hidden",
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.15)",
-              background: "#111214",
-              boxShadow: "0 40px 120px rgba(0,0,0,0.9)",
-              color: "#fff",
-              display: "flex",
-              flexDirection: "column",
-            }}
-          >
-            {/* header */}
-            <div
-              style={{
-                padding: "12px 14px",
-                borderBottom: "1px solid rgba(255,255,255,0.12)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 8,
-                flexWrap: "wrap",
-              }}
-            >
-              <div style={{ display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>
-                  {activeTutor.displayName || "Tutor"} — Availability & Booking
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.8 }}>
-                  Times shown in your timezone: <b>{studentTZ}</b>. (Converted from tutor’s availability.)
-                </div>
-              </div>
-
-              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <button style={navButtonStyle} onClick={goPrevPage}>
-                  ← Prev 4 weeks
-                </button>
-                <div
-                  style={{
-                    padding: "6px 8px",
-                    border: "1px solid rgba(255,255,255,0.15)",
-                    borderRadius: 8,
-                    fontSize: 12,
-                    background: "rgba(255,255,255,0.06)",
-                  }}
-                >
-                  From{" "}
-                  {new Intl.DateTimeFormat(undefined, {
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                    timeZone: studentTZ,
-                  }).format(activeWeekStart)}{" "}
-                  to{" "}
-                  {new Intl.DateTimeFormat(undefined, {
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                    timeZone: studentTZ,
-                  }).format(addDays(activeWeekStart, 27))}
-                </div>
-                <button style={navButtonStyle} onClick={goNextPage}>
-                  Next 4 weeks →
-                </button>
-                <button style={navButtonStyle} onClick={jumpToThisWeek}>
-                  This week
-                </button>
-                <button
-                  onClick={() => {
-                    setModalOpen(false);
-                    setActiveTutor(null);
-                    setBookedInRange([]);
-                    setMyUpcomingWithTutor([]);
-                    setFormVisible(false);
-                  }}
-                  style={{
-                    padding: "6px 10px",
-                    borderRadius: 8,
-                    border: "1px solid rgba(255,255,255,0.25)",
-                    background: "rgba(255,255,255,0.1)",
-                    color: "#fff",
-                    cursor: "pointer",
-                  }}
-                  aria-label="Close"
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
-
-            {/* body */}
-            <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", minHeight: 380 }}>
-              {/* left: 4 weeks (scrollable) */}
-              <div
-                style={{
-                  padding: 12,
-                  borderRight: "1px solid rgba(255,255,255,0.12)",
-                  maxHeight: "calc(92vh - 120px)",
-                  overflowY: "auto",
-                  gap: 12,
-                  display: "flex",
-                  flexDirection: "column",
-                }}
-              >
-                {weeks4.map((week, wIdx) => (
-                  <div key={wIdx} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        opacity: 0.85,
-                        padding: "4px 6px",
-                        borderRadius: 8,
-                        border: "1px solid rgba(255,255,255,0.12)",
-                        background: "rgba(255,255,255,0.04)",
-                        width: "fit-content",
-                      }}
-                    >
-                      Week of{" "}
-                      {new Intl.DateTimeFormat(undefined, {
-                        month: "short",
-                        day: "numeric",
-                        year: "numeric",
-                        timeZone: studentTZ,
-                      }).format(addDays(activeWeekStart, wIdx * 7))}
-                    </div>
-
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "repeat(7, 1fr)",
-                        gap: 8,
-                      }}
-                    >
-                      {week.map((b, idxWithin) => {
-                        const idx = wIdx * 7 + idxWithin;
-
-                        // piece segmentation for availability vs booked vs past
-                        type Piece = { startMs: number; endMs: number; kind: "past" | "booked" | "free" };
-                        const piecesAll: Piece[] = [];
-
-                        for (const r of b.ranges) {
-                          const booked = bookedInRange
-                            .map((bk) => ({
-                              start: bk.startTime,
-                              end: bk.endTime || bk.startTime + bk.durationMin * 60000,
-                            }))
-                            .map((bk) => ({
-                              start: Math.max(bk.start, r.startMs),
-                              end: Math.min(bk.end, r.endMs),
-                            }))
-                            .filter((bk) => bk.end > bk.start);
-
-                          const cutSet = new Set<number>([r.startMs, r.endMs]);
-                          if (nowMs > r.startMs && nowMs < r.endMs) cutSet.add(nowMs);
-                          for (const bk of booked) {
-                            cutSet.add(bk.start);
-                            cutSet.add(bk.end);
-                          }
-                          const pts = Array.from(cutSet).sort((a, b2) => a - b2);
-                          for (let i2 = 0; i2 < pts.length - 1; i2++) {
-                            const s = pts[i2],
-                              e = pts[i2 + 1];
-                            if (e <= s) continue;
-                            const isBooked = booked.some((bk) => s < bk.end && e > bk.start);
-                            const kind: Piece["kind"] = isBooked ? "booked" : s < nowMs && e <= nowMs ? "past" : "free";
-                            piecesAll.push({ startMs: s, endMs: e, kind });
-                          }
-                        }
-
-                        return (
-                          <div
-                            key={idx}
-                            style={{
-                              background: "rgba(255,255,255,0.06)",
-                              border: "1px solid rgba(255,255,255,0.12)",
-                              borderRadius: 10,
-                              padding: 8,
-                              display: "flex",
-                              flexDirection: "column",
-                              gap: 6,
-                              minHeight: 160,
-                            }}
-                          >
-                            <div style={{ fontSize: 12.5, fontWeight: 700 }}>{b.dayHeader}</div>
-
-                            {b.ranges.length === 0 ? (
-                              <div style={{ fontSize: 12, opacity: 0.6 }}>No availability</div>
-                            ) : piecesAll.length === 0 ? (
-                              <div style={{ fontSize: 12, opacity: 0.6 }}>No bookable time</div>
-                            ) : (
-                              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                                {piecesAll.map((p, i) => {
-                                  const label = `${fmtTimeInTZ(p.startMs, studentTZ)}–${fmtTimeInTZ(
-                                    p.endMs,
-                                    studentTZ
-                                  )}`;
-                                  const isClickable = p.kind === "free" && p.startMs > nowMs;
-                                  return (
-                                    <button
-                                      key={i}
-                                      onClick={() => isClickable && openFormForDay(b.dayDate, idx)}
-                                      disabled={!isClickable}
-                                      style={{
-                                        padding: "6px 8px",
-                                        borderRadius: 8,
-                                        textAlign: "left",
-                                        fontSize: 12,
-                                        lineHeight: 1.2,
-                                        cursor: isClickable ? "pointer" : "not-allowed",
-                                        border:
-                                          p.kind === "free"
-                                            ? "1px solid #4ade80"
-                                            : p.kind === "booked"
-                                            ? "1px solid #885555"
-                                            : "1px solid rgba(255,255,255,0.15)",
-                                        background:
-                                          p.kind === "free"
-                                            ? "linear-gradient(180deg, rgba(34,197,94,0.25), rgba(34,197,94,0.15))"
-                                            : p.kind === "booked"
-                                            ? "linear-gradient(180deg, rgba(120,120,120,0.25), rgba(120,120,120,0.15))"
-                                            : "rgba(255,255,255,0.05)",
-                                        color:
-                                          p.kind === "free"
-                                            ? "#eafff0"
-                                            : p.kind === "booked"
-                                            ? "rgba(255,255,255,0.85)"
-                                            : "rgba(255,255,255,0.55)",
-                                      }}
-                                      title={
-                                        p.kind === "booked"
-                                          ? "Booked"
-                                          : p.kind === "past"
-                                          ? "This block is in the past"
-                                          : "Pick a start time & duration"
-                                      }
-                                    >
-                                      {label}
-                                      {p.kind === "booked" && <span style={{ opacity: 0.8 }}> · Booked</span>}
-                                      {p.kind === "past" && <span style={{ opacity: 0.6 }}> · Past</span>}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* right: booking form & my bookings (scrollable) */}
-              <div
-                style={{
-                  padding: 12,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 12,
-                  maxHeight: "calc(92vh - 120px)",
-                  overflowY: "auto",
-                }}
-              >
-                {/* Booking form */}
-                <div
-                  style={{
-                    border: "1px solid rgba(255,255,255,0.15)",
-                    borderRadius: 10,
-                    padding: 10,
-                    background: "rgba(255,255,255,0.04)",
-                  }}
-                >
-                  <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>Book a session</div>
-
-                  {!formVisible ? (
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>
-                      Click an availability block on the left to choose a date/time.
-                    </div>
-                  ) : (
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
-                      <div style={{ fontSize: 12, opacity: 0.85 }}>
-                        Date:{" "}
-                        <b>
-                          {formDate
-                            ? new Intl.DateTimeFormat(undefined, {
-                                weekday: "short",
-                                month: "short",
-                                day: "numeric",
-                                year: "numeric",
-                                timeZone: studentTZ,
-                              }).format(formDate)
-                            : "—"}
-                        </b>{" "}
-                        · Your timezone: <b>{studentTZ}</b>
-                      </div>
-
-                      <label style={{ fontSize: 12 }}>
-                        Start time (in your timezone)
-                        <select
-                          value={formStartHM}
-                          onChange={(e) => setFormStartHM(e.target.value)}
-                          style={inputStyle}
-                        >
-                          {formStartOptions.length === 0 ? (
-                            <option value="">No times available</option>
-                          ) : (
-                            formStartOptions.map((opt) => (
-                              <option key={opt.value} value={opt.value}>
-                                {opt.label}
-                              </option>
-                            ))
-                          )}
-                        </select>
-                      </label>
-
-                      <label style={{ fontSize: 12 }}>
-                        Duration
-                        <select
-                          value={String(formDuration)}
-                          onChange={(e) => setFormDuration(Math.max(60, parseInt(e.target.value, 10)))}
-                          style={inputStyle}
-                        >
-                          <option value="60">60 minutes</option>
-                          <option value="90">90 minutes</option>
-                          <option value="120">120 minutes</option>
-                        </select>
-                      </label>
-
-                      <label style={{ fontSize: 12 }}>
-                        Repeat weekly
-                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                          <input
-                            type="number"
-                            min={0}
-                            max={12}
-                            value={formRepeatCount}
-                            onChange={(e) =>
-                              setFormRepeatCount(Math.max(0, Math.min(12, parseInt(e.target.value || "0", 10))))
-                            }
-                            style={{ ...inputStyle, width: 90 }}
-                          />
-                          <span style={{ fontSize: 12, opacity: 0.8 }}>additional weeks (0–12)</span>
-                        </div>
-                      </label>
-
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <button
-                          onClick={submitBooking}
-                          disabled={formBusy || !formDate || selectedDayIdx === null || !formStartHM}
-                          style={{
-                            padding: "8px 12px",
-                            borderRadius: 10,
-                            background: "#3a6",
-                            border: "1px solid #6ecf9a",
-                            color: "#fff",
-                            fontSize: 14,
-                            fontWeight: 600,
-                            cursor:
-                              formBusy || !formDate || selectedDayIdx === null || !formStartHM
-                                ? "not-allowed"
-                                : "pointer",
-                          }}
-                        >
-                          {formBusy ? "Booking…" : "Book"}
-                        </button>
-                        <button
-                          onClick={() => setFormVisible(false)}
-                          style={{
-                            padding: "8px 12px",
-                            borderRadius: 10,
-                            background: "#2a2a2a",
-                            border: "1px solid #444",
-                            color: "#fff",
-                            fontSize: 14,
-                            cursor: "pointer",
-                          }}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* My upcoming with this tutor */}
-                <div
-                  style={{
-                    border: "1px solid rgba(255,255,255,0.15)",
-                    borderRadius: 10,
-                    padding: 10,
-                    background: "rgba(255,255,255,0.04)",
-                  }}
-                >
-                  <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>
-                    My upcoming sessions with {activeTutor?.displayName}
-                  </div>
-                  {myUpcomingWithTutor.length === 0 ? (
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>None scheduled.</div>
-                  ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      {myUpcomingWithTutor.map((b) => {
-                        const canCancel = b.startTime - Date.now() >= 24 * ONE_HOUR;
-                        return (
-                          <div
-                            key={b.id}
-                            style={{
-                              display: "flex",
-                              justifyContent: "space-between",
-                              alignItems: "center",
-                              gap: 8,
-                              padding: "6px 8px",
-                              borderRadius: 8,
-                              border: "1px solid rgba(255,255,255,0.12)",
-                              background: "rgba(255,255,255,0.03)",
-                              fontSize: 12,
-                            }}
-                          >
-                            <div>
-                              <div style={{ fontWeight: 600 }}>
-                                {new Intl.DateTimeFormat(undefined, {
-                                  weekday: "short",
-                                  month: "short",
-                                  day: "numeric",
-                                  timeZone: studentTZ,
-                                }).format(b.startTime)}{" "}
-                                •{" "}
-                                {new Intl.DateTimeFormat(undefined, {
-                                  hour: "numeric",
-                                  minute: "2-digit",
-                                  timeZone: studentTZ,
-                                }).format(b.startTime)}{" "}
-                                ({b.durationMin} min)
-                              </div>
-                              <div style={{ opacity: 0.7 }}>Your timezone: {studentTZ}</div>
-                            </div>
-                            <button
-                              disabled={!canCancel}
-                              onClick={() => cancelBooking(b)}
-                              style={{
-                                padding: "6px 10px",
-                                borderRadius: 8,
-                                background: canCancel ? "#6b1f1f" : "#2a2a2a",
-                                border: canCancel ? "1px solid #d66" : "1px solid #444",
-                                color: "#fff",
-                                cursor: canCancel ? "pointer" : "not-allowed",
-                              }}
-                              title={canCancel ? "Cancel this session" : "Can only cancel ≥ 24h before start"}
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-
-                {toast && (
-                  <div
-                    style={{
-                      border: "1px solid rgba(255,255,255,0.2)",
-                      background: "rgba(20,180,120,0.15)",
-                      color: "#d1fae5",
-                      borderRadius: 8,
-                      padding: "6px 8px",
-                      fontSize: 12,
-                    }}
-                  >
-                    {toast}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
+          form={{
+            formVisible,
+            setFormVisible,
+            formDate,
+            setFormDate,
+            formStartHM,
+            setFormStartHM,
+            formDuration,
+            setFormDuration,
+            formRepeatCount,
+            setFormRepeatCount,
+            selectedDayIdx,
+            setSelectedDayIdx,
+            formStartOptions,
+            openFormForDay,
+            submitBooking,
+            cancelBooking,
+            nowMs,
+            slotBlocks,
+            toast,
+            setToast,
+          }}
+        />
       )}
     </main>
   );
 }
 
-// styles
+/* ===================== Availability Modal (extracted for clarity) ===================== */
+function AvailabilityModal({
+  activeTutor,
+  studentTZ,
+  activeWeekStart,
+  setActiveWeekStart,
+  bookedInRange,
+  myUpcomingWithTutor,
+  refreshBookingsRange,
+  refreshMyUpcomingWithTutor,
+  goPrevPage,
+  goNextPage,
+  jumpToThisWeek,
+  close,
+  form,
+}: {
+  activeTutor: TutorDoc & { uid: string };
+  studentTZ: string;
+  activeWeekStart: Date;
+  setActiveWeekStart: (d: Date) => void;
+  bookedInRange: Booking[];
+  myUpcomingWithTutor: Booking[];
+  refreshBookingsRange: (tutorId: string, rangeStart: Date) => Promise<void>;
+  refreshMyUpcomingWithTutor: (tutorId: string) => Promise<void>;
+  goPrevPage: () => Promise<void>;
+  goNextPage: () => Promise<void>;
+  jumpToThisWeek: () => Promise<void>;
+  close: () => void;
+  form: any;
+}) {
+  const {
+    formVisible,
+    setFormVisible,
+    formDate,
+    setFormDate,
+    formStartHM,
+    setFormStartHM,
+    formDuration,
+    setFormDuration,
+    formRepeatCount,
+    setFormRepeatCount,
+    selectedDayIdx,
+    setSelectedDayIdx,
+    formStartOptions,
+    openFormForDay,
+    submitBooking,
+    cancelBooking,
+    nowMs,
+    slotBlocks,
+    toast,
+    setToast,
+  } = form;
+
+  // helpers reused from upper scope
+  function addDays(d: Date, days: number) {
+    const c = new Date(d);
+    c.setDate(c.getDate() + days);
+    return c;
+  }
+  function fmtTimeInTZ(ms: number, tz: string) {
+    return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", timeZone: tz }).format(ms);
+  }
+
+  // break 28 days into 4 arrays of 7 for rendering
+  const weeks4 = useMemo(() => {
+    const chunks: any[][] = [];
+    for (let w = 0; w < 4; w++) {
+      chunks.push((slotBlocks as any[]).slice(w * 7, w * 7 + 7));
+    }
+    return chunks;
+  }, [slotBlocks]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.9)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 16,
+        zIndex: 50,
+      }}
+      onClick={close}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "min(1220px, 97vw)",
+          maxHeight: "92vh",
+          overflow: "hidden",
+          borderRadius: 12,
+          border: "1px solid rgba(255,255,255,0.15)",
+          background: "#111214",
+          boxShadow: "0 40px 120px rgba(0,0,0,0.9)",
+          color: "#fff",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        {/* header */}
+        <div
+          style={{
+            padding: "12px 14px",
+            borderBottom: "1px solid rgba(255,255,255,0.12)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            flexWrap: "wrap",
+          }}
+        >
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            <div style={{ fontSize: 16, fontWeight: 700 }}>
+              {activeTutor.displayName || "Tutor"} — Availability & Booking
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.8 }}>
+              Times shown in your timezone: <b>{studentTZ}</b>. (Converted from tutor’s availability.)
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <button style={navButtonStyle} onClick={goPrevPage}>
+              ← Prev 4 weeks
+            </button>
+            <div
+              style={{
+                padding: "6px 8px",
+                border: "1px solid rgba(255,255,255,0.15)",
+                borderRadius: 8,
+                fontSize: 12,
+                background: "rgba(255,255,255,0.06)",
+              }}
+            >
+              From{" "}
+              {new Intl.DateTimeFormat(undefined, {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+                timeZone: studentTZ,
+              }).format(activeWeekStart)}{" "}
+              to{" "}
+              {new Intl.DateTimeFormat(undefined, {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+                timeZone: studentTZ,
+              }).format(addDays(activeWeekStart, 27))}
+            </div>
+            <button style={navButtonStyle} onClick={goNextPage}>
+              Next 4 weeks →
+            </button>
+            <button style={navButtonStyle} onClick={jumpToThisWeek}>
+              This week
+            </button>
+            <button
+              onClick={close}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 8,
+                border: "1px solid rgba(255,255,255,0.25)",
+                background: "rgba(255,255,255,0.1)",
+                color: "#fff",
+                cursor: "pointer",
+              }}
+              aria-label="Close"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+
+        {/* body */}
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", minHeight: 380 }}>
+          {/* left: 4 weeks (scrollable) */}
+          <div
+            style={{
+              padding: 12,
+              borderRight: "1px solid rgba(255,255,255,0.12)",
+              maxHeight: "calc(92vh - 120px)",
+              overflowY: "auto",
+              gap: 12,
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            {weeks4.map((week, wIdx) => (
+              <div key={wIdx} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div
+                  style={{
+                    fontSize: 12,
+                    opacity: 0.85,
+                    padding: "4px 6px",
+                    borderRadius: 8,
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    background: "rgba(255,255,255,0.04)",
+                    width: "fit-content",
+                  }}
+                >
+                  Week of{" "}
+                  {new Intl.DateTimeFormat(undefined, {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                    timeZone: studentTZ,
+                  }).format(addDays(activeWeekStart, wIdx * 7))}
+                </div>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(7, 1fr)",
+                    gap: 8,
+                  }}
+                >
+                  {week.map((b: any, idxWithin: number) => {
+                    const idx = wIdx * 7 + idxWithin;
+
+                    type Piece = { startMs: number; endMs: number; kind: "past" | "booked" | "free" };
+                    const piecesAll: Piece[] = [];
+
+                    for (const r of b.ranges) {
+                      const booked = bookedInRange
+                        .map((bk) => ({
+                          start: bk.startTime,
+                          end: bk.endTime || bk.startTime + bk.durationMin * 60000,
+                        }))
+                        .map((bk) => ({
+                          start: Math.max(bk.start, r.startMs),
+                          end: Math.min(bk.end, r.endMs),
+                        }))
+                        .filter((bk) => bk.end > bk.start);
+
+                      const cutSet = new Set<number>([r.startMs, r.endMs]);
+                      if (nowMs > r.startMs && nowMs < r.endMs) cutSet.add(nowMs);
+                      for (const bk of booked) {
+                        cutSet.add(bk.start);
+                        cutSet.add(bk.end);
+                      }
+                      const pts = Array.from(cutSet).sort((a, b2) => a - b2);
+                      for (let i2 = 0; i2 < pts.length - 1; i2++) {
+                        const s = pts[i2], e = pts[i2 + 1];
+                        if (e <= s) continue;
+                        const isBooked = booked.some((bk) => s < bk.end && e > bk.start);
+                        const kind: Piece["kind"] = isBooked ? "booked" : s < nowMs && e <= nowMs ? "past" : "free";
+                        piecesAll.push({ startMs: s, endMs: e, kind });
+                      }
+                    }
+
+                    return (
+                      <div
+                        key={idx}
+                        style={{
+                          background: "rgba(255,255,255,0.06)",
+                          border: "1px solid rgba(255,255,255,0.12)",
+                          borderRadius: 10,
+                          padding: 8,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 6,
+                          minHeight: 160,
+                        }}
+                      >
+                        <div style={{ fontSize: 12.5, fontWeight: 700 }}>{b.dayHeader}</div>
+
+                        {b.ranges.length === 0 ? (
+                          <div style={{ fontSize: 12, opacity: 0.6 }}>No availability</div>
+                        ) : piecesAll.length === 0 ? (
+                          <div style={{ fontSize: 12, opacity: 0.6 }}>No bookable time</div>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            {piecesAll.map((p: any, i: number) => {
+                              const label = `${fmtTimeInTZ(p.startMs, studentTZ)}–${fmtTimeInTZ(p.endMs, studentTZ)}`;
+                              const isClickable = p.kind === "free" && p.startMs > nowMs;
+                              return (
+                                <button
+                                  key={i}
+                                  onClick={() => isClickable && openFormForDay(b.dayDate, idx)}
+                                  disabled={!isClickable}
+                                  style={{
+                                    padding: "6px 8px",
+                                    borderRadius: 8,
+                                    textAlign: "left",
+                                    fontSize: 12,
+                                    lineHeight: 1.2,
+                                    cursor: isClickable ? "pointer" : "not-allowed",
+                                    border:
+                                      p.kind === "free"
+                                        ? "1px solid #4ade80"
+                                        : p.kind === "booked"
+                                        ? "1px solid #885555"
+                                        : "1px solid rgba(255,255,255,0.15)",
+                                    background:
+                                      p.kind === "free"
+                                        ? "linear-gradient(180deg, rgba(34,197,94,0.25), rgba(34,197,94,0.15))"
+                                        : p.kind === "booked"
+                                        ? "linear-gradient(180deg, rgba(120,120,120,0.25), rgba(120,120,120,0.15))"
+                                        : "rgba(255,255,255,0.05)",
+                                    color:
+                                      p.kind === "free"
+                                        ? "#eafff0"
+                                        : p.kind === "booked"
+                                        ? "rgba(255,255,255,0.85)"
+                                        : "rgba(255,255,255,0.55)",
+                                  }}
+                                  title={
+                                    p.kind === "booked"
+                                      ? "Booked"
+                                      : p.kind === "past"
+                                      ? "This block is in the past"
+                                      : "Pick a start time & duration"
+                                  }
+                                >
+                                  {label}
+                                  {p.kind === "booked" && <span style={{ opacity: 0.8 }}> · Booked</span>}
+                                  {p.kind === "past" && <span style={{ opacity: 0.6 }}> · Past</span>}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* right: booking form & my bookings */}
+          <div
+            style={{
+              padding: 12,
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
+              maxHeight: "calc(92vh - 120px)",
+              overflowY: "auto",
+            }}
+          >
+            {/* Booking form */}
+            <div
+              style={{
+                border: "1px solid rgba(255,255,255,0.15)",
+                borderRadius: 10,
+                padding: 10,
+                background: "rgba(255,255,255,0.04)",
+              }}
+            >
+              <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>Book a session</div>
+
+              {!formVisible ? (
+                <div style={{ fontSize: 12, opacity: 0.8 }}>
+                  Click an availability block on the left to choose a date/time.
+                </div>
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
+                  <div style={{ fontSize: 12, opacity: 0.85 }}>
+                    Date:{" "}
+                    <b>
+                      {formDate
+                        ? new Intl.DateTimeFormat(undefined, {
+                            weekday: "short",
+                            month: "short",
+                            day: "numeric",
+                            year: "numeric",
+                            timeZone: studentTZ,
+                          }).format(formDate)
+                        : "—"}
+                    </b>{" "}
+                    · Your timezone: <b>{studentTZ}</b>
+                  </div>
+
+                  <label style={{ fontSize: 12 }}>
+                    Start time (in your timezone)
+                    <select value={formStartHM} onChange={(e) => setFormStartHM(e.target.value)} style={inputStyle}>
+                      {formStartOptions.length === 0 ? (
+                        <option value="">No times available</option>
+                      ) : (
+                        formStartOptions.map((opt: any) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </label>
+
+                  <label style={{ fontSize: 12 }}>
+                    Duration
+                    <select
+                      value={String(formDuration)}
+                      onChange={(e) => setFormDuration(Math.max(60, parseInt(e.target.value, 10)))}
+                      style={inputStyle}
+                    >
+                      <option value="60">60 minutes</option>
+                      <option value="90">90 minutes</option>
+                      <option value="120">120 minutes</option>
+                    </select>
+                  </label>
+
+                  <label style={{ fontSize: 12 }}>
+                    Repeat weekly
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input
+                        type="number"
+                        min={0}
+                        max={12}
+                        value={formRepeatCount}
+                        onChange={(e) =>
+                          setFormRepeatCount(Math.max(0, Math.min(12, parseInt(e.target.value || "0", 10))))
+                        }
+                        style={{ ...inputStyle, width: 90 }}
+                      />
+                      <span style={{ fontSize: 12, opacity: 0.8 }}>additional weeks (0–12)</span>
+                    </div>
+                  </label>
+
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      onClick={submitBooking}
+                      disabled={!formDate || selectedDayIdx === null || !formStartHM}
+                      style={{
+                        padding: "8px 12px",
+                        borderRadius: 10,
+                        background: "#3a6",
+                        border: "1px solid #6ecf9a",
+                        color: "#fff",
+                        fontSize: 14,
+                        fontWeight: 600,
+                        cursor:
+                          !formDate || selectedDayIdx === null || !formStartHM ? "not-allowed" : "pointer",
+                      }}
+                    >
+                      Book
+                    </button>
+                    <button
+                      onClick={() => setFormVisible(false)}
+                      style={{
+                        padding: "8px 12px",
+                        borderRadius: 10,
+                        background: "#2a2a2a",
+                        border: "1px solid #444",
+                        color: "#fff",
+                        fontSize: 14,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* My upcoming with this tutor */}
+            <div
+              style={{
+                border: "1px solid rgba(255,255,255,0.15)",
+                borderRadius: 10,
+                padding: 10,
+                background: "rgba(255,255,255,0.04)",
+              }}
+            >
+              <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>
+                My upcoming sessions with {activeTutor?.displayName}
+              </div>
+              {myUpcomingWithTutor.length === 0 ? (
+                <div style={{ fontSize: 12, opacity: 0.7 }}>None scheduled.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {myUpcomingWithTutor.map((b) => {
+                    const canCancel = b.startTime - Date.now() >= 24 * ONE_HOUR;
+                    return (
+                      <div
+                        key={b.id}
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "6px 8px",
+                          borderRadius: 8,
+                          border: "1px solid rgba(255,255,255,0.12)",
+                          background: "rgba(255,255,255,0.03)",
+                          fontSize: 12,
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>
+                            {new Intl.DateTimeFormat(undefined, {
+                              weekday: "short",
+                              month: "short",
+                              day: "numeric",
+                              timeZone: studentTZ,
+                            }).format(b.startTime)}{" "}
+                            •{" "}
+                            {new Intl.DateTimeFormat(undefined, {
+                              hour: "numeric",
+                              minute: "2-digit",
+                              timeZone: studentTZ,
+                            }).format(b.startTime)}{" "}
+                            ({b.durationMin} min)
+                          </div>
+                          <div style={{ opacity: 0.7 }}>Your timezone: {studentTZ}</div>
+                        </div>
+                        <button
+                          disabled={!canCancel}
+                          onClick={() => cancelBooking(b)}
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: 8,
+                            background: canCancel ? "#6b1f1f" : "#2a2a2a",
+                            border: canCancel ? "1px solid #d66" : "1px solid #444",
+                            color: "#fff",
+                            cursor: canCancel ? "pointer" : "not-allowed",
+                          }}
+                          title={canCancel ? "Cancel this session" : "Can only cancel ≥ 24h before start"}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {toast && (
+              <div
+                style={{
+                  border: "1px solid rgba(255,255,255,0.2)",
+                  background: "rgba(20,180,120,0.15)",
+                  color: "#d1fae5",
+                  borderRadius: 8,
+                  padding: "6px 8px",
+                  fontSize: 12,
+                }}
+              >
+                {toast}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* local styles in modal */
 const navButtonStyle: React.CSSProperties = {
   padding: "6px 10px",
   borderRadius: 8,
