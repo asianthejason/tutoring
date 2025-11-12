@@ -31,6 +31,12 @@ type TutorRow = {
   statusRaw: "waiting" | "busy" | "offline" | string;
   subjects: string[];
   lastActiveAt?: number;
+
+  // NEW for discovery/filtering
+  availability?: Availability;
+  timezone?: string; // IANA
+  introduction?: string;
+  country?: string;
 };
 
 type TutorDoc = {
@@ -39,6 +45,8 @@ type TutorDoc = {
   roomId?: string;
   availability?: Availability;
   timezone?: string; // IANA
+  introduction?: string;
+  country?: string;
 };
 
 type Booking = {
@@ -154,13 +162,14 @@ function wallTimeToUTC(y: number, m: number, d: number, H: number, M: number, tz
 }
 
 // extract Y/M/D *in a given timezone* for a timestamp
-function getYMDInTZ(ms: number, tz: string) {
+function getYMDInTZ(ms: number | Date, tz: string) {
+  const when = typeof ms === "number" ? ms : +ms;
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: tz,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).formatToParts(ms);
+  }).formatToParts(when);
   const year = Number(parts.find((p) => p.type === "year")?.value || "1970");
   const month = Number(parts.find((p) => p.type === "month")?.value || "01") - 1; // 0-based
   const day = Number(parts.find((p) => p.type === "day")?.value || "01");
@@ -253,7 +262,24 @@ export default function TutorsLobbyPage() {
 
   const [toast, setToast] = useState("");
 
-  // load all tutors
+  // ----------------- NEW: filter state & data -----------------
+  const [filterDay, setFilterDay] = useState<number | "">("");
+  const [filterStart, setFilterStart] = useState<string>("");
+  const [filterEnd, setFilterEnd] = useState<string>("");
+  const filterWindowStart = useMemo(() => startOfWeekSunday(new Date()), []);
+  const filterWindowEndMs = useMemo(() => +addDays(filterWindowStart, 28), [filterWindowStart]);
+  const [bookingsByTutor, setBookingsByTutor] = useState<Record<string, { start: number; end: number }[]>>({});
+
+  // time options (15-min grid)
+  const timeOptions = useMemo(() => {
+    const arr: string[] = [];
+    for (let h = 0; h < 24; h++) for (let m = 0; m < 60; m += 15) arr.push(`${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`);
+    return arr;
+  }, []);
+
+  // ------------------------------------------------------------
+
+  // load all tutors (now also reading intro/country/availability/timezone)
   useEffect(() => {
     const qRef = query(collection(db, "users"), where("role", "==", "tutor"));
     const unsub = onSnapshot(
@@ -270,6 +296,11 @@ export default function TutorsLobbyPage() {
             statusRaw: (data.status as any) || "offline",
             subjects: Array.isArray(data.subjects) ? data.subjects : [],
             lastActiveAt: tsToMs(data.lastActiveAt),
+
+            availability: (data.availability as Availability) || undefined,
+            timezone: (data.timezone as string) || undefined,
+            introduction: (data.introduction as string) || (data.bio as string) || "",
+            country: (data.country as string) || (data.countryResidence as string) || "",
           });
         });
         rows.sort((a, b) => {
@@ -291,6 +322,43 @@ export default function TutorsLobbyPage() {
     return () => unsub();
   }, []);
 
+  // load student prefs once (so the filter uses student tz too)
+  useEffect(() => {
+    const u = auth.currentUser;
+    if (!u) return;
+    getDoc(doc(db, "users", u.uid)).then((s) =>
+      setStudentPrefs((s.exists() ? (s.data() as StudentPrefs) : undefined) || undefined)
+    );
+  }, []);
+
+  // load ALL bookings in the next 4 weeks (for filtering collisions)
+  useEffect(() => {
+    (async () => {
+      try {
+        const qRef = query(
+          collection(db, "bookings"),
+          where("startTime", ">=", +filterWindowStart),
+          where("startTime", "<", filterWindowEndMs)
+        );
+        const snap = await getDocs(qRef);
+        const map: Record<string, { start: number; end: number }[]> = {};
+        snap.forEach((ds) => {
+          const d = ds.data() as any;
+          const st = Number(d.startTime || 0);
+          const dur = Number(d.durationMin || 60);
+          const et = Number(d.endTime || st + dur * 60000);
+          const tid = String(d.tutorId || "");
+          if (!tid) return;
+          (map[tid] ||= []).push({ start: st, end: et });
+        });
+        setBookingsByTutor(map);
+      } catch (e) {
+        console.error("Failed to load bookings for filter window:", e);
+        setBookingsByTutor({});
+      }
+    })();
+  }, [filterWindowStart, filterWindowEndMs]);
+
   // open modal
   const openTutorModal = useCallback(async (tutorId: string) => {
     setToast("");
@@ -300,7 +368,7 @@ export default function TutorsLobbyPage() {
     setFormStartHM("");
     setSelectedDayIdx(null);
 
-    const week0 = startOfWeekSunday(new Date());
+    const week0 = startOfWeekSunday(new Date()));
     setActiveWeekStart(week0);
 
     const tSnap = await getDoc(doc(db, "users", tutorId));
@@ -313,6 +381,8 @@ export default function TutorsLobbyPage() {
       availability:
         (t.availability as Availability) || { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] },
       timezone: t.timezone || undefined,
+      introduction: t.introduction || "",
+      country: t.country || t.countryResidence || "",
     };
     setActiveTutor(tutor);
 
@@ -671,11 +741,72 @@ export default function TutorsLobbyPage() {
     [activeTutor, activeWeekStart, refreshBookingsRange, refreshMyUpcomingWithTutor]
   );
 
+  // ----------------- FILTERING LOGIC -----------------
+  const dayKeys: DayKey[] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+  function studentSlotToUTC(dayIndex: number, startHM: string, endHM: string, tz: string) {
+    const anchor = addDays(startOfWeekSunday(new Date()), dayIndex);
+    const { year, month, day } = getYMDInTZ(+anchor, tz);
+    const [sH, sM] = normalizeHM(startHM).split(":").map((n) => parseInt(n, 10));
+    const [eH, eM] = normalizeHM(endHM).split(":").map((n) => parseInt(n, 10));
+    const start = wallTimeToUTC(year, month, day, sH, sM, tz);
+    const end = wallTimeToUTC(year, month, day, eH, eM, tz);
+    return { start, end, anchorDate: anchor };
+  }
+
+  function tutorHasWeeklySlot(t: TutorRow): boolean {
+    if (filterDay === "" || !filterStart || !filterEnd) return true; // no filter
+    if (!t.availability || !t.timezone) return false;
+
+    const studentDay = Number(filterDay); // 0..6
+    const { start, end, anchorDate } = studentSlotToUTC(studentDay, filterStart, filterEnd, studentTZ);
+
+    // map that student anchor date to tutor's weekday (DST-safe)
+    const noonUTC = studentDayNoonUTC(anchorDate, studentTZ);
+    const tutorDow = getWeekdayInTZ(noonUTC, t.timezone); // 0..6
+    const tutorKey = dayKeys[tutorDow];
+
+    const rangesDef = (t.availability[tutorKey] || []) as TimeRange[];
+    const cleaned = rangesDef
+      .map((r) => ({ start: normalizeHM(r.start), end: normalizeHM(r.end) }))
+      .filter((r) => hmToMinutes(r.end) > hmToMinutes(r.start));
+
+    const { year: ty, month: tm, day: td } = getYMDInTZ(noonUTC, t.timezone);
+
+    const abs = cleaned
+      .map((r) => {
+        const sMin = hmToMinutes(r.start);
+        const eMin = hmToMinutes(r.end);
+        const sMs = wallTimeToUTC(ty, tm, td, Math.floor(sMin / 60), sMin % 60, t.timezone!);
+        const eMs = wallTimeToUTC(ty, tm, td, Math.floor(eMin / 60), eMin % 60, t.timezone!);
+        return { start: Math.floor(sMs / 60000) * 60000, end: Math.floor(eMs / 60000) * 60000 };
+      })
+      .filter((r) => r.end > r.start)
+      .sort((a, b) => a.start - b.start);
+
+    const isNormallyAvailable = abs.some((r) => start >= r.start && end <= r.end);
+    if (!isNormallyAvailable) return false;
+
+    // Exclude if any of the next 4 weekly occurrences is booked
+    const tb = bookingsByTutor[t.uid] || [];
+    for (let i = 0; i < 4; i++) {
+      const s = start + i * 7 * DAY_MS;
+      const e = end + i * 7 * DAY_MS;
+      if (tb.some((b) => s < b.end && e > b.start)) return false;
+    }
+    return true;
+  }
+
+  const filteredTutors = useMemo(
+    () => tutors.filter(tutorHasWeeklySlot),
+    [tutors, bookingsByTutor, filterDay, filterStart, filterEnd, studentTZ]
+  );
+  // ----------------------------------------------------
+
   // tutor cards
   const cards = useMemo(() => {
-    return tutors.map((t) => {
+    return filteredTutors.map((t) => {
       const d = deriveStatusLabel(t);
-      const canJoin = d.online && !d.busy && Boolean(t.roomId);
 
       const chip =
         d.label === "Waiting"
@@ -709,9 +840,27 @@ export default function TutorsLobbyPage() {
               alignItems: "flex-start",
             }}
           >
-            <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.3 }}>
-              <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>
-                {t.displayName || "Tutor"}
+            <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.3, gap: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>
+                  {t.displayName || "Tutor"}
+                </div>
+                {t.country && (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: "4px 8px",
+                      borderRadius: 999,
+                      border: "1px solid rgba(255,255,255,0.18)",
+                      background: "rgba(255,255,255,0.06)",
+                      color: "#fff",
+                      whiteSpace: "nowrap",
+                    }}
+                    title="Country of residence"
+                  >
+                    {t.country}
+                  </span>
+                )}
               </div>
               <div style={{ fontSize: 12, color: "rgba(255,255,255,0.6)", maxWidth: 260 }}>{t.email}</div>
             </div>
@@ -740,52 +889,13 @@ export default function TutorsLobbyPage() {
             </div>
           </div>
 
-          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.75)", minHeight: 32 }}>
-            {t.subjects?.length ? (
-              <>
-                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>Can help with:</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {t.subjects.map((s, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        backgroundColor: "#2a2a2a",
-                        border: "1px solid #444",
-                        borderRadius: 6,
-                        fontSize: 12,
-                        padding: "4px 8px",
-                        color: "#fff",
-                      }}
-                    >
-                      {s}
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <div style={{ fontSize: 12, opacity: 0.6 }}>Subjects not listed yet.</div>
-            )}
+          {/* Introduction replaces subjects */}
+          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.85)", minHeight: 40, lineHeight: 1.35 }}>
+            {t.introduction ? t.introduction : <span style={{ opacity: 0.6 }}>No introduction yet.</span>}
           </div>
 
           <div style={{ display: "flex", gap: 8 }}>
-            <button
-              disabled={!t.roomId}
-              onClick={() => t.roomId && router.push(`/room?roomId=${encodeURIComponent(t.roomId)}`)}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 10,
-                background: canJoin ? "#3a6" : "#2a2a2a",
-                border: canJoin ? "1px solid #6ecf9a" : "1px solid #444",
-                color: "#fff",
-                fontSize: 14,
-                fontWeight: 500,
-                cursor: canJoin ? "pointer" : "not-allowed",
-                minWidth: 120,
-              }}
-            >
-              {canJoin ? "Join Room" : deriveStatusLabel(t).label === "Busy" ? "Join Queue" : "Join (offline)"}
-            </button>
-
+            {/* Removed Join button to make this a discovery page */}
             <button
               onClick={() => openTutorModal(t.uid)}
               style={{
@@ -806,7 +916,7 @@ export default function TutorsLobbyPage() {
         </div>
       );
     });
-  }, [tutors, router, openTutorModal]);
+  }, [filteredTutors, openTutorModal]);
 
   // ---------- UI ----------
   // break 28 days into 4 arrays of 7 for rendering
@@ -885,19 +995,108 @@ export default function TutorsLobbyPage() {
           margin: "24px auto 0",
           display: "flex",
           flexDirection: "column",
-          gap: 24,
+          gap: 16,
         }}
       >
-        <div style={{ display: "flex", flexDirection: "column", maxWidth: 800, lineHeight: 1.3 }}>
-          <div style={{ fontSize: 24, fontWeight: 600, letterSpacing: "-0.03em" }}>
-            Get live math & CS help
+        {/* Filter bar */}
+        <div
+          style={{
+            border: "1px solid rgba(255,255,255,0.12)",
+            background: "linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))",
+            borderRadius: 12,
+            padding: 12,
+            display: "grid",
+            gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+            gap: 10,
+            alignItems: "end",
+          }}
+        >
+          <div style={{ gridColumn: "1 / -1", fontSize: 12, opacity: 0.85 }}>
+            Find tutors available <b>every week</b> at a specific time (your timezone: <b>{studentTZ}</b>). We hide
+            tutors already booked in that slot across the next 4 weeks.
           </div>
-          <div style={{ fontSize: 14, lineHeight: 1.4, opacity: 0.8, marginTop: 8 }}>
-            Pick a tutor below. If they’re <b>Waiting</b>, you’ll join instantly. Otherwise, click{" "}
-            <b>View Availability</b> to schedule — times are shown in <b>your timezone</b>.
+
+          <label style={{ fontSize: 12 }}>
+            Day of week
+            <select
+              value={filterDay}
+              onChange={(e) => setFilterDay(e.target.value === "" ? "" : Number(e.target.value))}
+              style={inputStyle}
+            >
+              <option value="">Any</option>
+              <option value={0}>Sunday</option>
+              <option value={1}>Monday</option>
+              <option value={2}>Tuesday</option>
+              <option value={3}>Wednesday</option>
+              <option value={4}>Thursday</option>
+              <option value={5}>Friday</option>
+              <option value={6}>Saturday</option>
+            </select>
+          </label>
+
+          <label style={{ fontSize: 12 }}>
+            Start time
+            <select value={filterStart} onChange={(e) => setFilterStart(e.target.value)} style={inputStyle}>
+              <option value="">Any</option>
+              {timeOptions.map((t) => (
+                <option key={`s-${t}`} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label style={{ fontSize: 12 }}>
+            End time
+            <select value={filterEnd} onChange={(e) => setFilterEnd(e.target.value)} style={inputStyle}>
+              <option value="">Any</option>
+              {timeOptions.map((t) => (
+                <option key={`e-${t}`} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <button
+            onClick={() => {
+              setFilterDay("");
+              setFilterStart("");
+              setFilterEnd("");
+            }}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 10,
+              background: "#2a2a2a",
+              border: "1px solid #444",
+              color: "#fff",
+              fontSize: 13,
+              cursor: "pointer",
+              height: 44,
+            }}
+            title="Clear filters"
+          >
+            Clear
+          </button>
+
+          <div style={{ fontSize: 12, opacity: 0.8 }}>
+            Showing: <b>{loading ? "…" : filteredTutors.length}</b>{" "}
+            {filteredTutors.length === 1 ? "tutor" : "tutors"}
           </div>
         </div>
 
+        {/* Headline */}
+        <div style={{ display: "flex", flexDirection: "column", maxWidth: 800, lineHeight: 1.3 }}>
+          <div style={{ fontSize: 24, fontWeight: 600, letterSpacing: "-0.03em" }}>
+            Find your math & CS tutor
+          </div>
+          <div style={{ fontSize: 14, lineHeight: 1.4, opacity: 0.8, marginTop: 8 }}>
+            Browse tutors below and click <b>View Availability</b> to schedule — times are shown in{" "}
+            <b>your timezone</b>.
+          </div>
+        </div>
+
+        {/* Tutor grid */}
         <div
           style={{
             width: "100%",
@@ -908,8 +1107,10 @@ export default function TutorsLobbyPage() {
         >
           {loading ? (
             <div style={{ gridColumn: "1 / -1", fontSize: 14, opacity: 0.7 }}>Loading tutors…</div>
-          ) : tutors.length === 0 ? (
-            <div style={{ gridColumn: "1 / -1", fontSize: 14, opacity: 0.7 }}>No tutors found yet.</div>
+          ) : filteredTutors.length === 0 ? (
+            <div style={{ gridColumn: "1 / -1", fontSize: 14, opacity: 0.7 }}>
+              No tutors match that weekly time. Try a different day/time.
+            </div>
           ) : (
             cards
           )}
@@ -933,7 +1134,7 @@ export default function TutorsLobbyPage() {
           Need help this week?
         </div>
         <div style={{ marginBottom: 12 }}>
-          Join a <b>Waiting</b> tutor or schedule a session.
+          Use the filters above, then click <b>View Availability</b> to book.
         </div>
         <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", marginBottom: 4 }}>
           © {new Date().getFullYear()} Apex Tutoring · Calgary, AB
