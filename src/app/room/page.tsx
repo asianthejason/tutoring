@@ -82,6 +82,40 @@ async function writeRoomMode(
   } catch {}
 }
 
+// ---------- booking → room resolver (for students/admins joining with bookingId only) ----------
+async function resolveRoomIdFromBooking(bookingId: string): Promise<string | null> {
+  try {
+    const bSnap = await getDoc(doc(db, "bookings", bookingId));
+    if (!bSnap.exists()) throw new Error("Booking not found.");
+    const b = bSnap.data() as any;
+
+    const me = auth.currentUser;
+    if (!me) throw new Error("Not signed in.");
+    // Make sure this booking belongs to the current student
+    if (b.studentId && b.studentId !== me.uid) throw new Error("This booking does not belong to you.");
+
+    // time window check (±15 min grace; defaults to 60 min if no duration)
+    const start: number =
+      typeof b.startTime === "number" ? b.startTime : b.startTime?.toMillis?.() ?? 0;
+    const durMin: number = Number(b.durationMin || 60);
+    const now = Date.now();
+    const withinWindow =
+      start && now >= start - 15 * 60_000 && now <= start + durMin * 60_000 + 15 * 60_000;
+    if (!withinWindow) throw new Error("This session isn’t live yet (or it’s over).");
+
+    // fetch tutor's roomId
+    const tutorId: string = String(b.tutorId || "");
+    if (!tutorId) throw new Error("Tutor not set on booking.");
+    const tSnap = await getDoc(doc(db, "users", tutorId));
+    const roomId = (tSnap.exists() && (tSnap.data() as any).roomId) || "";
+    if (!roomId) throw new Error("Tutor has no roomId configured.");
+    return roomId;
+  } catch (e) {
+    console.error("[resolveRoomIdFromBooking]", e);
+    return null;
+  }
+}
+
 export default function RoomPage() {
   const router = useRouter();
 
@@ -223,6 +257,26 @@ export default function RoomPage() {
       if (qpRoom) setSessionRoomId(qpRoom);
     }
   }, [sessionRoomId]);
+
+  // When student/admin comes with ?mode=session&bookingId=… and no roomId, resolve it here.
+  useEffect(() => {
+    (async () => {
+      if (!authed) return;
+      if (lockedRole === "tutor") return;
+      if (sessionRoomId) return;
+      if (modeFromQP !== "session") return;
+      if (!bookingIdFromQP) return;
+
+      setStatus("Resolving your session room…");
+      setError(null);
+      const rid = await resolveRoomIdFromBooking(bookingIdFromQP);
+      if (rid) {
+        setSessionRoomId(rid);
+      } else {
+        setError("This session isn’t live yet or the booking can’t be found.");
+      }
+    })();
+  }, [authed, lockedRole, sessionRoomId, modeFromQP, bookingIdFromQP]);
 
   useEffect(() => {
     if (!authed || lockedRole !== "tutor") {
@@ -668,7 +722,14 @@ export default function RoomPage() {
   // ---------- CONNECT ----------
   useEffect(() => {
     if (!authed || !lockedRole) return;
+
+    // If a student/admin is joining a session via bookingId and we haven't resolved room yet, wait.
     if (lockedRole !== "tutor" && !sessionRoomId) {
+      if (modeFromQP === "session" && bookingIdFromQP) {
+        setStatus("Resolving your session room…");
+        setError(null);
+        return;
+      }
       setStatus("Missing room link");
       setError("Ask your tutor for their session link (it includes ?roomId=...)");
       return;
@@ -1426,7 +1487,12 @@ export default function RoomPage() {
       </div>
     ) : null;
 
-  const showMissingRoomWarning = authed && lockedRole && lockedRole !== "tutor" && !sessionRoomId;
+  const showMissingRoomWarning =
+    authed &&
+    lockedRole &&
+    lockedRole !== "tutor" &&
+    !sessionRoomId &&
+    !(modeFromQP === "session" && bookingIdFromQP);
 
   return (
     <main
