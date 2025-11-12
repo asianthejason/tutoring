@@ -54,6 +54,14 @@ const isStudentId = (id?: string | null) => !!id && id.toLowerCase().startsWith(
 const isTutorId = (id?: string | null) => !!id && id.toLowerCase().startsWith("tutor");
 const isObserverId = (id?: string | null) => !!id && id.toLowerCase().startsWith("admin");
 
+// Normalize booking key like "docId_1730000000000" → { id:"docId", startMsHint:173..., raw:"..." }
+function parseBookingKey(raw?: string | null) {
+  if (!raw) return { id: null as string | null, startMsHint: null as number | null, raw: "" };
+  const [id, maybeMs] = String(raw).split("_");
+  const ms = maybeMs ? Number(maybeMs) : null;
+  return { id: id || null, startMsHint: Number.isFinite(ms) ? (ms as number) : null, raw };
+}
+
 // ---------- status / presence helpers ----------
 async function setTutorStatus(uid: string, status: "offline" | "waiting" | "busy") {
   try {
@@ -83,16 +91,19 @@ async function writeRoomMode(
 }
 
 // ---------- booking → room resolver (for students/admins joining with bookingId only) ----------
-async function resolveRoomIdFromBooking(bookingId: string): Promise<string | null> {
+async function resolveRoomIdFromBooking(bookingIdNormalized: string): Promise<string | null> {
   try {
-    const bSnap = await getDoc(doc(db, "bookings", bookingId));
+    const bSnap = await getDoc(doc(db, "bookings", bookingIdNormalized));
     if (!bSnap.exists()) throw new Error("Booking not found.");
     const b = bSnap.data() as any;
 
     const me = auth.currentUser;
     if (!me) throw new Error("Not signed in.");
-    // Make sure this booking belongs to the current student
-    if (b.studentId && b.studentId !== me.uid) throw new Error("This booking does not belong to you.");
+    // Ensure the booking belongs to current student (admins skip this)
+    const myRole = (await getDoc(doc(db, "users", me.uid))).data()?.role as Role | undefined;
+    if (myRole !== "admin" && b.studentId && b.studentId !== me.uid) {
+      throw new Error("This booking does not belong to you.");
+    }
 
     // time window check (±15 min grace; defaults to 60 min if no duration)
     const start: number =
@@ -129,7 +140,8 @@ export default function RoomPage() {
 
   // Query params: mode & bookingId
   const modeFromQP = (qp("mode", "") || "").toLowerCase() as RoomMode | "";
-  const bookingIdFromQP = qp("bookingId", "") || "";
+  const rawBookingKey = qp("bookingId", "") || "";
+  const bookingKey = parseBookingKey(rawBookingKey); // <-- normalized here
 
   // allow manual name override via ?name=
   const nameFromQP = qp("name", "");
@@ -265,18 +277,18 @@ export default function RoomPage() {
       if (lockedRole === "tutor") return;
       if (sessionRoomId) return;
       if (modeFromQP !== "session") return;
-      if (!bookingIdFromQP) return;
+      if (!bookingKey.id) return;
 
       setStatus("Resolving your session room…");
       setError(null);
-      const rid = await resolveRoomIdFromBooking(bookingIdFromQP);
+      const rid = await resolveRoomIdFromBooking(bookingKey.id);
       if (rid) {
         setSessionRoomId(rid);
       } else {
         setError("This session isn’t live yet or the booking can’t be found.");
       }
     })();
-  }, [authed, lockedRole, sessionRoomId, modeFromQP, bookingIdFromQP]);
+  }, [authed, lockedRole, sessionRoomId, modeFromQP, bookingKey.id]);
 
   useEffect(() => {
     if (!authed || lockedRole !== "tutor") {
@@ -725,7 +737,7 @@ export default function RoomPage() {
 
     // If a student/admin is joining a session via bookingId and we haven't resolved room yet, wait.
     if (lockedRole !== "tutor" && !sessionRoomId) {
-      if (modeFromQP === "session" && bookingIdFromQP) {
+      if (modeFromQP === "session" && bookingKey.id) {
         setStatus("Resolving your session room…");
         setError(null);
         return;
@@ -741,7 +753,8 @@ export default function RoomPage() {
         ? (modeFromQP === "session" ? "session" : "homework")
         : null;
 
-    const intendedBookingId = lockedRole === "tutor" ? (bookingIdFromQP || null) : (bookingIdFromQP || "");
+    // Tutor may receive composite in URL too; normalize here for their status write
+    const intendedBookingId = lockedRole === "tutor" ? (bookingKey.id || null) : (bookingKey.id || "");
 
     let room: Room | null = null;
     let hb: any = null; // heartbeat interval id
@@ -768,8 +781,11 @@ export default function RoomPage() {
           name: profileName || (lockedRole === "tutor" ? "Tutor" : "Student"),
           roomId: sessionRoomId,
         };
-        // Always pass bookingId if we have one (students/admins may join with a link)
-        if (bookingIdFromQP) bodyPayload.bookingId = bookingIdFromQP;
+        // Always pass normalized bookingId (and optional hint) if present
+        if (bookingKey.id) {
+          bodyPayload.bookingId = bookingKey.id;
+          if (bookingKey.startMsHint) bodyPayload.bookingStartMs = bookingKey.startMsHint;
+        }
 
         const res = await fetch("/api/rooms/token", {
           method: "POST",
@@ -826,23 +842,28 @@ export default function RoomPage() {
 
         syncLocalAVFlags(roomInstance.localParticipant);
 
-        // Status banner text
+        // Status banner text (also show normalization hint if applicable)
         const bannerMode =
           lockedRole === "tutor"
             ? intendedMode
             : (modeFromQP === "session" ? "session" : modeFromQP === "homework" ? "homework" : undefined);
-        if (lockedRole === "admin") setStatus(`Observer mode in ${sessionRoomId} (mic/cam off)`);
+        const normNote =
+          rawBookingKey && bookingKey.id && rawBookingKey !== bookingKey.id
+            ? ` (normalized bookingId: ${bookingKey.id})`
+            : "";
+
+        if (lockedRole === "admin") setStatus(`Observer mode in ${sessionRoomId} (mic/cam off)${normNote}`);
         else if (lockedRole === "tutor")
           setStatus(
-            bannerMode === "session"
+            (bannerMode === "session"
               ? "Tutor connected — Session mode (only booked student may enter)."
-              : "Tutor connected — Homework Help mode."
+              : "Tutor connected — Homework Help mode.") + normNote
           );
         else
           setStatus(
-            bannerMode === "session"
+            (bannerMode === "session"
               ? "Connected as Student — Session mode."
-              : "Connected as Student — Homework Help."
+              : "Connected as Student — Homework Help.") + normNote
           );
 
         // ---------- presence heartbeat for ALL roles ----------
@@ -993,7 +1014,7 @@ export default function RoomPage() {
       } catch {}
       room?.disconnect();
     };
-  }, [authed, lockedRole, sessionRoomId, profileName, resizeCanvas, modeFromQP, bookingIdFromQP]);
+  }, [authed, lockedRole, sessionRoomId, profileName, resizeCanvas, modeFromQP, bookingKey.id, rawBookingKey]);
 
   // ---------- ROSTER / TILES ----------
   function refreshTilesAndRoster(room: Room) {
@@ -1404,7 +1425,7 @@ export default function RoomPage() {
     const origin = typeof window !== "undefined" ? window.location.origin : "";
     const link = `${origin}/room?roomId=${encodeURIComponent(sessionRoomId)}${
       modeFromQP ? `&mode=${encodeURIComponent(modeFromQP)}` : ""
-    }${bookingIdFromQP ? `&bookingId=${encodeURIComponent(bookingIdFromQP)}` : ""}`;
+    }${rawBookingKey ? `&bookingId=${encodeURIComponent(rawBookingKey)}` : ""}`;
     navigator.clipboard.writeText(link).catch(() => {});
   }
 
@@ -1470,9 +1491,9 @@ export default function RoomPage() {
             {typeof window !== "undefined"
               ? `${window.location.origin}/room?roomId=${sessionRoomId}${
                   modeFromQP ? `&mode=${modeFromQP}` : ""
-                }${bookingIdFromQP ? `&bookingId=${bookingIdFromQP}` : ""}`
+                }${rawBookingKey ? `&bookingId=${rawBookingKey}` : ""}`
               : `/room?roomId=${sessionRoomId}${modeFromQP ? `&mode=${modeFromQP}` : ""}${
-                  bookingIdFromQP ? `&bookingId=${bookingIdFromQP}` : ""
+                  rawBookingKey ? `&bookingId=${rawBookingKey}` : ""
                 }`}
           </div>
           <div style={{ opacity: 0.7, marginTop: 4 }}>
@@ -1492,7 +1513,7 @@ export default function RoomPage() {
     lockedRole &&
     lockedRole !== "tutor" &&
     !sessionRoomId &&
-    !(modeFromQP === "session" && bookingIdFromQP);
+    !(modeFromQP === "session" && bookingKey.id);
 
   return (
     <main
