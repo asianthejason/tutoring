@@ -1459,9 +1459,27 @@ function AvailabilityModal({
                     const idx = wIdx * 7 + idxWithin;
 
                     type Piece = { startMs: number; endMs: number; kind: "past" | "booked" | "free" };
-                    const piecesAll: Piece[] = [];
 
-                    for (const r of b.ranges) {
+                    // Snap now to the minute for clean labels and cuts
+                    const nowFloor = Math.floor(nowMs / 60000) * 60000;
+
+                    // Build a set of atomic segments using cut points, then merge with precedence.
+                    const segmentsMap = new Map<
+                      string,
+                      { startMs: number; endMs: number; kind: Piece["kind"] }
+                    >();
+
+                    const precedence = { booked: 3, past: 2, free: 1 } as const;
+                    const addSegment = (s: number, e: number, kind: Piece["kind"]) => {
+                      if (e <= s) return;
+                      const key = `${s}-${e}`;
+                      const cur = segmentsMap.get(key);
+                      if (!cur || precedence[kind] > precedence[cur.kind]) {
+                        segmentsMap.set(key, { startMs: s, endMs: e, kind });
+                      }
+                    };
+
+                    for (const r of b.ranges as { startMs: number; endMs: number }[]) {
                       const booked = bookedInRange
                         .map((bk) => ({
                           start: bk.startTime,
@@ -1474,18 +1492,34 @@ function AvailabilityModal({
                         .filter((bk) => bk.end > bk.start);
 
                       const cutSet = new Set<number>([r.startMs, r.endMs]);
-                      if (nowMs > r.startMs && nowMs < r.endMs) cutSet.add(nowMs);
+                      if (nowFloor > r.startMs && nowFloor < r.endMs) cutSet.add(nowFloor);
                       for (const bk of booked) {
                         cutSet.add(bk.start);
                         cutSet.add(bk.end);
                       }
                       const pts = Array.from(cutSet).sort((a, b2) => a - b2);
+
                       for (let i2 = 0; i2 < pts.length - 1; i2++) {
                         const s = pts[i2], e = pts[i2 + 1];
                         if (e <= s) continue;
+
                         const isBooked = booked.some((bk) => s < bk.end && e > bk.start);
-                        const kind: Piece["kind"] = isBooked ? "booked" : s < nowMs && e <= nowMs ? "past" : "free";
-                        piecesAll.push({ startMs: s, endMs: e, kind });
+                        const isPast = e <= nowFloor; // whole segment finished
+                        const kind: Piece["kind"] = isBooked ? "booked" : isPast ? "past" : "free";
+
+                        addSegment(s, e, kind);
+                      }
+                    }
+
+                    // Collapse to array, sort, and coalesce adjacent segments with same kind
+                    const piecesSorted = Array.from(segmentsMap.values()).sort((a, b) => a.startMs - b.startMs);
+                    const piecesAll: Piece[] = [];
+                    for (const seg of piecesSorted) {
+                      const last = piecesAll[piecesAll.length - 1];
+                      if (last && last.kind === seg.kind && last.endMs === seg.startMs) {
+                        last.endMs = seg.endMs; // merge adjacency
+                      } else {
+                        piecesAll.push({ ...seg });
                       }
                     }
 
@@ -1513,7 +1547,7 @@ function AvailabilityModal({
                           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                             {piecesAll.map((p: any, i: number) => {
                               const label = `${fmtTimeInTZ(p.startMs, studentTZ)}–${fmtTimeInTZ(p.endMs, studentTZ)}`;
-                              const isClickable = p.kind === "free" && p.startMs > nowMs;
+                              const isClickable = p.kind === "free" && p.startMs > nowFloor;
                               return (
                                 <button
                                   key={i}
