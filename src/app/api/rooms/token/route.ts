@@ -8,7 +8,7 @@ import { getAuth } from "firebase-admin/auth";
 import { adminDb } from "@/lib/firebaseAdmin";
 import { AccessToken } from "livekit-server-sdk";
 
-/* ========================= helpers ========================= */
+/* ======================== helpers ======================== */
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -20,14 +20,11 @@ function getBearerIdToken(req: NextRequest): string | null {
   const authHeader =
     req.headers.get("authorization") || req.headers.get("Authorization");
   if (!authHeader) return null;
-  const parts = authHeader.split(" ");
-  if (parts.length === 2 && parts[0].toLowerCase() === "bearer") return parts[1];
-  return null;
+  const [scheme, token] = authHeader.split(" ");
+  return scheme?.toLowerCase() === "bearer" && token ? token : null;
 }
 
-function minutes(n: number) {
-  return n * 60 * 1000;
-}
+const minutes = (n: number) => n * 60 * 1000;
 
 type Role = "tutor" | "student" | "admin";
 type RoomMode = "homework" | "session" | undefined;
@@ -39,35 +36,6 @@ type UserDoc = {
   currentBookingId?: string | null;
   displayName?: string;
 };
-
-type BookingDoc = {
-  tutorUid?: string;
-  tutorId?: string;
-  studentUid?: string;
-  studentId?: string;
-  startTime?: any; // Timestamp | number | Date
-  durationMin?: number;
-};
-
-const BOOKING_LOOKBACK_MINUTES = 180; // +/- 3h
-const SESSION_GRACE_BEFORE_MIN = 15;
-const SESSION_GRACE_AFTER_MIN = 15;
-
-// Normalize "abc_1730000000000" → { id:"abc", startMsHint:173..., raw:"abc_..." }
-function normalizeBookingKey(raw?: string | null): {
-  id: string | null;
-  startMsHint: number | null;
-  raw: string | null;
-} {
-  if (!raw) return { id: null, startMsHint: null, raw: null };
-  const [id, maybeMs] = String(raw).split("_");
-  const ms = maybeMs ? Number(maybeMs) : NaN;
-  return {
-    id: id || null,
-    startMsHint: Number.isFinite(ms) ? ms : null,
-    raw,
-  };
-}
 
 function isNowWithinWindow(
   startMs: number,
@@ -82,9 +50,10 @@ function isNowWithinWindow(
   return nowMs >= windowStart && nowMs <= windowEnd;
 }
 
+// Read Firestore Timestamp/Date/number (ms) robustly
 function tsToMillis(ts: any): number | null {
   try {
-    if (ts == null) return null;
+    if (!ts) return null;
     if (typeof ts === "number") return ts;
     if (typeof ts.toMillis === "function") return ts.toMillis();
     if (typeof ts.seconds === "number") return ts.seconds * 1000;
@@ -95,11 +64,17 @@ function tsToMillis(ts: any): number | null {
   }
 }
 
-async function getUserDoc(uid: string) {
-  const snap = await adminDb.collection("users").doc(uid).get();
-  if (!snap.exists) return null;
-  return (snap.data() || {}) as UserDoc;
-}
+// Safe getter that accepts multiple candidate keys
+const pick = (obj: any, keys: string[]) => {
+  for (const k of keys) if (obj && obj[k] != null) return obj[k];
+  return undefined;
+};
+
+/* ======================== core gate ======================== */
+
+const BOOKING_LOOKBACK_MINUTES = 180; // +/- 3h
+const SESSION_GRACE_BEFORE_MIN = 15;
+const SESSION_GRACE_AFTER_MIN = 15;
 
 async function findTutorByRoomId(roomId: string) {
   const q = await adminDb
@@ -111,38 +86,32 @@ async function findTutorByRoomId(roomId: string) {
 
   if (q.empty) return null;
   const doc = q.docs[0];
-  const data = (doc.data() || {}) as UserDoc;
-  return { tutorUid: doc.id, tutorData: data };
+  return { tutorUid: doc.id, tutorData: (doc.data() || {}) as UserDoc };
 }
 
-function bookingParties(b: BookingDoc): { tutorUid: string | null; studentUid: string | null } {
-  // Accept both ...Uid and ...Id keys
-  const tutor = (b.tutorUid || b.tutorId) ?? null;
-  const student = (b.studentUid || b.studentId) ?? null;
-  return { tutorUid: tutor || null, studentUid: student || null };
-}
-
-function bookingStartAndDuration(b: BookingDoc): { startMs: number | null; durationMin: number } {
-  const startMs = tsToMillis(b.startTime);
-  const durationMin = Number((b as any).durationMin || 0);
-  return { startMs, durationMin };
+async function getUserDoc(uid: string) {
+  const snap = await adminDb.collection("users").doc(uid).get();
+  if (!snap.exists) return null;
+  return (snap.data() || {}) as UserDoc;
 }
 
 async function hasActiveBookingForStudentAndTutor(
   studentUid: string,
   tutorUid: string,
-  opts: { bookingId?: string | null; startMsHint?: number | null } = {}
+  bookingIdFromBody?: string | null
 ) {
   const nowMs = Date.now();
 
-  // 1) If bookingId provided, validate it strictly
-  if (opts.bookingId) {
-    const bSnap = await adminDb.collection("bookings").doc(opts.bookingId).get();
+  // 1) If a bookingId is provided, validate it first (accept both ...Id and ...Uid field styles)
+  if (bookingIdFromBody) {
+    const bSnap = await adminDb.collection("bookings").doc(bookingIdFromBody).get();
     if (bSnap.exists) {
-      const b = (bSnap.data() || {}) as BookingDoc;
-      const { tutorUid: tUID, studentUid: sUID } = bookingParties(b);
-      if (tUID === tutorUid && sUID === studentUid) {
-        const { startMs, durationMin } = bookingStartAndDuration(b);
+      const b = bSnap.data() || {};
+      const bTutor = String(pick(b, ["tutorUid", "tutorId"]) || "");
+      const bStudent = String(pick(b, ["studentUid", "studentId"]) || "");
+      if (bTutor === tutorUid && bStudent === studentUid) {
+        const startMs = tsToMillis(pick(b, ["startTime", "start", "startsAt"]));
+        const durationMin = Number(pick(b, ["durationMin", "durationMinutes", "duration"]) || 0);
         if (startMs && durationMin > 0) {
           const ok = isNowWithinWindow(
             startMs,
@@ -151,199 +120,193 @@ async function hasActiveBookingForStudentAndTutor(
             SESSION_GRACE_BEFORE_MIN,
             SESSION_GRACE_AFTER_MIN
           );
-          if (ok) return true;
+          if (ok) return { ok: true, matchedBookingId: bSnap.id, via: "explicitId" as const };
         }
       }
     }
-    // If explicit bookingId is wrong or inactive, fall through to search.
+    // else fall through to windowed search
   }
 
-  // 2) Otherwise search around now
+  // 2) Window search around "now" (requires composite index)
   const lowerBound = new Date(nowMs - minutes(BOOKING_LOOKBACK_MINUTES));
   const upperBound = new Date(nowMs + minutes(BOOKING_LOOKBACK_MINUTES));
 
-  const q = await adminDb
-    .collection("bookings")
-    .where("tutorUid", "==", tutorUid)
-    .where("studentUid", "==", studentUid)
-    .where("startTime", ">=", lowerBound)
-    .where("startTime", "<=", upperBound)
-    .limit(20)
-    .get();
+  // Your schema seems to use tutorId/studentId; try both pairs by running two queries.
+  // (Either one may hit depending on your data; whichever returns first with a match wins.)
+  const queries = [
+    adminDb
+      .collection("bookings")
+      .where("tutorUid", "==", tutorUid)
+      .where("studentUid", "==", studentUid)
+      .where("startTime", ">=", lowerBound)
+      .where("startTime", "<=", upperBound)
+      .limit(20)
+      .get(),
+    adminDb
+      .collection("bookings")
+      .where("tutorId", "==", tutorUid)
+      .where("studentId", "==", studentUid)
+      .where("startTime", ">=", lowerBound)
+      .where("startTime", "<=", upperBound)
+      .limit(20)
+      .get(),
+  ];
 
-  for (const doc of q.docs) {
-    const b = (doc.data() || {}) as BookingDoc;
-    const { startMs, durationMin } = bookingStartAndDuration(b);
-    if (!startMs || durationMin <= 0) continue;
+  for (const q of await Promise.all(queries)) {
+    for (const doc of q.docs) {
+      const b = doc.data() || {};
+      const startMs = tsToMillis(pick(b, ["startTime", "start", "startsAt"]));
+      const durationMin = Number(pick(b, ["durationMin", "durationMinutes", "duration"]) || 0);
+      if (!startMs || durationMin <= 0) continue;
 
-    // If we have a hint, require the start to be within +/- 2h of it (loose guard)
-    if (opts.startMsHint) {
-      const diff = Math.abs(startMs - opts.startMsHint);
-      if (diff > minutes(120)) continue;
+      const ok = isNowWithinWindow(
+        startMs,
+        durationMin,
+        nowMs,
+        SESSION_GRACE_BEFORE_MIN,
+        SESSION_GRACE_AFTER_MIN
+      );
+      if (ok) return { ok: true, matchedBookingId: doc.id, via: "windowSearch" as const };
     }
-
-    const ok = isNowWithinWindow(
-      startMs,
-      durationMin,
-      nowMs,
-      SESSION_GRACE_BEFORE_MIN,
-      SESSION_GRACE_AFTER_MIN
-    );
-    if (ok) return true;
   }
 
-  // If the data uses tutorId/studentId (not ...Uid), try the same query shape with those fields
-  const q2 = await adminDb
-    .collection("bookings")
-    .where("tutorId", "==", tutorUid)
-    .where("studentId", "==", studentUid)
-    .where("startTime", ">=", lowerBound)
-    .where("startTime", "<=", upperBound)
-    .limit(20)
-    .get();
-
-  for (const doc of q2.docs) {
-    const b = (doc.data() || {}) as BookingDoc;
-    const { startMs, durationMin } = bookingStartAndDuration(b);
-    if (!startMs || durationMin <= 0) continue;
-    if (opts.startMsHint) {
-      const diff = Math.abs(startMs - (opts.startMsHint as number));
-      if (diff > minutes(120)) continue;
-    }
-    const ok = isNowWithinWindow(
-      startMs,
-      durationMin,
-      nowMs,
-      SESSION_GRACE_BEFORE_MIN,
-      SESSION_GRACE_AFTER_MIN
-    );
-    if (ok) return true;
-  }
-
-  return false;
+  return { ok: false as const };
 }
 
-/* ========================= handler ========================= */
+/* ======================== handler ======================== */
 
 export async function POST(req: NextRequest) {
+  // we’ll fill this as we go and return it as serverDebug to help you validate
+  const debug: Record<string, any> = {};
+
   try {
     // 1) Read request
     const body = await req.json().catch(() => ({}));
     const requestedRoomId = (body.roomId as string) || "";
     const requestedName = (body.name as string) || "user";
+    const providedBookingIdRaw = (body.bookingId as string) || null;
+    const providedBookingId =
+      typeof providedBookingIdRaw === "string" && providedBookingIdRaw.includes("_")
+        ? providedBookingIdRaw.split("_")[0] // tolerate "&bookingId=..._<startMs>" style URLs
+        : providedBookingIdRaw;
 
-    // booking normalization (accept "docId_1699..." but use "docId")
-    const rawBookingKey: string | null = (body.bookingId as string) || null;
-    const bookingStartHint: number | null =
-      typeof body.bookingStartMs === "number" ? body.bookingStartMs : null;
-    const normalized = normalizeBookingKey(rawBookingKey);
-    const providedBookingId = normalized.id;
-    const providedStartHint = bookingStartHint ?? normalized.startMsHint ?? null;
-    // NOTE: body.role is ignored client-side; we derive role from Firestore
+    debug.request = {
+      requestedRoomId,
+      requestedName,
+      providedBookingId,
+      providedBookingIdRaw,
+    };
 
     // 2) Verify Firebase ID token
     const idToken = getBearerIdToken(req);
     if (!idToken) {
       return NextResponse.json(
-        { error: "missing Authorization bearer token" },
+        { error: "missing Authorization bearer token", serverDebug: debug },
         { status: 401 }
       );
     }
     const decoded = await getAuth().verifyIdToken(idToken).catch(() => null);
-    if (!decoded || !decoded.uid) {
-      return NextResponse.json({ error: "invalid Firebase token" }, { status: 401 });
+    if (!decoded?.uid) {
+      return NextResponse.json(
+        { error: "invalid Firebase token", serverDebug: debug },
+        { status: 401 }
+      );
     }
     const uid = decoded.uid;
+    debug.uid = uid;
 
     // 3) Fetch caller user doc
     const caller = await getUserDoc(uid);
     if (!caller) {
-      return NextResponse.json({ error: "user record not found" }, { status: 403 });
+      return NextResponse.json(
+        { error: "user record not found", serverDebug: debug },
+        { status: 403 }
+      );
     }
     const callerRole: Role = (caller.role as Role) || "student";
     const callerRoomId = typeof caller.roomId === "string" ? caller.roomId : "";
+    debug.caller = { role: callerRole, roomId: callerRoomId };
 
-    // 4) Resolve the room & owning tutor
+    // 4) Resolve room and owning tutor
     let resolvedRoomName = "";
     let gateTutorUid: string | null = null;
     let gateTutorData: UserDoc | null = null;
 
     if (callerRole === "tutor") {
       if (!callerRoomId) {
-        return NextResponse.json({ error: "tutor has no roomId" }, { status: 400 });
+        return NextResponse.json(
+          { error: "tutor has no roomId", serverDebug: debug },
+          { status: 400 }
+        );
       }
       resolvedRoomName = callerRoomId;
       gateTutorUid = uid;
       gateTutorData = caller;
     } else {
       if (!requestedRoomId) {
-        return NextResponse.json({ error: "roomId required for non-tutor" }, { status: 400 });
+        return NextResponse.json(
+          { error: "roomId required for non-tutor", serverDebug: debug },
+          { status: 400 }
+        );
       }
       resolvedRoomName = requestedRoomId;
       const t = await findTutorByRoomId(requestedRoomId);
       if (!t) {
-        return NextResponse.json({ error: "no tutor matches the requested roomId" }, { status: 404 });
+        return NextResponse.json(
+          { error: "no tutor matches the requested roomId", serverDebug: debug },
+          { status: 404 }
+        );
       }
       gateTutorUid = t.tutorUid;
       gateTutorData = t.tutorData;
     }
 
-    // 5) Gate logic: admins always allowed; students restricted in session mode
+    debug.room = {
+      resolvedRoomName,
+      gateTutorUid,
+      tutorRoomMode: gateTutorData?.roomMode ?? null,
+      tutorCurrentBookingId: gateTutorData?.currentBookingId ?? null,
+    };
+
+    // 5) Access control for non-tutors when tutor is in session mode
     if (callerRole !== "tutor") {
       const mode: RoomMode = gateTutorData?.roomMode;
+      if (mode === "session") {
+        const res = await hasActiveBookingForStudentAndTutor(
+          uid,
+          gateTutorUid as string,
+          providedBookingId
+        );
+        debug.bookingCheck = res;
 
-      // Admins may always observe (mic/cam disabled by grant)
-      if (callerRole !== "admin" && mode === "session") {
-        // If tutor set a specific booking, prefer enforcing that ID
-        const tutorsCurrent = gateTutorData?.currentBookingId || null;
-
-        // If the tutor has pinned a booking ID and the client provided a different one, deny
-        if (tutorsCurrent && providedBookingId && tutorsCurrent !== providedBookingId) {
+        if (!res.ok) {
           return NextResponse.json(
             {
               error:
                 "This room is in a 1-on-1 session right now. Only the booked student may enter during the session window.",
               code: "SESSION_ACTIVE",
+              serverDebug: debug,
             },
             { status: 403 }
           );
         }
-
-        // Determine which booking ID (if any) to validate directly
-        const idToValidate = (tutorsCurrent || providedBookingId) ?? null;
-
-        const ok = await hasActiveBookingForStudentAndTutor(uid, gateTutorUid as string, {
-          bookingId: idToValidate,
-          startMsHint: providedStartHint,
-        });
-
-        if (!ok) {
-          return NextResponse.json(
-            {
-              error:
-                "This room is in a 1-on-1 session right now. Only the booked student may enter during the session window.",
-              code: "SESSION_ACTIVE",
-            },
-            { status: 403 }
-          );
-        }
+      } else {
+        debug.bookingCheck = { ok: true, skipped: true, reason: "not-in-session-mode" };
       }
     }
 
-    // 6) Create a LiveKit token
+    // 6) Create LiveKit token
     const apiKey = requireEnv("LIVEKIT_API_KEY");
     const apiSecret = requireEnv("LIVEKIT_API_SECRET");
-    const lkUrl = requireEnv("LIVEKIT_URL"); // e.g., wss://your-tenant.livekit.cloud
+    const lkUrl = requireEnv("LIVEKIT_URL");
 
     const livekitIdentity = `${callerRole}_${uid}`;
-
     const at = new AccessToken(apiKey, apiSecret, {
       identity: livekitIdentity,
       name: requestedName,
     });
 
     if (callerRole === "admin") {
-      // observer: subscribe + data only
       at.addGrant({
         roomJoin: true,
         room: resolvedRoomName,
@@ -352,7 +315,6 @@ export async function POST(req: NextRequest) {
         canPublishData: true,
       });
     } else {
-      // tutor + student may publish
       at.addGrant({
         roomJoin: true,
         room: resolvedRoomName,
@@ -372,8 +334,8 @@ export async function POST(req: NextRequest) {
       identity: livekitIdentity,
       role: callerRole,
       name: requestedName,
-      // Echo back the normalized bookingId if any
       bookingId: providedBookingId || undefined,
+      serverDebug: debug, // TEMPORARY: helps you verify the gating
     });
   } catch (err: any) {
     console.error("token route error:", err);
