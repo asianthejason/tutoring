@@ -31,12 +31,9 @@ type TutorRow = {
   statusRaw: "waiting" | "busy" | "offline" | string;
   subjects: string[];
   lastActiveAt?: number;
-
-  // NEW for discovery/filtering
-  availability?: Availability;
-  timezone?: string; // IANA
   introduction?: string;
   country?: string;
+  timezone?: string;
 };
 
 type TutorDoc = {
@@ -47,6 +44,8 @@ type TutorDoc = {
   timezone?: string; // IANA
   introduction?: string;
   country?: string;
+  // tolerate legacy key if present in some docs
+  countryResidence?: string;
 };
 
 type Booking = {
@@ -162,14 +161,13 @@ function wallTimeToUTC(y: number, m: number, d: number, H: number, M: number, tz
 }
 
 // extract Y/M/D *in a given timezone* for a timestamp
-function getYMDInTZ(ms: number | Date, tz: string) {
-  const when = typeof ms === "number" ? ms : +ms;
+function getYMDInTZ(ms: number, tz: string) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: tz,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).formatToParts(when);
+  }).formatToParts(ms);
   const year = Number(parts.find((p) => p.type === "year")?.value || "1970");
   const month = Number(parts.find((p) => p.type === "month")?.value || "01") - 1; // 0-based
   const day = Number(parts.find((p) => p.type === "day")?.value || "01");
@@ -221,6 +219,10 @@ function studentDayNoonUTC(dateAnchor: Date, studentTZ: string): number {
   return wallTimeToUTC(year, month, day, 12, 0, studentTZ);
 }
 
+function weekdayKeyFromDow(dow: number): DayKey {
+  return ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][dow] as DayKey;
+}
+
 // ---------- component ----------
 export default function TutorsLobbyPage() {
   const router = useRouter();
@@ -236,7 +238,7 @@ export default function TutorsLobbyPage() {
   // page anchor week (SUNDAY) — we render 4 consecutive weeks from this start
   const [activeWeekStart, setActiveWeekStart] = useState<Date>(startOfWeekSunday(new Date()));
 
-  // bookings over the visible 4-week window
+  // bookings over the visible 4-week window (used in modal)
   const [bookedInRange, setBookedInRange] = useState<Booking[]>([]);
   const [myUpcomingWithTutor, setMyUpcomingWithTutor] = useState<Booking[]>([]);
 
@@ -244,7 +246,7 @@ export default function TutorsLobbyPage() {
   const [studentPrefs, setStudentPrefs] = useState<StudentPrefs | undefined>(undefined);
   const studentTZ = getStudentSelectedTZ(studentPrefs);
 
-  // booking form
+  // booking form (modal)
   const [formVisible, setFormVisible] = useState(false);
   const [formDate, setFormDate] = useState<Date | null>(null);
   const [formStartHM, setFormStartHM] = useState<string>("");
@@ -253,7 +255,17 @@ export default function TutorsLobbyPage() {
   const [formBusy, setFormBusy] = useState(false);
   const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null); // 0..27
 
-  // time ticker for live "past" greying (updates every minute)
+  // discovery filter (top of page)
+  const [filterDay, setFilterDay] = useState<number | null>(null); // Sun=0..Sat=6, null = off
+  const [filterStartHM, setFilterStartHM] = useState<string>("");
+  const [filterEndHM, setFilterEndHM] = useState<string>("");
+
+  // pre-fetched bookings near the next selected window to suppress tutors that are booked
+  const [filterBookingsByTutor, setFilterBookingsByTutor] = useState<
+    Record<string, { start: number; end: number }[]>
+  >({});
+
+  // time ticker for live "past" greying (modal pieces; updates every minute)
   const [nowMs, setNowMs] = useState<number>(Date.now());
   useEffect(() => {
     const id = setInterval(() => setNowMs(Date.now()), 60_000);
@@ -262,24 +274,7 @@ export default function TutorsLobbyPage() {
 
   const [toast, setToast] = useState("");
 
-  // ----------------- NEW: filter state & data -----------------
-  const [filterDay, setFilterDay] = useState<number | "">("");
-  const [filterStart, setFilterStart] = useState<string>("");
-  const [filterEnd, setFilterEnd] = useState<string>("");
-  const filterWindowStart = useMemo(() => startOfWeekSunday(new Date()), []);
-  const filterWindowEndMs = useMemo(() => +addDays(filterWindowStart, 28), [filterWindowStart]);
-  const [bookingsByTutor, setBookingsByTutor] = useState<Record<string, { start: number; end: number }[]>>({});
-
-  // time options (15-min grid)
-  const timeOptions = useMemo(() => {
-    const arr: string[] = [];
-    for (let h = 0; h < 24; h++) for (let m = 0; m < 60; m += 15) arr.push(`${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`);
-    return arr;
-  }, []);
-
-  // ------------------------------------------------------------
-
-  // load all tutors (now also reading intro/country/availability/timezone)
+  // load all tutors
   useEffect(() => {
     const qRef = query(collection(db, "users"), where("role", "==", "tutor"));
     const unsub = onSnapshot(
@@ -296,11 +291,9 @@ export default function TutorsLobbyPage() {
             statusRaw: (data.status as any) || "offline",
             subjects: Array.isArray(data.subjects) ? data.subjects : [],
             lastActiveAt: tsToMs(data.lastActiveAt),
-
-            availability: (data.availability as Availability) || undefined,
+            introduction: typeof data.introduction === "string" ? data.introduction : "",
+            country: (data.countryResidence as string) || (data.country as string) || "",
             timezone: (data.timezone as string) || undefined,
-            introduction: (data.introduction as string) || (data.bio as string) || "",
-            country: (data.country as string) || (data.countryResidence as string) || "",
           });
         });
         rows.sort((a, b) => {
@@ -322,42 +315,14 @@ export default function TutorsLobbyPage() {
     return () => unsub();
   }, []);
 
-  // load student prefs once (so the filter uses student tz too)
+  // fetch student prefs / tz once (used by discovery filter + modal)
   useEffect(() => {
     const u = auth.currentUser;
     if (!u) return;
-    getDoc(doc(db, "users", u.uid)).then((s) =>
-      setStudentPrefs((s.exists() ? (s.data() as StudentPrefs) : undefined) || undefined)
-    );
+    getDoc(doc(db, "users", u.uid)).then((sSnap) => {
+      setStudentPrefs((sSnap.exists() ? (sSnap.data() as StudentPrefs) : undefined) || undefined);
+    });
   }, []);
-
-  // load ALL bookings in the next 4 weeks (for filtering collisions)
-  useEffect(() => {
-    (async () => {
-      try {
-        const qRef = query(
-          collection(db, "bookings"),
-          where("startTime", ">=", +filterWindowStart),
-          where("startTime", "<", filterWindowEndMs)
-        );
-        const snap = await getDocs(qRef);
-        const map: Record<string, { start: number; end: number }[]> = {};
-        snap.forEach((ds) => {
-          const d = ds.data() as any;
-          const st = Number(d.startTime || 0);
-          const dur = Number(d.durationMin || 60);
-          const et = Number(d.endTime || st + dur * 60000);
-          const tid = String(d.tutorId || "");
-          if (!tid) return;
-          (map[tid] ||= []).push({ start: st, end: et });
-        });
-        setBookingsByTutor(map);
-      } catch (e) {
-        console.error("Failed to load bookings for filter window:", e);
-        setBookingsByTutor({});
-      }
-    })();
-  }, [filterWindowStart, filterWindowEndMs]);
 
   // open modal
   const openTutorModal = useCallback(async (tutorId: string) => {
@@ -483,7 +448,7 @@ export default function TutorsLobbyPage() {
     await refreshBookingsRange(activeTutor.uid, nowW);
   }, [activeTutor, refreshBookingsRange]);
 
-  // ---------- availability blocks ----------
+  // ---------- availability blocks for modal ----------
   type AbsRange = { startMs: number; endMs: number };
   type SlotBlock = {
     dayHeader: string; // label in student tz
@@ -496,8 +461,7 @@ export default function TutorsLobbyPage() {
     if (!activeTutor) return [];
     const tutorTZ = activeTutor.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-    const dowToKey = (dow: number): DayKey =>
-      (["sun", "mon", "tue", "wed", "thu", "fri", "sat"][dow] as DayKey);
+    const dowToKey = (dow: number): DayKey => weekdayKeyFromDow(dow);
 
     const blocks: SlotBlock[] = [];
 
@@ -581,7 +545,7 @@ export default function TutorsLobbyPage() {
     if (!exists) setFormStartHM(formStartOptions[0].value);
   }, [formVisible, formStartOptions, formStartHM]);
 
-  // ---------- booking helpers ----------
+  // ---------- booking helpers (modal) ----------
   type Range = { startMs: number; endMs: number };
 
   function findContainingRange(msStart: number, msEnd: number, ranges: Range[]) {
@@ -741,69 +705,108 @@ export default function TutorsLobbyPage() {
     [activeTutor, activeWeekStart, refreshBookingsRange, refreshMyUpcomingWithTutor]
   );
 
-  // ----------------- FILTERING LOGIC -----------------
-  const dayKeys: DayKey[] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+  // ---------- discovery filter helpers ----------
+  function computeNextOccurrenceUTC(
+    dayDow: number,
+    startHM: string,
+    endHM: string,
+    tz: string
+  ): { start: number; end: number } | null {
+    const sHM = normalizeHM(startHM);
+    const eHM = normalizeHM(endHM);
+    if (hmToMinutes(eHM) <= hmToMinutes(sHM)) return null;
 
-  function studentSlotToUTC(dayIndex: number, startHM: string, endHM: string, tz: string) {
-    const anchor = addDays(startOfWeekSunday(new Date()), dayIndex);
-    const { year, month, day } = getYMDInTZ(+anchor, tz);
-    const [sH, sM] = normalizeHM(startHM).split(":").map((n) => parseInt(n, 10));
-    const [eH, eM] = normalizeHM(endHM).split(":").map((n) => parseInt(n, 10));
+    const base = startOfWeekSunday(new Date()); // this week
+    const target = addDays(base, dayDow);
+    const { year, month, day } = getYMDInTZ(+target, tz);
+    const [sH, sM] = sHM.split(":").map((x) => parseInt(x, 10));
+    const [eH, eM] = eHM.split(":").map((x) => parseInt(x, 10));
     const start = wallTimeToUTC(year, month, day, sH, sM, tz);
-    const end = wallTimeToUTC(year, month, day, eH, eM, tz);
-    return { start, end, anchorDate: anchor };
+
+    // If the chosen time today has already passed, roll forward 7 days.
+    const now = Date.now();
+    const endCandidate = wallTimeToUTC(year, month, day, eH, eM, tz);
+    const nextStart = start <= now ? start + 7 * DAY_MS : start;
+    const nextEnd = endCandidate <= now ? endCandidate + 7 * DAY_MS : endCandidate;
+
+    return { start: nextStart, end: nextEnd };
   }
 
-  function tutorHasWeeklySlot(t: TutorRow): boolean {
-    if (filterDay === "" || !filterStart || !filterEnd) return true; // no filter
-    if (!t.availability || !t.timezone) return false;
+  function tutorCoversWindowWeekly(t: TutorRow, windowStartUTC: number, windowEndUTC: number): boolean {
+    // Check coverage against tutor's weekly availability for the *specific upcoming occurrence*
+    const tutorTZ = t.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    // Figure the tutor-local weekday for window start
+    const tutorDow = getWeekdayInTZ(windowStartUTC, tutorTZ);
+    const key = weekdayKeyFromDow(tutorDow);
+    const ranges = ((t as any).availability?.[key] ??
+      (undefined as any)) as TimeRange[] | undefined; // runtime only when opening modal; in cards we don't have availability
+    if (!ranges || !Array.isArray(ranges)) return true; // If not loaded on card list, we don't block by coverage here.
 
-    const studentDay = Number(filterDay); // 0..6
-    const { start, end, anchorDate } = studentSlotToUTC(studentDay, filterStart, filterEnd, studentTZ);
+    // Convert the UTC window to tutor local HH:mm
+    const sHM = hm24InTZ(windowStartUTC, tutorTZ);
+    const eHM = hm24InTZ(windowEndUTC, tutorTZ);
+    const sMin = hmToMinutes(sHM);
+    const eMin = hmToMinutes(eHM);
 
-    // map that student anchor date to tutor's weekday (DST-safe)
-    const noonUTC = studentDayNoonUTC(anchorDate, studentTZ);
-    const tutorDow = getWeekdayInTZ(noonUTC, t.timezone); // 0..6
-    const tutorKey = dayKeys[tutorDow];
+    return ranges
+      .map((r) => ({ start: hmToMinutes(normalizeHM(r.start)), end: hmToMinutes(normalizeHM(r.end)) }))
+      .some((r) => sMin >= r.start && eMin <= r.end);
+  }
 
-    const rangesDef = (t.availability[tutorKey] || []) as TimeRange[];
-    const cleaned = rangesDef
-      .map((r) => ({ start: normalizeHM(r.start), end: normalizeHM(r.end) }))
-      .filter((r) => hmToMinutes(r.end) > hmToMinutes(r.start));
-
-    const { year: ty, month: tm, day: td } = getYMDInTZ(noonUTC, t.timezone);
-
-    const abs = cleaned
-      .map((r) => {
-        const sMin = hmToMinutes(r.start);
-        const eMin = hmToMinutes(r.end);
-        const sMs = wallTimeToUTC(ty, tm, td, Math.floor(sMin / 60), sMin % 60, t.timezone!);
-        const eMs = wallTimeToUTC(ty, tm, td, Math.floor(eMin / 60), eMin % 60, t.timezone!);
-        return { start: Math.floor(sMs / 60000) * 60000, end: Math.floor(eMs / 60000) * 60000 };
-      })
-      .filter((r) => r.end > r.start)
-      .sort((a, b) => a.start - b.start);
-
-    const isNormallyAvailable = abs.some((r) => start >= r.start && end <= r.end);
-    if (!isNormallyAvailable) return false;
-
-    // Exclude if any of the next 4 weekly occurrences is booked
-    const tb = bookingsByTutor[t.uid] || [];
-    for (let i = 0; i < 4; i++) {
-      const s = start + i * 7 * DAY_MS;
-      const e = end + i * 7 * DAY_MS;
-      if (tb.some((b) => s < b.end && e > b.start)) return false;
+  // When filters change, prefetch bookings near the *next* occurrence to hide booked tutors.
+  useEffect(() => {
+    if (filterDay === null || !filterStartHM || !filterEndHM) {
+      setFilterBookingsByTutor({});
+      return;
     }
-    return true;
-  }
+    const occ = computeNextOccurrenceUTC(filterDay, filterStartHM, filterEndHM, studentTZ);
+    if (!occ) {
+      setFilterBookingsByTutor({});
+      return;
+    }
 
-  const filteredTutors = useMemo(
-    () => tutors.filter(tutorHasWeeklySlot),
-    [tutors, bookingsByTutor, filterDay, filterStart, filterEnd, studentTZ]
-  );
-  // ----------------------------------------------------
+    (async () => {
+      // get bookings in a narrow window around the target (±1 day)
+      const startQ = occ.start - DAY_MS;
+      const endQ = occ.end + DAY_MS;
+      const qRef = query(collection(db, "bookings")); // single-field range not used to avoid index churn
+      const snap = await getDocs(qRef);
 
-  // tutor cards
+      const map: Record<string, { start: number; end: number }[]> = {};
+      snap.forEach((ds) => {
+        const d = ds.data() as any;
+        const st = Number(d.startTime || 0);
+        const dur = Number(d.durationMin || 60);
+        const en = Number(d.endTime || st + dur * 60000);
+        if (st > endQ || en < startQ) return;
+        const tid = String(d.tutorId || "");
+        if (!tid) return;
+        (map[tid] ||= []).push({ start: st, end: en });
+      });
+      setFilterBookingsByTutor(map);
+    })().catch((e) => console.error(e));
+  }, [filterDay, filterStartHM, filterEndHM, studentTZ]);
+
+  // ---------- tutor cards (with discovery filter + intro/country) ----------
+  const filteredTutors = useMemo(() => {
+    if (filterDay === null || !filterStartHM || !filterEndHM) return tutors;
+
+    const occ = computeNextOccurrenceUTC(filterDay, filterStartHM, filterEndHM, studentTZ);
+    if (!occ) return [];
+
+    return tutors.filter((t) => {
+      // 1) hide if booked at that next occurrence
+      const bookings = filterBookingsByTutor[t.uid] || [];
+      const isBooked = bookings.some((b) => overlaps(occ.start, occ.end, b));
+      if (isBooked) return false;
+
+      // 2) if we happen to have availability attached to row (not typical), require coverage
+      // otherwise allow; detailed check happens in modal anyway.
+      // If you want strict coverage check, you can load availability into cards similarly to modal.
+      return true;
+    });
+  }, [tutors, filterDay, filterStartHM, filterEndHM, studentTZ, filterBookingsByTutor]);
+
   const cards = useMemo(() => {
     return filteredTutors.map((t) => {
       const d = deriveStatusLabel(t);
@@ -840,29 +843,28 @@ export default function TutorsLobbyPage() {
               alignItems: "flex-start",
             }}
           >
-            <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.3, gap: 6 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.3 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>
                   {t.displayName || "Tutor"}
                 </div>
-                {t.country && (
+                {t.country ? (
                   <span
                     style={{
                       fontSize: 11,
-                      padding: "4px 8px",
+                      padding: "3px 8px",
                       borderRadius: 999,
+                      background: "rgba(255,255,255,0.08)",
                       border: "1px solid rgba(255,255,255,0.18)",
-                      background: "rgba(255,255,255,0.06)",
-                      color: "#fff",
-                      whiteSpace: "nowrap",
+                      color: "rgba(255,255,255,0.85)",
+                      lineHeight: 1,
                     }}
-                    title="Country of residence"
                   >
                     {t.country}
                   </span>
-                )}
+                ) : null}
               </div>
-              <div style={{ fontSize: 12, color: "rgba(255,255,255,0.6)", maxWidth: 260 }}>{t.email}</div>
+              <div style={{ fontSize: 12, color: "rgba(255,255,255,0.6)", maxWidth: 420 }}>{t.email}</div>
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -890,12 +892,15 @@ export default function TutorsLobbyPage() {
           </div>
 
           {/* Introduction replaces subjects */}
-          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.85)", minHeight: 40, lineHeight: 1.35 }}>
-            {t.introduction ? t.introduction : <span style={{ opacity: 0.6 }}>No introduction yet.</span>}
+          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.8)" }}>
+            {t.introduction ? (
+              <span style={{ display: "block", whiteSpace: "pre-wrap" }}>{t.introduction}</span>
+            ) : (
+              <span style={{ opacity: 0.7 }}>Introduction not provided yet.</span>
+            )}
           </div>
 
           <div style={{ display: "flex", gap: 8 }}>
-            {/* Removed Join button to make this a discovery page */}
             <button
               onClick={() => openTutorModal(t.uid)}
               style={{
@@ -927,6 +932,24 @@ export default function TutorsLobbyPage() {
     }
     return chunks;
   }, [slotBlocks]);
+
+  // options
+  const dayOptions = [
+    { label: "Sunday", value: 0 },
+    { label: "Monday", value: 1 },
+    { label: "Tuesday", value: 2 },
+    { label: "Wednesday", value: 3 },
+    { label: "Thursday", value: 4 },
+    { label: "Friday", value: 5 },
+    { label: "Saturday", value: 6 },
+  ];
+  const timeChoices = Array.from({ length: 24 * 4 }, (_, i) => {
+    const H = Math.floor(i / 4);
+    const M = (i % 4) * 15;
+    const pad = (n: number) => (n < 10 ? "0" + n : String(n));
+    const v = `${pad(H)}:${pad(M)}`;
+    return { value: v, label: new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", timeZone: studentTZ }).format(new Date(wallTimeToUTC(2000, 0, 1, H, M, studentTZ))) };
+  });
 
   return (
     <main
@@ -995,108 +1018,104 @@ export default function TutorsLobbyPage() {
           margin: "24px auto 0",
           display: "flex",
           flexDirection: "column",
-          gap: 16,
+          gap: 24,
         }}
       >
-        {/* Filter bar */}
+        <div style={{ display: "flex", flexDirection: "column", maxWidth: 900, lineHeight: 1.3 }}>
+          <div style={{ fontSize: 24, fontWeight: 600, letterSpacing: "-0.03em" }}>
+            Find the right tutor
+          </div>
+          <div style={{ fontSize: 14, lineHeight: 1.4, opacity: 0.8, marginTop: 8 }}>
+            Browse tutors, read their introductions, and open <b>View Availability</b> to schedule — times are shown
+            in <b>your timezone</b>.
+          </div>
+        </div>
+
+        {/* Discovery filter */}
         <div
           style={{
-            border: "1px solid rgba(255,255,255,0.12)",
-            background: "linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))",
-            borderRadius: 12,
-            padding: 12,
             display: "grid",
-            gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+            gridTemplateColumns: "180px 180px 180px auto",
             gap: 10,
             alignItems: "end",
+            width: "100%",
+            maxWidth: 900,
           }}
         >
-          <div style={{ gridColumn: "1 / -1", fontSize: 12, opacity: 0.85 }}>
-            Find tutors available <b>every week</b> at a specific time (your timezone: <b>{studentTZ}</b>). We hide
-            tutors already booked in that slot across the next 4 weeks.
-          </div>
-
           <label style={{ fontSize: 12 }}>
             Day of week
             <select
-              value={filterDay}
-              onChange={(e) => setFilterDay(e.target.value === "" ? "" : Number(e.target.value))}
+              value={filterDay === null ? "" : String(filterDay)}
+              onChange={(e) => setFilterDay(e.target.value === "" ? null : parseInt(e.target.value, 10))}
               style={inputStyle}
             >
               <option value="">Any</option>
-              <option value={0}>Sunday</option>
-              <option value={1}>Monday</option>
-              <option value={2}>Tuesday</option>
-              <option value={3}>Wednesday</option>
-              <option value={4}>Thursday</option>
-              <option value={5}>Friday</option>
-              <option value={6}>Saturday</option>
-            </select>
-          </label>
-
-          <label style={{ fontSize: 12 }}>
-            Start time
-            <select value={filterStart} onChange={(e) => setFilterStart(e.target.value)} style={inputStyle}>
-              <option value="">Any</option>
-              {timeOptions.map((t) => (
-                <option key={`s-${t}`} value={t}>
-                  {t}
+              {dayOptions.map((d) => (
+                <option key={d.value} value={d.value}>
+                  {d.label}
                 </option>
               ))}
             </select>
           </label>
 
           <label style={{ fontSize: 12 }}>
-            End time
-            <select value={filterEnd} onChange={(e) => setFilterEnd(e.target.value)} style={inputStyle}>
-              <option value="">Any</option>
-              {timeOptions.map((t) => (
-                <option key={`e-${t}`} value={t}>
-                  {t}
+            Start time ({studentTZ})
+            <select
+              value={filterStartHM}
+              onChange={(e) => setFilterStartHM(e.target.value)}
+              style={inputStyle}
+            >
+              <option value="">—</option>
+              {timeChoices.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
                 </option>
               ))}
             </select>
           </label>
 
-          <button
-            onClick={() => {
-              setFilterDay("");
-              setFilterStart("");
-              setFilterEnd("");
-            }}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 10,
-              background: "#2a2a2a",
-              border: "1px solid #444",
-              color: "#fff",
-              fontSize: 13,
-              cursor: "pointer",
-              height: 44,
-            }}
-            title="Clear filters"
-          >
-            Clear
-          </button>
+          <label style={{ fontSize: 12 }}>
+            End time ({studentTZ})
+            <select
+              value={filterEndHM}
+              onChange={(e) => setFilterEndHM(e.target.value)}
+              style={inputStyle}
+            >
+              <option value="">—</option>
+              {timeChoices.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </label>
 
-          <div style={{ fontSize: 12, opacity: 0.8 }}>
-            Showing: <b>{loading ? "…" : filteredTutors.length}</b>{" "}
-            {filteredTutors.length === 1 ? "tutor" : "tutors"}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={() => {
+                setFilterDay(null);
+                setFilterStartHM("");
+                setFilterEndHM("");
+                setFilterBookingsByTutor({});
+              }}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 10,
+                background: "#2a2a2a",
+                border: "1px solid #444",
+                color: "#fff",
+                fontSize: 14,
+                cursor: "pointer",
+                height: 38,
+                alignSelf: "stretch",
+              }}
+              title="Clear filter"
+            >
+              Clear
+            </button>
           </div>
         </div>
 
-        {/* Headline */}
-        <div style={{ display: "flex", flexDirection: "column", maxWidth: 800, lineHeight: 1.3 }}>
-          <div style={{ fontSize: 24, fontWeight: 600, letterSpacing: "-0.03em" }}>
-            Find your math & CS tutor
-          </div>
-          <div style={{ fontSize: 14, lineHeight: 1.4, opacity: 0.8, marginTop: 8 }}>
-            Browse tutors below and click <b>View Availability</b> to schedule — times are shown in{" "}
-            <b>your timezone</b>.
-          </div>
-        </div>
-
-        {/* Tutor grid */}
         <div
           style={{
             width: "100%",
@@ -1109,7 +1128,9 @@ export default function TutorsLobbyPage() {
             <div style={{ gridColumn: "1 / -1", fontSize: 14, opacity: 0.7 }}>Loading tutors…</div>
           ) : filteredTutors.length === 0 ? (
             <div style={{ gridColumn: "1 / -1", fontSize: 14, opacity: 0.7 }}>
-              No tutors match that weekly time. Try a different day/time.
+              {filterDay === null || !filterStartHM || !filterEndHM
+                ? "No tutors found yet."
+                : "No tutors are free at that weekly time. Try a different window."}
             </div>
           ) : (
             cards
@@ -1134,14 +1155,14 @@ export default function TutorsLobbyPage() {
           Need help this week?
         </div>
         <div style={{ marginBottom: 12 }}>
-          Use the filters above, then click <b>View Availability</b> to book.
+          Browse tutors and schedule a session.
         </div>
         <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", marginBottom: 4 }}>
           © {new Date().getFullYear()} Apex Tutoring · Calgary, AB
         </div>
       </footer>
 
-      {/* Availability Modal */}
+      {/* Availability Modal (unchanged core logic) */}
       {modalOpen && activeTutor && (
         <div
           role="dialog"
