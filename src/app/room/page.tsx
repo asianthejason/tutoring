@@ -15,7 +15,19 @@ import { useRouter } from "next/navigation";
 
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc, updateDoc, onSnapshot } from "firebase/firestore";
+import {
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  onSnapshot,
+  collection,
+  getDocs,
+  query as fsQuery,
+  where,
+  orderBy,
+  limit as fsLimit,
+} from "firebase/firestore";
 
 /* ===================== Types ===================== */
 type Role = "tutor" | "student" | "admin";
@@ -110,17 +122,82 @@ async function writeRoomMode(
 }
 
 /* ===================== booking → room resolver ===================== */
-async function resolveRoomIdFromBooking(bookingIdNormalized: string, dbg: (tag: string, data?: any) => void): Promise<ResolveResult> {
+// Try several lookup strategies so we survive different booking doc ID schemes.
+async function fetchBookingDocByAnyKey(
+  normalizedId: string,
+  startMsHint: number | null,
+  rawKey: string | null,
+  dbg: (tag: string, data?: any) => void
+) {
+  // 1) Direct normalized ID
+  if (normalizedId) {
+    const snap = await getDoc(doc(db, "bookings", normalizedId));
+    if (snap.exists()) {
+      dbg("resolver:booking-hit:normalized", { id: normalizedId });
+      return snap;
+    }
+  }
+
+  // 2) Normalized + "_" + startMsHint
+  if (normalizedId && startMsHint) {
+    const composed = `${normalizedId}_${startMsHint}`;
+    const snap = await getDoc(doc(db, "bookings", composed));
+    if (snap.exists()) {
+      dbg("resolver:booking-hit:normalized_with_start", { id: composed });
+      return snap;
+    }
+  }
+
+  // 3) Raw key as doc id
+  if (rawKey) {
+    const snap = await getDoc(doc(db, "bookings", rawKey));
+    if (snap.exists()) {
+      dbg("resolver:booking-hit:raw", { id: rawKey });
+      return snap;
+    }
+  }
+
+  // 4) Query by normalizedId field (prefer latest startTime)
+  if (normalizedId) {
+    try {
+      const q = fsQuery(
+        collection(db, "bookings"),
+        where("normalizedId", "==", normalizedId),
+        orderBy("startTime", "desc"),
+        fsLimit(1)
+      );
+      const qs = await getDocs(q);
+      if (!qs.empty) {
+        const found = qs.docs[0];
+        dbg("resolver:booking-hit:query_normalizedId", { id: found.id });
+        return found;
+      }
+    } catch (e) {
+      dbg("resolver:booking-query-error", String((e as any)?.message || e));
+    }
+  }
+
+  return null;
+}
+
+async function resolveRoomIdFromBooking(
+  bookingIdNormalized: string,
+  dbg: (tag: string, data?: any) => void
+): Promise<ResolveResult> {
   try {
     dbg("resolver:start", { bookingIdNormalized });
 
-    const bSnap = await getDoc(doc(db, "bookings", bookingIdNormalized));
-    if (!bSnap.exists()) {
+    const raw = qp("bookingId", "") || null;
+    const parsed = parseBookingKey(raw);
+    const bSnap =
+      (await fetchBookingDocByAnyKey(bookingIdNormalized, parsed.startMsHint, raw, dbg)) || null;
+
+    if (!bSnap) {
       dbg("resolver:no-booking");
       return { ok: false, roomId: null, reason: "booking_not_found" };
     }
     const b = bSnap.data() as any;
-    dbg("resolver:bookingDoc", b);
+    dbg("resolver:bookingDoc", { id: bSnap.id, ...b });
 
     const me = auth.currentUser;
     if (!me) {
@@ -174,13 +251,7 @@ async function resolveRoomIdFromBooking(bookingIdNormalized: string, dbg: (tag: 
         ok: false,
         roomId: null,
         reason: "session_not_live",
-        details: {
-          startMs,
-          durMin,
-          now,
-          openFrom,
-          openUntil,
-        },
+        details: { startMs, durMin, now, openFrom, openUntil },
       };
     }
 
@@ -197,7 +268,7 @@ async function resolveRoomIdFromBooking(bookingIdNormalized: string, dbg: (tag: 
     if (!roomId) {
       return { ok: false, roomId: null, reason: "tutor_no_roomid" };
     }
-    return { ok: true, roomId, details: { tutorId } };
+    return { ok: true, roomId, details: { tutorId, bookingDocId: bSnap.id } };
   } catch (e: any) {
     console.error("[resolveRoomIdFromBooking]", e);
     return { ok: false, roomId: null, reason: "exception", details: String(e?.message || e) };
@@ -314,7 +385,9 @@ export default function RoomPage() {
     return { ...base, color: "#ddd", background: "#2a2a2a", borderColor: "#555" };
   };
 
-  useEffect(() => { viewBoardForRef.current = viewBoardFor; }, [viewBoardFor]);
+  useEffect(() => {
+    viewBoardForRef.current = viewBoardFor;
+  }, [viewBoardFor]);
 
   /* ---------- AUTH + profile name + room id ---------- */
   useEffect(() => {
@@ -469,9 +542,13 @@ export default function RoomPage() {
     redrawCanvas(boardsRef.current[curId] || []);
   }, []);
 
-  useEffect(() => { resizeCanvas(); }, [viewBoardFor, resizeCanvas]);
   useEffect(() => {
-    function onWinResize() { resizeCanvas(); }
+    resizeCanvas();
+  }, [viewBoardFor, resizeCanvas]);
+  useEffect(() => {
+    function onWinResize() {
+      resizeCanvas();
+    }
     window.addEventListener("resize", onWinResize);
     return () => window.removeEventListener("resize", onWinResize);
   }, [resizeCanvas]);
@@ -486,12 +563,21 @@ export default function RoomPage() {
     return false;
   };
 
-  function computeStudentHearing(meId: string) { return !!hearMapRef.current[meId]; }
-  function computeTutorHearingStudent(studId: string) { return !!speakMapRef.current[studId]; }
+  function computeStudentHearing(meId: string) {
+    return !!hearMapRef.current[meId];
+  }
+  function computeTutorHearingStudent(studId: string) {
+    return !!speakMapRef.current[studId];
+  }
   function killStudentAudioLocally() {
     if (lockedRole !== "student") return;
     [tutorAudioElsRef.current, studentAudioElsRef.current].forEach((map) => {
-      for (const [, el] of map.entries()) { if (el) { el.pause(); el.remove(); } }
+      for (const [, el] of map.entries()) {
+        if (el) {
+          el.pause();
+          el.remove();
+        }
+      }
       map.clear();
     });
   }
@@ -638,7 +724,9 @@ export default function RoomPage() {
       setICanHearTutor(shouldHear);
       return;
     }
-    try { micPub.setSubscribed(shouldHear); } catch {}
+    try {
+      micPub.setSubscribed(shouldHear);
+    } catch {}
     playTutorAudio(micPub, shouldHear);
     setICanHearTutor(shouldHear);
     setPermVersion((v) => v + 1);
@@ -650,7 +738,9 @@ export default function RoomPage() {
     const map = studentAudioElsRef.current;
     const sid = pub.trackSid || pub.track?.sid || `student-${studentId}`;
     const existing = map.get(sid);
-    try { pub.setSubscribed(allow); } catch {}
+    try {
+      pub.setSubscribed(allow);
+    } catch {}
     if (!allow) {
       if (existing) {
         existing.pause();
@@ -777,7 +867,9 @@ export default function RoomPage() {
           if (pub.kind === "audio" && tutorPid) applyStudentHearing(room);
           if (pub.kind === "audio" && studentPid) {
             const rpub = pub as RemoteTrackPublication;
-            try { rpub.setSubscribed(false); } catch {}
+            try {
+              rpub.setSubscribed(false);
+            } catch {}
             killStudentAudioLocally();
           }
         }
@@ -792,7 +884,9 @@ export default function RoomPage() {
 
         if (lockedRole === "admin" && pub.kind === "audio") {
           const rpub = pub as RemoteTrackPublication;
-          try { rpub.setSubscribed(false); } catch {}
+          try {
+            rpub.setSubscribed(false);
+          } catch {}
         }
       })
       .on(RoomEvent.TrackUnsubscribed, (_track, pub, participant) => {
@@ -842,11 +936,10 @@ export default function RoomPage() {
     }
 
     const intendedMode: RoomMode | null =
-      lockedRole === "tutor"
-        ? (modeFromQP === "session" ? "session" : "homework")
-        : null;
+      lockedRole === "tutor" ? (modeFromQP === "session" ? "session" : "homework") : null;
 
-    const intendedBookingId = lockedRole === "tutor" ? (bookingKey.id || null) : (bookingKey.id || "");
+    const intendedBookingId =
+      lockedRole === "tutor" ? bookingKey.id || null : bookingKey.id || "";
 
     let room: Room | null = null;
     let hb: any = null;
@@ -873,6 +966,7 @@ export default function RoomPage() {
         if (bookingKey.id) {
           bodyPayload.bookingId = bookingKey.id;
           if (bookingKey.startMsHint) bodyPayload.bookingStartMs = bookingKey.startMsHint;
+          if (rawBookingKey) bodyPayload.bookingIdRaw = rawBookingKey; // extra context for your API
         }
 
         pushDebug("token:req", bodyPayload);
@@ -926,11 +1020,19 @@ export default function RoomPage() {
         }
 
         if (lockedRole === "admin") {
-          try { await roomInstance.localParticipant.setMicrophoneEnabled(false); } catch {}
-          try { await roomInstance.localParticipant.setCameraEnabled(false); } catch {}
+          try {
+            await roomInstance.localParticipant.setMicrophoneEnabled(false);
+          } catch {}
+          try {
+            await roomInstance.localParticipant.setCameraEnabled(false);
+          } catch {}
         } else {
-          try { await roomInstance.localParticipant.setMicrophoneEnabled(true); } catch {}
-          try { await roomInstance.localParticipant.setCameraEnabled(true); } catch {}
+          try {
+            await roomInstance.localParticipant.setMicrophoneEnabled(true);
+          } catch {}
+          try {
+            await roomInstance.localParticipant.setCameraEnabled(true);
+          } catch {}
         }
 
         syncLocalAVFlags(roomInstance.localParticipant);
@@ -938,7 +1040,11 @@ export default function RoomPage() {
         const bannerMode =
           lockedRole === "tutor"
             ? intendedMode
-            : (modeFromQP === "session" ? "session" : modeFromQP === "homework" ? "homework" : undefined);
+            : modeFromQP === "session"
+            ? "session"
+            : modeFromQP === "homework"
+            ? "homework"
+            : undefined;
         const normNote =
           rawBookingKey && bookingKey.id && rawBookingKey !== bookingKey.id
             ? ` (normalized bookingId: ${bookingKey.id})`
@@ -1200,7 +1306,7 @@ export default function RoomPage() {
       else misc.push(t);
     }
 
-    let tutorTile: typeof tiles[number] | undefined;
+    let tutorTile: (typeof tiles)[number] | undefined;
     if (lockedRole === "tutor") tutorTile = tutorTiles.find((tt) => tt.isLocal) || tutorTiles[0];
     else tutorTile = tutorTiles[0];
 
@@ -1269,9 +1375,13 @@ export default function RoomPage() {
     setTimeout(() => resizeCanvas(), 0);
   }, [orderedTiles, resizeCanvas]);
 
-  useEffect(() => { resizeCanvasAndTiles(); }, [orderedTiles, resizeCanvasAndTiles]);
   useEffect(() => {
-    function onResize() { resizeCanvasAndTiles(); }
+    resizeCanvasAndTiles();
+  }, [orderedTiles, resizeCanvasAndTiles]);
+  useEffect(() => {
+    function onResize() {
+      resizeCanvasAndTiles();
+    }
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [resizeCanvasAndTiles]);
@@ -1585,11 +1695,7 @@ export default function RoomPage() {
     ) : null;
 
   const showMissingRoomWarning =
-    authed &&
-    lockedRole &&
-    lockedRole !== "tutor" &&
-    !sessionRoomId &&
-    !(modeFromQP === "session" && bookingKey.id);
+    authed && lockedRole && lockedRole !== "tutor" && !sessionRoomId && !(modeFromQP === "session" && bookingKey.id);
 
   /* ===================== Render ===================== */
   return (
@@ -1634,7 +1740,11 @@ export default function RoomPage() {
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button
-            style={{ ...ghostButtonStyle, background: debugOpen ? "#2d3f2d" : "#2a2a2a", borderColor: debugOpen ? "#4f8f4f" : "#444" }}
+            style={{
+              ...ghostButtonStyle,
+              background: debugOpen ? "#2d3f2d" : "#2a2a2a",
+              borderColor: debugOpen ? "#4f8f4f" : "#444",
+            }}
             onClick={() => setDebugOpen((v) => !v)}
             title="Toggle debug console"
           >
@@ -1707,18 +1817,31 @@ export default function RoomPage() {
             borderRadius: 10,
             background: "rgba(0,0,0,0.35)",
             padding: 12,
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+            fontFamily:
+              "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
             fontSize: 12,
             color: "#cfe9ff",
           }}
         >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: 8,
+            }}
+          >
             <div style={{ fontWeight: 700, color: "#9bd" }}>Debug Console</div>
             <button
               style={ghostButtonStyle}
               onClick={() => {
                 const payload = {
-                  query: { modeFromQP, rawBookingKey, normalizedBookingId: bookingKey.id, roomId: sessionRoomId },
+                  query: {
+                    modeFromQP,
+                    rawBookingKey,
+                    normalizedBookingId: bookingKey.id,
+                    roomId: sessionRoomId,
+                  },
                   user: { email: userEmail, role: lockedRole, profileName, identity: myIdentity },
                   notes: error ? { error } : {},
                   events: debugRef.current,
@@ -1968,7 +2091,10 @@ export default function RoomPage() {
             </div>
           </div>
 
-          <div ref={wbContainerRef} style={{ flex: "1 1 auto", minHeight: 0, minWidth: 0, position: "relative", backgroundColor: "#111" }}>
+          <div
+            ref={wbContainerRef}
+            style={{ flex: "1 1 auto", minHeight: 0, minWidth: 0, position: "relative", backgroundColor: "#111" }}
+          >
             <canvas
               ref={canvasRef}
               style={{
