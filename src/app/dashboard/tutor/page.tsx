@@ -45,6 +45,12 @@ function withinJoinWindow(startMs?: number, durationMin?: number) {
   return now >= windowStart && now <= windowEnd;
 }
 
+function hasEnded(startMs?: number, durationMin?: number) {
+  if (!startMs || !durationMin) return false;
+  const end = startMs + minutes(durationMin) + minutes(GRACE_AFTER_MIN);
+  return Date.now() > end;
+}
+
 function untilWindowOpensMs(startMs?: number) {
   if (!startMs) return null;
   const openAt = startMs - minutes(GRACE_BEFORE_MIN);
@@ -82,6 +88,10 @@ export default function TutorDashboardPage() {
   // sessions
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [tick, setTick] = useState(0); // for countdown rerender
+
+  // tabs
+  type SessionTab = "upcoming" | "past";
+  const [sessionTab, setSessionTab] = useState<SessionTab>("upcoming");
 
   // --- Auth gate / load basic tutor data ---
   useEffect(() => {
@@ -150,24 +160,17 @@ export default function TutorDashboardPage() {
   // --- HEARTBEAT: regularly update lastActiveAt while tutor dashboard is open ---
   useEffect(() => {
     if (!uid) return;
-
-    // update immediately
     updateDoc(doc(db, "users", uid), { lastActiveAt: Date.now() }).catch(() => {});
-
     const intervalId = setInterval(() => {
       updateDoc(doc(db, "users", uid), { lastActiveAt: Date.now() }).catch(() => {});
-    }, 15000); // every 15s
-
+    }, 15000);
     return () => clearInterval(intervalId);
   }, [uid]);
 
-  // --- Subscribe to upcoming 1-on-1 bookings for me ---
+  // --- Subscribe to all 1-on-1 bookings for me (we'll split into past/upcoming client-side) ---
   useEffect(() => {
     if (!uid) return;
-
-    // NOTE: your schema uses "tutorId" in this page (we'll keep it consistent here).
-    const qRef = query(collection(db, "bookings"), where("tutorId", "==", uid), limit(20));
-
+    const qRef = query(collection(db, "bookings"), where("tutorId", "==", uid), limit(100));
     const unsub = onSnapshot(
       qRef,
       (snap) => {
@@ -183,20 +186,11 @@ export default function TutorDashboardPage() {
             roomId: b.roomId,
           });
         });
-
-        list.sort((a, b) => {
-          const ta = a.startTime || 0;
-          const tb = b.startTime || 0;
-          return ta - tb;
-        });
-
+        list.sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
         setBookings(list);
       },
-      (err) => {
-        console.error("[bookings onSnapshot error]", err);
-      }
+      (err) => console.error("[bookings onSnapshot error]", err)
     );
-
     return unsub;
   }, [uid]);
 
@@ -205,6 +199,22 @@ export default function TutorDashboardPage() {
     const id = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(id);
   }, []);
+
+  // derived lists for tabs
+  const { upcoming, past } = useMemo(() => {
+    const up: Booking[] = [];
+    const pa: Booking[] = [];
+    for (const b of bookings) {
+      if (hasEnded(b.startTime, b.durationMin || 60)) {
+        pa.push(b);
+      } else {
+        up.push(b); // includes “happening now”
+      }
+    }
+    up.sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
+    pa.sort((a, b) => (b.startTime || 0) - (a.startTime || 0));
+    return { upcoming: up, past: pa };
+  }, [bookings, tick]);
 
   // helpers
   function formatTime(ts?: number) {
@@ -252,7 +262,7 @@ export default function TutorDashboardPage() {
 
   // Actions
   async function openHomeworkHelp() {
-    if (!roomId) return router.push("/room?mode=homework"); // room page will pick tutor's roomId from profile
+    if (!roomId) return router.push("/room?mode=homework");
     await setRoomMeta("homework", null);
     router.push(`/room?mode=homework`);
   }
@@ -295,7 +305,6 @@ export default function TutorDashboardPage() {
 
   const statusUI = statusColors(status || "offline");
 
-  // small live banner describing current mode (if any)
   const modeBanner =
     roomMode ? (
       <div
@@ -371,7 +380,7 @@ export default function TutorDashboardPage() {
           {modeBanner}
         </div>
 
-        {/* right actions — Home, Open Homework Help, Profile, Sign out */}
+        {/* right actions */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button style={ghostButtonStyle} onClick={() => router.push("/")}>
             Home
@@ -440,9 +449,9 @@ export default function TutorDashboardPage() {
               <div
                 style={{
                   borderRadius: 8,
-                  backgroundColor: statusColors(status || "offline").bg,
-                  border: `1px solid ${statusColors(status || "offline").border}`,
-                  color: statusColors(status || "offline").text,
+                  backgroundColor: statusUI.bg,
+                  border: `1px solid ${statusUI.border}`,
+                  color: statusUI.text,
                   fontSize: 12,
                   lineHeight: 1.2,
                   fontWeight: 500,
@@ -450,22 +459,19 @@ export default function TutorDashboardPage() {
                   textAlign: "center",
                 }}
               >
-                {statusColors(status || "offline").label}
+                {statusUI.label}
               </div>
             </div>
           </div>
 
           <div style={{ fontSize: 11, lineHeight: 1.4, color: "rgba(255,255,255,0.5)" }}>
-            Status is automatic inside the room:
-            {" "}
-            <b>Waiting</b> (in room, no student) · <b>Busy</b> (with student) · <b>Offline</b> (not in room).
-            {" "}
-            Use <span style={{ color: "#9cf" }}>Open Homework Help Room</span> or a session’s{" "}
-            <span style={{ color: "#9cf" }}>Start Session</span>.
+            Status is automatic inside the room: <b>Waiting</b> (in room, no student) · <b>Busy</b> (with student) ·{" "}
+            <b>Offline</b> (not in room). Use <span style={{ color: "#9cf" }}>Open Homework Help Room</span> or a
+            session’s <span style={{ color: "#9cf" }}>Start Session</span>.
           </div>
         </div>
 
-        {/* RIGHT: Upcoming 1-on-1 sessions */}
+        {/* RIGHT: Sessions with tabs */}
         <div
           style={{
             background:
@@ -478,18 +484,27 @@ export default function TutorDashboardPage() {
             fontSize: 13,
             lineHeight: 1.4,
             color: "#fff",
+            display: "flex",
+            flexDirection: "column",
           }}
         >
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 600,
-              lineHeight: 1.3,
-              marginBottom: 8,
-            }}
-          >
-            Your Upcoming 1-on-1 Sessions
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <button
+              aria-pressed={sessionTab === "upcoming"}
+              onClick={() => setSessionTab("upcoming")}
+              style={pillTabStyle(sessionTab === "upcoming")}
+            >
+              Upcoming
+            </button>
+            <button
+              aria-pressed={sessionTab === "past"}
+              onClick={() => setSessionTab("past")}
+              style={pillTabStyle(sessionTab === "past")}
+            >
+              Past
+            </button>
           </div>
+
           <div
             style={{
               fontSize: 12,
@@ -498,18 +513,20 @@ export default function TutorDashboardPage() {
               marginBottom: 12,
             }}
           >
-            You can enter a session up to {GRACE_BEFORE_MIN} minutes before the start time.
+            {sessionTab === "upcoming"
+              ? `You can enter a session up to ${GRACE_BEFORE_MIN} minutes before the start time.`
+              : "These are your recently completed sessions."}
           </div>
 
-          {bookings.length === 0 ? (
+          {(sessionTab === "upcoming" ? upcoming : past).length === 0 ? (
             <div style={{ padding: "12px 0", fontSize: 13, color: "rgba(255,255,255,0.6)" }}>
-              No sessions scheduled yet.
+              {sessionTab === "upcoming" ? "No upcoming sessions." : "No past sessions yet."}
             </div>
           ) : (
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "minmax(200px,1.4fr) minmax(180px,1fr) minmax(140px,auto)",
+                gridTemplateColumns: "minmax(200px,1.4fr) minmax(180px,1fr) minmax(160px,auto)",
                 gap: "12px",
                 fontSize: 13,
                 lineHeight: 1.4,
@@ -543,10 +560,10 @@ export default function TutorDashboardPage() {
                   paddingBottom: 4,
                 }}
               >
-                Action
+                {sessionTab === "upcoming" ? "Action" : "Status"}
               </div>
 
-              {bookings.map((b) => {
+              {(sessionTab === "upcoming" ? upcoming : past).map((b) => {
                 const enabled = joinEnabled(b);
                 const label = joinCtaLabel(b);
                 return (
@@ -562,33 +579,51 @@ export default function TutorDashboardPage() {
                       {formatTime(b.startTime)} ({b.durationMin || 60} min)
                     </div>
 
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <button
-                        style={{
-                          ...primaryCtaStyleSmall,
-                          opacity: enabled ? 1 : 0.6,
-                          cursor: enabled ? "pointer" : "not-allowed",
-                          minWidth: 130,
-                        }}
-                        disabled={!enabled}
-                        onClick={() => startSession(b)}
-                        title={enabled ? "Enter your 1-on-1 session" : "Available 15 min before start"}
-                      >
-                        {label}
-                      </button>
+                    {sessionTab === "upcoming" ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <button
+                          style={{
+                            ...primaryCtaStyleSmall,
+                            opacity: enabled ? 1 : 0.6,
+                            cursor: enabled ? "pointer" : "not-allowed",
+                            minWidth: 130,
+                          }}
+                          disabled={!enabled}
+                          onClick={() => startSession(b)}
+                          title={enabled ? "Enter your 1-on-1 session" : "Available 15 min before start"}
+                        >
+                          {label}
+                        </button>
 
-                      {/* fallback deep link you can copy/share with your student */}
-                      <button
-                        style={ghostButtonStyle}
-                        onClick={() => {
-                          const url = `${window.location.origin}/room?mode=session&bookingId=${encodeURIComponent(b.id)}`;
-                          navigator.clipboard.writeText(url).catch(() => {});
-                        }}
-                        title="Copy student join link"
-                      >
-                        Copy Link
-                      </button>
-                    </div>
+                        <button
+                          style={ghostButtonStyle}
+                          onClick={() => {
+                            const url = `${window.location.origin}/room?mode=session&bookingId=${encodeURIComponent(
+                              b.id
+                            )}`;
+                            navigator.clipboard.writeText(url).catch(() => {});
+                          }}
+                          title="Copy student join link"
+                        >
+                          Copy Link
+                        </button>
+                      </div>
+                    ) : (
+                      <div>
+                        <span
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: 8,
+                            border: "1px solid rgba(255,255,255,0.2)",
+                            background: "rgba(255,255,255,0.06)",
+                            fontSize: 12,
+                            color: "rgba(255,255,255,0.8)",
+                          }}
+                        >
+                          Ended
+                        </span>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -612,8 +647,7 @@ export default function TutorDashboardPage() {
         }}
       >
         <div style={{ color: "rgba(255,255,255,0.8)", fontWeight: 500, marginBottom: 6 }}>
-          You’re visible to students in the Homework Help list only when your room is open in{" "}
-          <b>Homework Help</b> mode.
+          You’re visible to students in the Homework Help list only when your room is open in <b>Homework Help</b> mode.
         </div>
 
         <div style={{ marginBottom: 12 }}>
@@ -662,3 +696,16 @@ const primaryCtaStyleSmall: React.CSSProperties = {
   minWidth: 110,
   textAlign: "center",
 };
+
+function pillTabStyle(active: boolean): React.CSSProperties {
+  return {
+    padding: "6px 10px",
+    borderRadius: 999,
+    cursor: "pointer",
+    fontSize: 12,
+    fontWeight: 600,
+    background: active ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.06)",
+    border: active ? "1px solid rgba(255,255,255,0.28)" : "1px solid rgba(255,255,255,0.14)",
+    color: active ? "#fff" : "rgba(255,255,255,0.85)",
+  };
+}
