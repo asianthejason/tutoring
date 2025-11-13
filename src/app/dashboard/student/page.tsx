@@ -1,7 +1,7 @@
 // src/app/dashboard/student/page.tsx
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut, User as FirebaseUser } from "firebase/auth";
@@ -38,7 +38,7 @@ type TutorInfo = {
   lastActiveAt?: number;
 };
 
-/** -------- time helpers (match tutor page rules) -------- */
+/** -------- time helpers -------- */
 const GRACE_BEFORE_MIN = 15;
 const GRACE_AFTER_MIN = 15;
 const FRESH_WINDOW_MS = 30_000;
@@ -53,6 +53,11 @@ function withinJoinWindow(startMs?: number, durationMin?: number) {
   const windowEnd = startMs + minutes(durationMin) + minutes(GRACE_AFTER_MIN);
   return now >= windowStart && now <= windowEnd;
 }
+function hasEnded(startMs?: number, durationMin?: number) {
+  if (!startMs || !durationMin) return false;
+  const end = startMs + minutes(durationMin) + minutes(GRACE_AFTER_MIN);
+  return Date.now() > end;
+}
 
 export default function StudentDashboardPage() {
   const router = useRouter();
@@ -62,13 +67,19 @@ export default function StudentDashboardPage() {
   const [uid, setUid] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState<string>("");
 
-  // upcoming sessions (mine)
+  // sessions (mine)
   const [bookings, setBookings] = useState<Booking[]>([]);
 
   // live tutors for homework help (only roomMode=homework)
   const [tutors, setTutors] = useState<TutorInfo[]>([]);
 
-  // render tick for potential future countdown badges (optional)
+  // tabs
+  type MainTab = "sessions" | "homework";
+  type SessionSubtab = "upcoming" | "past";
+  const [mainTab, setMainTab] = useState<MainTab>("sessions");
+  const [sessionTab, setSessionTab] = useState<SessionSubtab>("upcoming");
+
+  // render tick for potential countdown badges
   const [_tick, setTick] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 1000);
@@ -109,11 +120,10 @@ export default function StudentDashboardPage() {
     return () => unsub();
   }, [router]);
 
-  // ---- subscribe to my upcoming bookings ----
+  // ---- subscribe to my bookings (both future + past; we split client-side) ----
   useEffect(() => {
     if (!uid) return;
-
-    const qRef = query(collection(db, "bookings"), where("studentId", "==", uid), limit(20));
+    const qRef = query(collection(db, "bookings"), where("studentId", "==", uid), limit(100));
 
     const unsub = onSnapshot(
       qRef,
@@ -131,6 +141,7 @@ export default function StudentDashboardPage() {
           });
         });
 
+        // sort chronological by start
         list.sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
         setBookings(list);
       },
@@ -142,9 +153,8 @@ export default function StudentDashboardPage() {
     return unsub;
   }, [uid]);
 
-  // ---- subscribe to tutors who are actually live in HOMEWORK HELP mode ----
+  // ---- subscribe to tutors who are live in HOMEWORK HELP ----
   useEffect(() => {
-    // We filter by role=tutor and roomMode=homework in Firestore, then client-filter status/freshness.
     const tutorsRef = query(
       collection(db, "users"),
       where("role", "==", "tutor"),
@@ -161,10 +171,14 @@ export default function StudentDashboardPage() {
           const data = docSnap.data() as DocumentData;
 
           const status = (data.status as TutorInfo["status"]) || "offline";
-          const lastActiveAt = typeof data.lastActiveAt === "number" ? data.lastActiveAt : 0;
-          const isFresh = now - lastActiveAt < FRESH_WINDOW_MS;
+          const lastActiveAt =
+            typeof data.lastActiveAt === "number"
+              ? data.lastActiveAt
+              : typeof data.lastActiveAt?.toMillis === "function"
+              ? data.lastActiveAt.toMillis()
+              : 0;
 
-          // Only show fresh, live tutors in homework mode
+          const isFresh = now - lastActiveAt < FRESH_WINDOW_MS;
           if (!isFresh) return;
           if (status === "offline") return;
 
@@ -180,7 +194,6 @@ export default function StudentDashboardPage() {
         });
 
         rows.sort((a, b) => {
-          // waiting (free) first, then busy, then by name
           const order = (s: TutorInfo["status"]) => (s === "waiting" ? 0 : s === "busy" ? 1 : 2);
           const diff = order(a.status) - order(b.status);
           if (diff !== 0) return diff;
@@ -197,24 +210,38 @@ export default function StudentDashboardPage() {
     return unsub;
   }, []);
 
-  // ---- join live room immediately (waiting tutor) ----
+  // ---- join helpers ----
   const joinHomeworkRoom = useCallback(
     (tutorRoomId: string) => {
       if (!tutorRoomId) return;
-      // carry mode=homework so the room page can treat as lobby entry
       router.push(`/room?mode=homework&roomId=${encodeURIComponent(tutorRoomId)}`);
     },
     [router]
   );
 
-  // ---- join a scheduled 1-on-1 session ----
   function canJoinBooking(b: Booking) {
     return withinJoinWindow(b.startTime, b.durationMin || 60);
   }
   function joinScheduled(b: Booking) {
-    // We route through bookingId + mode=session so the room can enforce admission logic.
     router.push(`/room?mode=session&bookingId=${encodeURIComponent(b.id)}`);
   }
+
+  // ---- derived lists for subtabs ----
+  const { upcoming, past } = useMemo(() => {
+    const up: Booking[] = [];
+    const pa: Booking[] = [];
+    for (const b of bookings) {
+      if (hasEnded(b.startTime, b.durationMin || 60)) {
+        pa.push(b);
+      } else {
+        up.push(b);
+      }
+    }
+    // Upcoming ascending (soonest first); Past descending (latest first)
+    up.sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
+    pa.sort((a, b) => (b.startTime || 0) - (a.startTime || 0));
+    return { upcoming: up, past: pa };
+  }, [bookings, _tick]);
 
   function formatTime(ts?: number) {
     if (!ts) return "-";
@@ -311,7 +338,7 @@ export default function StudentDashboardPage() {
           <div style={{ fontSize: 11, opacity: 0.7 }}>Student Dashboard</div>
         </div>
 
-        {/* right actions — Home first, then Find, Profile, Sign out */}
+        {/* right actions */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button style={ghostButtonStyle} onClick={() => router.push("/")}>
             Home
@@ -335,267 +362,320 @@ export default function StudentDashboardPage() {
           width: "100%",
           maxWidth: "1280px",
           margin: "24px auto 0",
-          display: "grid",
-          gridTemplateColumns: "minmax(320px, 2fr) minmax(280px, 1fr)",
-          gap: 24,
+          display: "flex",
+          flexDirection: "column",
+          gap: 16,
           padding: "0 24px",
         }}
       >
-        {/* LEFT: Scheduled Sessions */}
-        <div
-          style={{
-            background:
-              "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.06) 0%, rgba(20,20,20,0.7) 60%)",
-            border: "1px solid rgba(255,255,255,0.12)",
-            boxShadow: "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
-            borderRadius: 16,
-            padding: "16px 20px",
-            minHeight: 220,
-            fontSize: 13,
-            lineHeight: 1.4,
-            color: "#fff",
-          }}
-        >
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 600,
-              lineHeight: 1.3,
-              marginBottom: 8,
-            }}
+        {/* TOP-LEVEL TABS */}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            aria-pressed={mainTab === "sessions"}
+            onClick={() => setMainTab("sessions")}
+            style={tabStyle(mainTab === "sessions")}
           >
-            Your Next Sessions
-          </div>
-          <div
-            style={{
-              fontSize: 12,
-              lineHeight: 1.4,
-              color: "rgba(255,255,255,0.6)",
-              marginBottom: 12,
-            }}
+            One-on-One Sessions
+          </button>
+          <button
+            aria-pressed={mainTab === "homework"}
+            onClick={() => setMainTab("homework")}
+            style={tabStyle(mainTab === "homework")}
           >
-            You can enter your session about {GRACE_BEFORE_MIN} minutes before the scheduled time.
-          </div>
-
-          {bookings.length === 0 ? (
-            <div style={{ padding: "12px 0", fontSize: 13, color: "rgba(255,255,255,0.6)" }}>
-              You don’t have any sessions booked yet.
-            </div>
-          ) : (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "minmax(180px,1.3fr) minmax(180px,1fr) minmax(140px,auto)",
-                gap: "12px",
-                fontSize: 13,
-                lineHeight: 1.4,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 12,
-                  opacity: 0.6,
-                  borderBottom: "1px solid rgba(255,255,255,0.12)",
-                  paddingBottom: 4,
-                }}
-              >
-                Tutor
-              </div>
-              <div
-                style={{
-                  fontSize: 12,
-                  opacity: 0.6,
-                  borderBottom: "1px solid rgba(255,255,255,0.12)",
-                  paddingBottom: 4,
-                }}
-              >
-                Time
-              </div>
-              <div
-                style={{
-                  fontSize: 12,
-                  opacity: 0.6,
-                  borderBottom: "1px solid rgba(255,255,255,0.12)",
-                  paddingBottom: 4,
-                }}
-              >
-                Join
-              </div>
-
-              {bookings.map((b) => {
-                const allowed = canJoinBooking(b);
-                return (
-                  <div key={b.id} style={{ display: "contents" }}>
-                    <div style={{ fontWeight: 500, color: "#fff", wordBreak: "break-word" }}>
-                      {b.tutorName || "Tutor"}
-                      <div style={{ fontSize: 11, lineHeight: 1.3, color: "rgba(255,255,255,0.6)" }}>
-                        {b.tutorEmail || "-"}
-                      </div>
-                    </div>
-
-                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.85)" }}>
-                      {formatTime(b.startTime)} ({b.durationMin || 60} min)
-                    </div>
-
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <button
-                        style={allowed ? primaryCtaStyleSmall : ghostButtonStyleDisabled}
-                        disabled={!allowed}
-                        onClick={allowed ? () => joinScheduled(b) : undefined}
-                        title={allowed ? "Enter your 1-on-1 session" : "Opens ~15 min before start"}
-                      >
-                        {allowed ? "Join Now" : "Not Live Yet"}
-                      </button>
-
-                      {/* handy copy link */}
-                      <button
-                        style={ghostButtonStyle}
-                        onClick={() => {
-                          const url = `${window.location.origin}/room?mode=session&bookingId=${encodeURIComponent(b.id)}`;
-                          navigator.clipboard.writeText(url).catch(() => {});
-                        }}
-                        title="Copy your session link"
-                      >
-                        Copy Link
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+            Available Homework Tutors
+          </button>
         </div>
 
-        {/* RIGHT: Homework Help Lobby (only tutors in roomMode=homework) */}
-        <div
-          style={{
-            background:
-              "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.06) 0%, rgba(20,20,20,0.7) 60%)",
-            border: "1px solid rgba(255,255,255,0.12)",
-            boxShadow: "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
-            borderRadius: 16,
-            padding: "16px 20px",
-            minHeight: 220,
-            display: "flex",
-            flexDirection: "column",
-            gap: 12,
-            color: "#fff",
-            fontSize: 13,
-            lineHeight: 1.4,
-          }}
-        >
-          <div style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.3 }}>Live Homework Help</div>
-          <div style={{ fontSize: 12, lineHeight: 1.4, color: "rgba(255,255,255,0.6)" }}>
-            You’ll only see tutors who are currently in their <b>Homework Help</b> room. If they’re <b>Busy</b>,
-            check back in a moment.
-          </div>
-
-          {tutors.length === 0 ? (
-            <div style={{ paddingTop: 8, fontSize: 13, color: "rgba(255,255,255,0.6)" }}>
-              No tutors are live in Homework Help right now.
+        {/* CONTENT AREA */}
+        {mainTab === "sessions" ? (
+          <div
+            style={{
+              background:
+                "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.06) 0%, rgba(20,20,20,0.7) 60%)",
+              border: "1px solid rgba(255,255,255,0.12)",
+              boxShadow: "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
+              borderRadius: 16,
+              padding: "16px 20px",
+              minHeight: 220,
+              fontSize: 13,
+              lineHeight: 1.4,
+              color: "#fff",
+            }}
+          >
+            {/* SUBTABS */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <button
+                aria-pressed={sessionTab === "upcoming"}
+                onClick={() => setSessionTab("upcoming")}
+                style={pillTabStyle(sessionTab === "upcoming")}
+              >
+                Upcoming
+              </button>
+              <button
+                aria-pressed={sessionTab === "past"}
+                onClick={() => setSessionTab("past")}
+                style={pillTabStyle(sessionTab === "past")}
+              >
+                Past
+              </button>
             </div>
-          ) : (
-            <div style={{ display: "grid", gap: 12 }}>
-              {tutors.map((tutor) => {
-                const isWaiting = tutor.status === "waiting";
-                const isBusy = tutor.status === "busy";
-                const pill = statusPillColors(tutor.status);
 
-                return (
-                  <div
-                    key={tutor.uid}
-                    style={{
-                      borderRadius: 12,
-                      background:
-                        "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.08) 0%, rgba(20,20,20,0.6) 60%)",
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      boxShadow: "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
-                      padding: "16px",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 8,
-                    }}
-                  >
-                    {/* top row: name + status */}
+            <div
+              style={{
+                fontSize: 12,
+                lineHeight: 1.4,
+                color: "rgba(255,255,255,0.6)",
+                marginBottom: 12,
+              }}
+            >
+              {sessionTab === "upcoming"
+                ? `You can enter your session about ${GRACE_BEFORE_MIN} minutes before the scheduled time.`
+                : "These are your recently completed sessions."}
+            </div>
+
+            {/* TABLE */}
+            {(sessionTab === "upcoming" ? upcoming : past).length === 0 ? (
+              <div style={{ padding: "12px 0", fontSize: 13, color: "rgba(255,255,255,0.6)" }}>
+                {sessionTab === "upcoming"
+                  ? "You don’t have any upcoming sessions."
+                  : "No past sessions to show yet."}
+              </div>
+            ) : (
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns:
+                    "minmax(180px,1.3fr) minmax(180px,1fr) minmax(160px,auto)",
+                  gap: "12px",
+                  fontSize: 13,
+                  lineHeight: 1.4,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 12,
+                    opacity: 0.6,
+                    borderBottom: "1px solid rgba(255,255,255,0.12)",
+                    paddingBottom: 4,
+                  }}
+                >
+                  Tutor
+                </div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    opacity: 0.6,
+                    borderBottom: "1px solid rgba(255,255,255,0.12)",
+                    paddingBottom: 4,
+                  }}
+                >
+                  Time
+                </div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    opacity: 0.6,
+                    borderBottom: "1px solid rgba(255,255,255,0.12)",
+                    paddingBottom: 4,
+                  }}
+                >
+                  {sessionTab === "upcoming" ? "Join" : "Status"}
+                </div>
+
+                {(sessionTab === "upcoming" ? upcoming : past).map((b) => {
+                  const allowed = canJoinBooking(b);
+                  const ended = hasEnded(b.startTime, b.durationMin || 60);
+                  return (
+                    <div key={b.id} style={{ display: "contents" }}>
+                      <div style={{ fontWeight: 500, color: "#fff", wordBreak: "break-word" }}>
+                        {b.tutorName || "Tutor"}
+                        <div style={{ fontSize: 11, lineHeight: 1.3, color: "rgba(255,255,255,0.6)" }}>
+                          {b.tutorEmail || "-"}
+                        </div>
+                      </div>
+
+                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.85)" }}>
+                        {formatTime(b.startTime)} ({b.durationMin || 60} min)
+                      </div>
+
+                      {sessionTab === "upcoming" ? (
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button
+                            style={allowed ? primaryCtaStyleSmall : ghostButtonStyleDisabled}
+                            disabled={!allowed}
+                            onClick={allowed ? () => joinScheduled(b) : undefined}
+                            title={allowed ? "Enter your 1-on-1 session" : "Opens ~15 min before start"}
+                          >
+                            {allowed ? "Join Now" : "Not Live Yet"}
+                          </button>
+
+                          <button
+                            style={ghostButtonStyle}
+                            onClick={() => {
+                              const url = `${window.location.origin}/room?mode=session&bookingId=${encodeURIComponent(
+                                b.id
+                              )}`;
+                              navigator.clipboard.writeText(url).catch(() => {});
+                            }}
+                            title="Copy your session link"
+                          >
+                            Copy Link
+                          </button>
+                        </div>
+                      ) : (
+                        <div>
+                          <span
+                            style={{
+                              padding: "6px 10px",
+                              borderRadius: 8,
+                              border: "1px solid rgba(255,255,255,0.2)",
+                              background: "rgba(255,255,255,0.06)",
+                              fontSize: 12,
+                              color: "rgba(255,255,255,0.8)",
+                            }}
+                          >
+                            {ended ? "Ended" : "In progress"}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : (
+          // HOMEWORK TUTORS TAB
+          <div
+            style={{
+              background:
+                "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.06) 0%, rgba(20,20,20,0.7) 60%)",
+              border: "1px solid rgba(255,255,255,0.12)",
+              boxShadow: "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
+              borderRadius: 16,
+              padding: "16px 20px",
+              minHeight: 220,
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
+              color: "#fff",
+              fontSize: 13,
+              lineHeight: 1.4,
+            }}
+          >
+            <div style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.3 }}>Live Homework Help</div>
+            <div style={{ fontSize: 12, lineHeight: 1.4, color: "rgba(255,255,255,0.6)" }}>
+              You’ll only see tutors who are currently in their <b>Homework Help</b> room. If they’re <b>Busy</b>,
+              check back in a moment.
+            </div>
+
+            {tutors.length === 0 ? (
+              <div style={{ paddingTop: 8, fontSize: 13, color: "rgba(255,255,255,0.6)" }}>
+                No tutors are live in Homework Help right now.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gap: 12 }}>
+                {tutors.map((tutor) => {
+                  const isWaiting = tutor.status === "waiting";
+                  const isBusy = tutor.status === "busy";
+                  const pill = statusPillColors(tutor.status);
+
+                  return (
                     <div
+                      key={tutor.uid}
                       style={{
+                        borderRadius: 12,
+                        background:
+                          "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.08) 0%, rgba(20,20,20,0.6) 60%)",
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        boxShadow: "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
+                        padding: "16px",
                         display: "flex",
-                        justifyContent: "space-between",
-                        flexWrap: "wrap",
+                        flexDirection: "column",
                         gap: 8,
                       }}
                     >
-                      <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.3 }}>
-                        <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: "-0.03em" }}>
-                          {tutor.displayName || "Tutor"}
-                        </div>
-                        <div
-                          style={{
-                            fontSize: 12,
-                            color: "rgba(255,255,255,0.6)",
-                            lineHeight: 1.4,
-                            wordBreak: "break-word",
-                          }}
-                        >
-                          {tutor.email}
-                        </div>
-                      </div>
-
+                      {/* top row: name + status */}
                       <div
                         style={{
                           display: "flex",
-                          flexDirection: "column",
-                          gap: 4,
-                          minWidth: 100,
-                          textAlign: "center",
+                          justifyContent: "space-between",
+                          flexWrap: "wrap",
+                          gap: 8,
                         }}
                       >
+                        <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.3 }}>
+                          <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: "-0.03em" }}>
+                            {tutor.displayName || "Tutor"}
+                          </div>
+                          <div
+                            style={{
+                              fontSize: 12,
+                              color: "rgba(255,255,255,0.6)",
+                              lineHeight: 1.4,
+                              wordBreak: "break-word",
+                            }}
+                          >
+                            {tutor.email}
+                          </div>
+                        </div>
+
                         <div
                           style={{
-                            borderRadius: 8,
-                            backgroundColor: pill.bg,
-                            border: `1px solid ${pill.border}`,
-                            color: pill.text,
-                            fontSize: 12,
-                            lineHeight: 1.2,
-                            fontWeight: 500,
-                            padding: "6px 10px",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 4,
+                            minWidth: 100,
+                            textAlign: "center",
                           }}
                         >
-                          {pill.label}
-                        </div>
-                        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.6)" }}>
-                          {tutor.roomMode === "homework" ? "Homework Help" : "—"}
+                          <div
+                            style={{
+                              borderRadius: 8,
+                              backgroundColor: pill.bg,
+                              border: `1px solid ${pill.border}`,
+                              color: pill.text,
+                              fontSize: 12,
+                              lineHeight: 1.2,
+                              fontWeight: 500,
+                              padding: "6px 10px",
+                            }}
+                          >
+                            {pill.label}
+                          </div>
+                          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.6)" }}>
+                            {tutor.roomMode === "homework" ? "Homework Help" : "—"}
+                          </div>
                         </div>
                       </div>
+
+                      {/* actions */}
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        {isWaiting && tutor.roomId && (
+                          <button style={primaryCtaStyleSmall} onClick={() => joinHomeworkRoom(tutor.roomId)}>
+                            Join Room
+                          </button>
+                        )}
+
+                        {isBusy && (
+                          <button style={ghostButtonStyleDisabled} disabled>
+                            Currently Helping
+                          </button>
+                        )}
+
+                        {!isWaiting && !isBusy && (
+                          <button style={ghostButtonStyleDisabled} disabled>
+                            Offline
+                          </button>
+                        )}
+                      </div>
                     </div>
-
-                    {/* actions */}
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      {isWaiting && tutor.roomId && (
-                        <button style={primaryCtaStyleSmall} onClick={() => joinHomeworkRoom(tutor.roomId)}>
-                          Join Room
-                        </button>
-                      )}
-
-                      {isBusy && (
-                        <button style={ghostButtonStyleDisabled} disabled>
-                          Currently Helping
-                        </button>
-                      )}
-
-                      {!isWaiting && !isBusy && (
-                        <button style={ghostButtonStyleDisabled} disabled>
-                          Offline
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       {/* FOOTER */}
@@ -612,14 +692,25 @@ export default function StudentDashboardPage() {
           textAlign: "center",
         }}
       >
-        <div style={{ color: "rgba(255,255,255,0.85)", fontWeight: 500, marginBottom: 6 }}>
-          Stuck on homework right now?
-        </div>
-
-        <div style={{ marginBottom: 12 }}>
-          If a tutor is <b>Waiting</b> in the Homework Help list, you can jump straight in. If they’re <b>Busy</b>,
-          check back soon.
-        </div>
+        {mainTab === "homework" ? (
+          <>
+            <div style={{ color: "rgba(255,255,255,0.85)", fontWeight: 500, marginBottom: 6 }}>
+              Stuck on homework right now?
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              If a tutor is <b>Waiting</b> in the list, you can jump straight in. If they’re <b>Busy</b>, check back soon.
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ color: "rgba(255,255,255,0.85)", fontWeight: 500, marginBottom: 6 }}>
+              Manage your one-on-one sessions
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              Use <b>Upcoming</b> to join when your window opens; <b>Past</b> shows recently completed sessions.
+            </div>
+          </>
+        )}
 
         <div
           style={{
@@ -690,4 +781,32 @@ function statusPillColors(status: TutorInfo["status"]) {
     default:
       return { bg: "#442424", border: "#a66", text: "#ff8b8b", label: "Offline" };
   }
+}
+
+function tabStyle(active: boolean): React.CSSProperties {
+  return {
+    padding: "10px 14px",
+    borderRadius: 10,
+    cursor: "pointer",
+    fontSize: 14,
+    fontWeight: 600,
+    letterSpacing: "-0.01em",
+    background: active ? "#1f2937" : "#161616",
+    border: active ? "1px solid #3b3b3b" : "1px solid #2a2a2a",
+    color: active ? "#fff" : "rgba(255,255,255,0.85)",
+    boxShadow: active ? "0 10px 30px rgba(0,0,0,0.6)" : "none",
+  };
+}
+
+function pillTabStyle(active: boolean): React.CSSProperties {
+  return {
+    padding: "6px 10px",
+    borderRadius: 999,
+    cursor: "pointer",
+    fontSize: 12,
+    fontWeight: 600,
+    background: active ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.06)",
+    border: active ? "1px solid rgba(255,255,255,0.28)" : "1px solid rgba(255,255,255,0.14)",
+    color: active ? "#fff" : "rgba(255,255,255,0.85)",
+  };
 }
