@@ -33,8 +33,8 @@ type TutorRow = {
   lastActiveAt?: number;
   country?: string;
   timezone?: string;
-  introduction?: string; // from tutorIntro
-  availability?: Availability; // needed for card-level filtering
+  introduction?: string;
+  availability?: Availability;
 };
 
 type TutorDoc = {
@@ -43,9 +43,8 @@ type TutorDoc = {
   roomId?: string;
   availability?: Availability;
   timezone?: string; // IANA
-  tutorIntro?: string; // <- correct field
+  tutorIntro?: string;
   country?: string;
-  // tolerate legacy key if present in some docs
   countryResidence?: string;
 };
 
@@ -290,8 +289,8 @@ export default function TutorsLobbyPage() {
             lastActiveAt: tsToMs(data.lastActiveAt),
             country: (data.countryResidence as string) || (data.country as string) || "",
             timezone: (data.timezone as string) || undefined,
-            introduction: typeof data.tutorIntro === "string" ? data.tutorIntro : "", // <-- fix
-            availability: (data.availability || undefined) as Availability | undefined, // for filter
+            introduction: typeof data.tutorIntro === "string" ? data.tutorIntro : "",
+            availability: (data.availability || undefined) as Availability | undefined,
           });
         });
         rows.sort((a, b) => {
@@ -344,7 +343,7 @@ export default function TutorsLobbyPage() {
       availability:
         (t.availability as Availability) || { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] },
       timezone: t.timezone || undefined,
-      tutorIntro: t.tutorIntro || "", // keep the field as-is for safety
+      tutorIntro: t.tutorIntro || "",
       country: t.country || t.countryResidence || "",
     };
     setActiveTutor(tutor);
@@ -454,6 +453,26 @@ export default function TutorsLobbyPage() {
     ranges: AbsRange[]; // absolute UTC
   };
 
+  // NEW: merge overlapping/adjacent ranges into a single set of disjoint ranges
+  function mergeAbsRanges(ranges: AbsRange[]): AbsRange[] {
+    if (!ranges.length) return [];
+    const sorted = [...ranges].sort((a, b) => a.startMs - b.startMs);
+    const out: AbsRange[] = [];
+    let cur = { ...sorted[0] };
+    for (let i = 1; i < sorted.length; i++) {
+      const r = sorted[i];
+      // merge if overlaps or touches (avoid gaps that create “duplicate-looking” rows)
+      if (r.startMs <= cur.endMs) {
+        cur.endMs = Math.max(cur.endMs, r.endMs);
+      } else {
+        out.push(cur);
+        cur = { ...r };
+      }
+    }
+    out.push(cur);
+    return out;
+  }
+
   const slotBlocks: SlotBlock[] = useMemo(() => {
     if (!activeTutor) return [];
     const tutorTZ = activeTutor.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -473,7 +492,7 @@ export default function TutorsLobbyPage() {
 
       const { year: ty, month: tm, day: td } = getYMDInTZ(noonUTC, tutorTZ);
 
-      const abs: AbsRange[] = cleaned
+      const absRaw: AbsRange[] = cleaned
         .map((r) => {
           const sMin = hmToMinutes(r.start);
           const eMin = hmToMinutes(r.end);
@@ -486,6 +505,9 @@ export default function TutorsLobbyPage() {
         })
         .filter((r) => r.endMs > r.startMs)
         .sort((a, b) => a.startMs - b.startMs);
+
+      // *** Important: coalesce overlaps/adjacency ***
+      const abs = mergeAbsRanges(absRaw);
 
       blocks.push({
         dayHeader: fmtDateInTZ(+dayDateStudent, studentTZ),
@@ -710,7 +732,7 @@ export default function TutorsLobbyPage() {
     const eHM = normalizeHM(endHM);
     if (hmToMinutes(eHM) <= hmToMinutes(sHM)) return null;
 
-    const base = startOfWeekSunday(new Date()); // this week (student tz reference)
+    const base = startOfWeekSunday(new Date());
     const target = addDays(base, dayDow);
     const { year, month, day } = getYMDInTZ(+target, tz);
     const [sH, sM] = sHM.split(":").map((x) => parseInt(x, 10));
@@ -719,7 +741,6 @@ export default function TutorsLobbyPage() {
     const endCandidate = wallTimeToUTC(year, month, day, eH, eM, tz);
 
     const now = Date.now();
-    // if already passed today, roll forward 7 days
     const nextStart = start <= now ? start + 7 * DAY_MS : start;
     const nextEnd = endCandidate <= now ? endCandidate + 7 * DAY_MS : endCandidate;
     return { start: nextStart, end: nextEnd };
@@ -727,18 +748,16 @@ export default function TutorsLobbyPage() {
 
   // Does tutor's weekly availability cover this UTC window at the next occurrence?
   function tutorCoversWindowWeekly(t: TutorRow, windowStartUTC: number, windowEndUTC: number): boolean {
-    if (!t.availability) return false; // require availability on card list for strict filtering
+    if (!t.availability) return false;
 
     const tutorTZ = t.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-    // Tutor-local weekday for window start
     const tutorDow = getWeekdayInTZ(windowStartUTC, tutorTZ);
     const key = weekdayKeyFromDow(tutorDow);
 
     const ranges = (t.availability[key] || []) as TimeRange[];
     if (!ranges.length) return false;
 
-    // Convert the UTC window to tutor local HH:mm
     const sHM = hm24InTZ(windowStartUTC, tutorTZ);
     const eHM = hm24InTZ(windowEndUTC, tutorTZ);
     const sMin = hmToMinutes(sHM);
@@ -762,7 +781,6 @@ export default function TutorsLobbyPage() {
     }
 
     (async () => {
-      // get bookings in a narrow window around the target (±1 day)
       const startQ = occ.start - DAY_MS;
       const endQ = occ.end + DAY_MS;
       const qRef = query(collection(db, "bookings"));
@@ -783,7 +801,7 @@ export default function TutorsLobbyPage() {
     })().catch((e) => console.error(e));
   }, [filterDay, filterStartHM, filterEndHM, studentTZ]);
 
-  // Apply the filter: (1) availability covers window (2) not booked at that time
+  // Apply the filter
   const filteredTutors = useMemo(() => {
     if (filterDay === null || !filterStartHM || !filterEndHM) return tutors;
 
@@ -791,10 +809,8 @@ export default function TutorsLobbyPage() {
     if (!occ) return [];
 
     return tutors.filter((t) => {
-      // Require coverage by availability
       if (!tutorCoversWindowWeekly(t, occ.start, occ.end)) return false;
 
-      // Hide if already booked for that occurrence
       const bookings = filterBookingsByTutor[t.uid] || [];
       const isBooked = bookings.some((b) => overlaps(occ.start, occ.end, b));
       if (isBooked) return false;
@@ -888,7 +904,6 @@ export default function TutorsLobbyPage() {
             </div>
           </div>
 
-          {/* Introduction from tutorIntro */}
           <div style={{ fontSize: 13, color: "rgba(255,255,255,0.8)" }}>
             {t.introduction ? (
               <span style={{ display: "block", whiteSpace: "pre-wrap" }}>{t.introduction}</span>
@@ -921,10 +936,8 @@ export default function TutorsLobbyPage() {
   }, [filteredTutors, openTutorModal]);
 
   /* ===================== UI: Shell ===================== */
-  // break 28 days into 4 arrays of 7 for rendering
   const weeks4 = useMemo(() => {
     const chunks: any[][] = [];
-    // slotBlocks is defined earlier; re-derive type inline
     for (let w = 0; w < 4; w++) {
       chunks.push((slotBlocks as any[]).slice(w * 7, w * 7 + 7));
     }
@@ -1290,7 +1303,6 @@ function AvailabilityModal({
     setToast,
   } = form;
 
-  // helpers reused from upper scope
   function addDays(d: Date, days: number) {
     const c = new Date(d);
     c.setDate(c.getDate() + days);
@@ -1300,7 +1312,6 @@ function AvailabilityModal({
     return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", timeZone: tz }).format(ms);
   }
 
-  // break 28 days into 4 arrays of 7 for rendering
   const weeks4 = useMemo(() => {
     const chunks: any[][] = [];
     for (let w = 0; w < 4; w++) {
@@ -1460,10 +1471,8 @@ function AvailabilityModal({
 
                     type Piece = { startMs: number; endMs: number; kind: "past" | "booked" | "free" };
 
-                    // Snap now to the minute for clean labels and cuts
                     const nowFloor = Math.floor(nowMs / 60000) * 60000;
 
-                    // Build a set of atomic segments using cut points, then merge with precedence.
                     const segmentsMap = new Map<
                       string,
                       { startMs: number; endMs: number; kind: Piece["kind"] }
@@ -1504,14 +1513,13 @@ function AvailabilityModal({
                         if (e <= s) continue;
 
                         const isBooked = booked.some((bk) => s < bk.end && e > bk.start);
-                        const isPast = e <= nowFloor; // whole segment finished
+                        const isPast = e <= nowFloor;
                         const kind: Piece["kind"] = isBooked ? "booked" : isPast ? "past" : "free";
 
                         addSegment(s, e, kind);
                       }
                     }
 
-                    // Collapse to array, sort, and coalesce adjacent segments with same kind
                     const piecesSorted = Array.from(segmentsMap.values()).sort((a, b) => a.startMs - b.startMs);
                     const piecesAll: Piece[] = [];
                     for (const seg of piecesSorted) {
