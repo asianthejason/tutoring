@@ -181,7 +181,8 @@ export default function TutorDashboardPage() {
             id: docSnap.id,
             studentName: b.studentName,
             studentEmail: b.studentEmail,
-            startTime: typeof b.startTime === "number" ? b.startTime : (b.startTime?.toMillis?.() ?? undefined),
+            startTime:
+              typeof b.startTime === "number" ? b.startTime : b.startTime?.toMillis?.() ?? undefined,
             durationMin: b.durationMin,
             roomId: b.roomId,
           });
@@ -305,33 +306,20 @@ export default function TutorDashboardPage() {
 
   const statusUI = statusColors(status || "offline");
 
-  const modeBanner =
+  const modeChip =
     roomMode ? (
-      <div
+      <span
         style={{
-          marginTop: 8,
+          padding: "4px 8px",
+          borderRadius: 999,
+          border: "1px solid rgba(255,255,255,0.2)",
+          background: roomMode === "session" ? "rgba(212,162,60,0.15)" : "rgba(80,200,120,0.15)",
           fontSize: 12,
-          lineHeight: 1.4,
-          color: "rgba(255,255,255,0.85)",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 8,
         }}
+        title={roomMode === "session" ? `Booking: ${currentBookingId ?? "-"}` : "Homework Help lobby"}
       >
-        <span
-          style={{
-            padding: "4px 8px",
-            borderRadius: 999,
-            border: "1px solid rgba(255,255,255,0.2)",
-            background: roomMode === "session" ? "rgba(212,162,60,0.15)" : "rgba(80,200,120,0.15)",
-          }}
-        >
-          {roomMode === "session" ? "1-on-1 Session mode" : "Homework Help mode"}
-        </span>
-        {roomMode === "session" && currentBookingId ? (
-          <span style={{ opacity: 0.8 }}>Booking: {currentBookingId}</span>
-        ) : null}
-      </div>
+        {roomMode === "session" ? "Session mode" : "Homework Help"}
+      </span>
     ) : null;
 
   return (
@@ -350,7 +338,7 @@ export default function TutorDashboardPage() {
         paddingBottom: 24,
       }}
     >
-      {/* HEADER BAR */}
+      {/* HEADER BAR with Status Pill */}
       <header
         style={{
           width: "100%",
@@ -360,24 +348,38 @@ export default function TutorDashboardPage() {
           display: "flex",
           flexWrap: "wrap",
           justifyContent: "space-between",
-          alignItems: "stretch",
+          alignItems: "center",
           borderRadius: 12,
           background: "linear-gradient(180deg, rgba(255,255,255,0.07) 0%, rgba(15,15,15,0.0) 100%)",
           border: "1px solid rgba(255,255,255,0.15)",
           boxShadow: "0 30px 80px rgba(0,0,0,0.8), 0 2px 4px rgba(255,255,255,0.08) inset",
+          gap: 10,
         }}
       >
-        <div
-          style={{
-            color: "#fff",
-            display: "flex",
-            flexDirection: "column",
-            lineHeight: 1.2,
-          }}
-        >
-          <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>Apex Tutoring</div>
-          <div style={{ fontSize: 11, opacity: 0.7 }}>Tutor Dashboard</div>
-          {modeBanner}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.2 }}>
+            <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: "-0.03em" }}>Apex Tutoring</div>
+            <div style={{ fontSize: 11, opacity: 0.7 }}>Tutor Dashboard</div>
+          </div>
+
+          {/* Status pill inline in the navbar */}
+          <span
+            style={{
+              borderRadius: 999,
+              backgroundColor: statusUI.bg,
+              border: `1px solid ${statusUI.border}`,
+              color: statusUI.text,
+              fontSize: 12,
+              fontWeight: 600,
+              padding: "6px 10px",
+              lineHeight: 1,
+            }}
+            title={`Status reflects in-room activity. Room ID: ${roomId || "-"}`}
+          >
+            {statusUI.label}
+          </span>
+
+          {modeChip}
         </div>
 
         {/* right actions */}
@@ -397,81 +399,16 @@ export default function TutorDashboardPage() {
         </div>
       </header>
 
-      {/* MAIN CONTENT */}
+      {/* MAIN CONTENT: single column, sessions with tabs */}
       <section
         style={{
           flex: "1 1 auto",
           width: "100%",
           maxWidth: "1280px",
           margin: "24px auto 0",
-          display: "grid",
-          gridTemplateColumns: "minmax(280px, 1fr) minmax(320px, 2fr)",
-          gap: 24,
           padding: "0 24px",
         }}
       >
-        {/* LEFT: Status card */}
-        <div
-          style={{
-            background:
-              "radial-gradient(circle at 0% 0%, rgba(255,255,255,0.06) 0%, rgba(20,20,20,0.7) 60%)",
-            border: "1px solid rgba(255,255,255,0.12)",
-            boxShadow: "0 30px 80px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.6)",
-            borderRadius: 16,
-            padding: "16px 20px",
-            display: "flex",
-            flexDirection: "column",
-            gap: 16,
-            minHeight: 220,
-          }}
-        >
-          {/* tutor info */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <div style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.3 }}>{displayName || "Tutor"}</div>
-            <div
-              style={{
-                fontSize: 12,
-                color: "rgba(255,255,255,0.6)",
-                wordBreak: "break-word",
-                lineHeight: 1.4,
-              }}
-            >
-              {userEmail}
-            </div>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", lineHeight: 1.4 }}>
-              Room ID: <span style={{ color: "#fff" }}>{roomId || "(no room assigned)"}</span>
-            </div>
-          </div>
-
-          {/* status pill */}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
-            <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, minWidth: 120 }}>
-              <div
-                style={{
-                  borderRadius: 8,
-                  backgroundColor: statusUI.bg,
-                  border: `1px solid ${statusUI.border}`,
-                  color: statusUI.text,
-                  fontSize: 12,
-                  lineHeight: 1.2,
-                  fontWeight: 500,
-                  padding: "6px 10px",
-                  textAlign: "center",
-                }}
-              >
-                {statusUI.label}
-              </div>
-            </div>
-          </div>
-
-          <div style={{ fontSize: 11, lineHeight: 1.4, color: "rgba(255,255,255,0.5)" }}>
-            Status is automatic inside the room: <b>Waiting</b> (in room, no student) · <b>Busy</b> (with student) ·{" "}
-            <b>Offline</b> (not in room). Use <span style={{ color: "#9cf" }}>Open Homework Help Room</span> or a
-            session’s <span style={{ color: "#9cf" }}>Start Session</span>.
-          </div>
-        </div>
-
-        {/* RIGHT: Sessions with tabs */}
         <div
           style={{
             background:
