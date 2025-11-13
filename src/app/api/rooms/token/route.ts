@@ -111,7 +111,9 @@ async function hasActiveBookingForStudentAndTutor(
       const bStudent = String(pick(b, ["studentUid", "studentId"]) || "");
       if (bTutor === tutorUid && bStudent === studentUid) {
         const startMs = tsToMillis(pick(b, ["startTime", "start", "startsAt"]));
-        const durationMin = Number(pick(b, ["durationMin", "durationMinutes", "duration"]) || 0);
+        const durationMin = Number(
+          pick(b, ["durationMin", "durationMinutes", "duration"]) || 0
+        );
         if (startMs && durationMin > 0) {
           const ok = isNowWithinWindow(
             startMs,
@@ -120,19 +122,27 @@ async function hasActiveBookingForStudentAndTutor(
             SESSION_GRACE_BEFORE_MIN,
             SESSION_GRACE_AFTER_MIN
           );
-          if (ok) return { ok: true, matchedBookingId: bSnap.id, via: "explicitId" as const };
+          if (ok) {
+            return {
+              ok: true,
+              matchedBookingId: bSnap.id,
+              via: "explicitId" as const,
+            };
+          }
         }
       }
     }
     // else fall through to windowed search
   }
 
-  // 2) Window search around "now" (requires composite index)
-  const lowerBound = new Date(nowMs - minutes(BOOKING_LOOKBACK_MINUTES));
-  const upperBound = new Date(nowMs + minutes(BOOKING_LOOKBACK_MINUTES));
+  // 2) Window search around "now"
+  // IMPORTANT: your bookings store startTime as a NUMBER (ms since epoch),
+  // so the query bounds must also be numbers, not Date objects.
+  const lowerBound = nowMs - minutes(BOOKING_LOOKBACK_MINUTES);
+  const upperBound = nowMs + minutes(BOOKING_LOOKBACK_MINUTES);
 
-  // Your schema seems to use tutorId/studentId; try both pairs by running two queries.
-  // (Either one may hit depending on your data; whichever returns first with a match wins.)
+  // Your schema uses tutorId/studentId; but we also support tutorUid/studentUid.
+  // We run two queries; whichever finds a matching booking first wins.
   const queries = [
     adminDb
       .collection("bookings")
@@ -156,7 +166,9 @@ async function hasActiveBookingForStudentAndTutor(
     for (const doc of q.docs) {
       const b = doc.data() || {};
       const startMs = tsToMillis(pick(b, ["startTime", "start", "startsAt"]));
-      const durationMin = Number(pick(b, ["durationMin", "durationMinutes", "duration"]) || 0);
+      const durationMin = Number(
+        pick(b, ["durationMin", "durationMinutes", "duration"]) || 0
+      );
       if (!startMs || durationMin <= 0) continue;
 
       const ok = isNowWithinWindow(
@@ -166,7 +178,13 @@ async function hasActiveBookingForStudentAndTutor(
         SESSION_GRACE_BEFORE_MIN,
         SESSION_GRACE_AFTER_MIN
       );
-      if (ok) return { ok: true, matchedBookingId: doc.id, via: "windowSearch" as const };
+      if (ok) {
+        return {
+          ok: true,
+          matchedBookingId: doc.id,
+          via: "windowSearch" as const,
+        };
+      }
     }
   }
 
@@ -291,7 +309,11 @@ export async function POST(req: NextRequest) {
           );
         }
       } else {
-        debug.bookingCheck = { ok: true, skipped: true, reason: "not-in-session-mode" };
+        debug.bookingCheck = {
+          ok: true,
+          skipped: true,
+          reason: "not-in-session-mode",
+        };
       }
     }
 
