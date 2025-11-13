@@ -28,8 +28,6 @@ type TokenResp = {
   role: Role;
   name: string;
   bookingId?: string;
-  // NEW: echoed by the backend temporarily to help debug the join gate
-  serverDebug?: any;
 };
 
 type StrokePoint = { x: number; y: number };
@@ -154,9 +152,6 @@ export default function RoomPage() {
 
   const [status, setStatus] = useState("Joining…");
   const [error, setError] = useState<string | null>(null);
-
-  // NEW: show what the backend checked (temporary)
-  const [serverDebug, setServerDebug] = useState<any>(null);
 
   const [myIdentity, setMyIdentity] = useState<string>("");
   const myIdRef = useRef<string>("");
@@ -800,19 +795,15 @@ export default function RoomPage() {
           },
           body: JSON.stringify(bodyPayload),
         });
-
-        const payload = await res.json().catch(() => ({} as any));
-
         if (!res.ok) {
-          // Surface backend details to UI for easy diagnosis
-          if (payload?.serverDebug) setServerDebug(payload.serverDebug);
-          setError(payload?.error || `Token endpoint failed: ${res.status}`);
-          setStatus("Failed to join");
-          return;
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body?.error || `Token endpoint failed: ${res.status}`);
         }
 
-        const { token, url, roomName, identity, serverDebug: dbg } = payload as TokenResp;
-        if (dbg) setServerDebug(dbg);
+        const { token, url, roomName, identity } = (await res.json()) as TokenResp;
+
+        // clear any stale error from earlier “resolving…” phase
+        setError(null);
 
         setMyIdentity(identity);
         myIdRef.current = identity;
@@ -1604,28 +1595,6 @@ export default function RoomPage() {
             Error: {error}
           </p>
         )}
-
-        {/* TEMP: show what the server validated so we can pinpoint mismatches */}
-        {serverDebug && (
-          <pre
-            style={{
-              whiteSpace: "pre-wrap",
-              fontSize: 11,
-              opacity: 0.8,
-              color: "#9cf",
-              background: "rgba(100, 150, 255, 0.06)",
-              border: "1px solid rgba(100,150,255,0.2)",
-              borderRadius: 8,
-              padding: 8,
-              margin: "8px 0",
-              maxWidth: "1280px",
-              overflowX: "auto",
-            }}
-          >
-            {JSON.stringify(serverDebug, null, 2)}
-          </pre>
-        )}
-
         {inviteLinkUI}
         {showMissingRoomWarning && (
           <div
