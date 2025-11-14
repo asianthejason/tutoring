@@ -437,11 +437,11 @@ export default function RoomPage() {
     }
   }, [sessionRoomId]);
 
-  // Student/admin resolving bookingId → roomId
+  // Student resolving bookingId → roomId
   useEffect(() => {
     (async () => {
       if (!authed) return;
-      if (lockedRole === "tutor") return;
+      if (lockedRole !== "student") return; // <-- key change: only students run resolver
       if (sessionRoomId) return;
       if (modeFromQP !== "session") return;
       if (!bookingKey.id) return;
